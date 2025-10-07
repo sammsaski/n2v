@@ -9,7 +9,7 @@ Complete examples demonstrating neural network verification with NNV-Python.
 ### Installation
 
 ```bash
-cd nnv_py
+cd n2v
 pip install -e .
 ```
 
@@ -203,7 +203,7 @@ model.eval()
 ### 2. Create Input Specification
 
 ```python
-from nnv_py.sets import ImageStar
+from n2v.sets import ImageStar
 import numpy as np
 
 # Create L∞ ball around image
@@ -222,7 +222,7 @@ input_star = ImageStar.from_bounds(
 ### 3. Verify the Network
 
 ```python
-import nnv_py as nnv
+import n2v as nnv
 
 verifier = nnv.NeuralNetwork(model)
 output_stars = verifier.reach(input_star, method='exact-star')
@@ -256,7 +256,7 @@ print(f"Model is robust: {robust}")
 For debugging or understanding verification:
 
 ```python
-from nnv_py.nn.layers.layer_reach import reach_layer_star
+from n2v.nn.layers.layer_reach import reach_layer_star
 
 layers = list(model.children())
 current_stars = [input_star]
@@ -341,11 +341,11 @@ If star count grows beyond 1000-10000:
 
 ### Issue 2: Import Errors
 
-**Symptom**: `ModuleNotFoundError: No module named 'nnv_py'`
+**Symptom**: `ModuleNotFoundError: No module named 'n2v'`
 
 **Solution**:
 ```bash
-cd nnv_py
+cd n2v
 pip install -e .
 ```
 

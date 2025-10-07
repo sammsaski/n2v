@@ -6,9 +6,9 @@ import pytest
 import numpy as np
 import torch
 import torch.nn as nn
-from nnv_py.sets import Star, ImageStar
-from nnv_py.nn.reach.reach_star import reach_star_exact
-from nnv_py.nn.reach.reach_zono import reach_zono_approx
+from n2v.sets import Star, ImageStar
+from n2v.nn.reach.reach_star import reach_star_exact
+from n2v.nn.reach.reach_zono import reach_zono_approx
 
 
 class TestFeedforwardNetworks:
@@ -234,7 +234,7 @@ class TestApproximateMethods:
         )
         model.eval()
 
-        from nnv_py.sets import Zono
+        from n2v.sets import Zono
         lb = np.array([[0.0], [0.0], [0.0]])
         ub = np.array([[1.0], [1.0], [1.0]])
         input_zono = Zono.from_bounds(lb, ub)
@@ -259,12 +259,12 @@ class TestApproximateMethods:
         ub = np.array([[1.0], [1.0]])
 
         # Exact method
-        from nnv_py.sets import Star
+        from n2v.sets import Star
         star = Star.from_bounds(lb, ub)
         exact_output = reach_star_exact(model, [star])
 
         # Approximate method
-        from nnv_py.sets import Zono
+        from n2v.sets import Zono
         zono = Zono.from_bounds(lb, ub)
         approx_output = reach_zono_approx(model, [zono])
 

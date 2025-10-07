@@ -7,7 +7,7 @@ Translated from MATLAB NNV PosLin.m
 
 import numpy as np
 from typing import List, Optional
-from nnv_py.sets import Star, Zono
+from n2v.sets import Star, Zono
 
 
 def relu_star_exact(

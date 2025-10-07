@@ -10,8 +10,8 @@ import numpy as np
 import sys
 sys.path.insert(0, '..')
 
-import nnv_py as nnv
-from nnv_py.sets import Star, Box
+import n2v as nnv
+from n2v.sets import Star, Box
 
 
 # Define a simple neural network

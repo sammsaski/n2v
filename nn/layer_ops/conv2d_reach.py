@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List
-from nnv_py.sets import Star, Zono, ImageStar, ImageZono
+from n2v.sets import Star, Zono, ImageStar, ImageZono
 
 
 def conv2d_star(

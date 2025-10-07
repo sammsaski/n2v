@@ -4,7 +4,7 @@ Tests for layer dispatcher system.
 
 import pytest
 import torch.nn as nn
-from nnv_py.nn.layer_ops.dispatcher import reach_layer_star, reach_layer_zono, reach_layer_box
+from n2v.nn.layer_ops.dispatcher import reach_layer_star, reach_layer_zono, reach_layer_box
 
 
 class TestDispatcherStar:
@@ -176,7 +176,7 @@ class TestDispatcherBox:
 
     def test_dispatch_flatten(self):
         """Test dispatching Flatten layer with Box."""
-        from nnv_py.sets import Box
+        from n2v.sets import Box
         import numpy as np
 
         # Create a simple 2D image box

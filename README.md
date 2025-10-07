@@ -71,7 +71,7 @@ NNV-Python is a Python port of the MATLAB NNV tool, designed for:
 ### From Source
 
 ```bash
-cd nnv_py
+cd n2v
 pip install -e .
 ```
 
@@ -99,8 +99,8 @@ pip install torch numpy scipy cvxpy
 import torch
 import torch.nn as nn
 import numpy as np
-import nnv_py as nnv
-from nnv_py.sets import Star
+import n2v as nnv
+from n2v.sets import Star
 
 # Define your PyTorch model
 model = nn.Sequential(
@@ -132,7 +132,7 @@ for star in output_stars:
 
 ```python
 import torch.nn as nn
-from nnv_py.sets import ImageStar
+from n2v.sets import ImageStar
 
 # Define CNN model
 model = nn.Sequential(
@@ -211,7 +211,7 @@ print(f"Model is robust: {is_robust}")
 Represent sets as: **x = V * [1; α]** where **C*α ≤ d**
 
 ```python
-from nnv_py.sets import Star
+from n2v.sets import Star
 
 # From bounds
 star = Star.from_bounds(lb, ub)
@@ -232,7 +232,7 @@ bounds_lb, bounds_ub = star.get_bounds()
 Star sets for images with spatial structure:
 
 ```python
-from nnv_py.sets import ImageStar
+from n2v.sets import ImageStar
 
 # Create from image bounds
 image_star = ImageStar.from_bounds(
@@ -250,7 +250,7 @@ regular_star = image_star.flatten_to_star()
 Efficient representation: **x = c + V*α** where **-1 ≤ α_i ≤ 1**
 
 ```python
-from nnv_py.sets import Zono
+from n2v.sets import Zono
 
 # From center and generators
 zono = Zono(center, generators)
@@ -358,7 +358,7 @@ For ImageStar through CNN:
 ### Layer-by-Layer Analysis
 
 ```python
-from nnv_py.nn.layers.layer_reach import reach_layer_star
+from n2v.nn.layers.layer_reach import reach_layer_star
 
 layers = list(model.children())
 current_stars = [input_star]
@@ -522,7 +522,7 @@ pip install pytest pytest-cov
 
 ```bash
 # Generate HTML coverage report
-pytest --cov=nnv_py --cov-report=html
+pytest --cov=n2v --cov-report=html
 
 # View in browser
 open htmlcov/index.html
@@ -581,7 +581,7 @@ shape = img_star.get_image_shape()  # (h, w, c)
 ### Layer Operations
 
 ```python
-from nnv_py.nn.layers.layer_reach import reach_layer_star
+from n2v.nn.layers.layer_reach import reach_layer_star
 
 # Dispatch to appropriate layer operation
 output = reach_layer_star(
@@ -595,7 +595,7 @@ output = reach_layer_star(
 ### Utilities
 
 ```python
-from nnv_py.utils import lpsolver
+from n2v.utils import lpsolver
 
 # Solve LP
 result = lpsolver.solve_lp(
@@ -656,7 +656,7 @@ This tool is based on the MATLAB NNV tool:
 ### Project Structure
 
 ```
-nnv_py/
+n2v/
 ├── sets/              # Set representations (Star, Zono, Box, etc.)
 ├── nn/                # Neural network wrapper and layer operations
 │   ├── neural_network.py

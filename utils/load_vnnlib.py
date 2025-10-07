@@ -17,7 +17,7 @@ Assumptions for this function:
 
 import numpy as np
 from typing import Dict, List, Tuple
-from nnv_py.sets.halfspace import HalfSpace
+from n2v.sets.halfspace import HalfSpace
 
 
 def load_vnnlib(property_file: str) -> Dict:

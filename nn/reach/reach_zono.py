@@ -4,7 +4,7 @@ Zonotope-based reachability analysis for neural networks.
 
 import torch.nn as nn
 from typing import List, Optional
-from nnv_py.nn.layer_ops.dispatcher import reach_layer_zono
+from n2v.nn.layer_ops.dispatcher import reach_layer_zono
 
 
 def reach_zono_approx(

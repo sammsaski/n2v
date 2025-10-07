@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 import torch
 import torch.nn as nn
-from nnv_py.sets import Star, Zono, Box, ImageStar, ImageZono
+from n2v.sets import Star, Zono, Box, ImageStar, ImageZono
 
 
 # ============================================================================

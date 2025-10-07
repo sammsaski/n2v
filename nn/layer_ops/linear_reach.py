@@ -7,7 +7,7 @@ Works directly with PyTorch nn.Linear layers.
 import torch.nn as nn
 import numpy as np
 from typing import List
-from nnv_py.sets import Star, Zono, Box
+from n2v.sets import Star, Zono, Box
 
 
 def linear_star(layer: nn.Linear, input_stars: List[Star]) -> List[Star]:

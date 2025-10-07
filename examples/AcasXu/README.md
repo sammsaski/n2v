@@ -53,7 +53,7 @@ ACAS Xu (Airborne Collision Avoidance System X for Unmanned Aircraft) is a safet
 ## Usage
 
 ```bash
-cd /Users/samuel/milos/rgit/nnv2/nnv_py/examples/AcasXu
+cd /Users/samuel/milos/rgit/nnv2/n2v/examples/AcasXu
 python verify_acasxu.py
 ```
 
@@ -145,7 +145,7 @@ Unit tests are provided in:
 
 Run tests:
 ```bash
-cd /Users/samuel/milos/rgit/nnv2/nnv_py
+cd /Users/samuel/milos/rgit/nnv2/n2v
 pytest tests/test_load_vnnlib.py -v
 pytest tests/test_verify_specification.py -v
 pytest tests/test_sets.py::TestHalfSpace -v
@@ -161,7 +161,7 @@ pytest tests/test_sets.py::TestHalfSpace -v
 
 ### Python vs MATLAB
 
-The Python implementation (`nnv_py`) mirrors the MATLAB implementation (`nnv`) with key differences:
+The Python implementation (`n2v`) mirrors the MATLAB implementation (`nnv`) with key differences:
 
 **MATLAB** (`verify_specification.m`):
 - Uses `Star.intersectHalfSpace()` method

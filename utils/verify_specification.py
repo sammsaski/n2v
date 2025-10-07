@@ -8,7 +8,7 @@ or unsafe region to prove).
 
 import numpy as np
 from typing import Union, List
-from nnv_py.sets import Star, HalfSpace
+from n2v.sets import Star, HalfSpace
 
 
 def verify_specification(reach_set: Union[List[Star], List], property: Union[dict, List[dict], HalfSpace, List[HalfSpace]]) -> int:

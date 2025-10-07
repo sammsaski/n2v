@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Tuple
-from nnv_py.sets import Star, ImageStar, ImageZono, Zono, Box
+from n2v.sets import Star, ImageStar, ImageZono, Zono, Box
 
 
 def avgpool2d_star(

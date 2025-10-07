@@ -109,7 +109,7 @@ nn.AvgPool2d(2, 2)  # Linear → no splitting!
 
 ```bash
 pip install torch torchvision numpy matplotlib cvxpy scipy
-pip install -e ../../  # Install nnv_py
+pip install -e ../../  # Install n2v
 ```
 
 ### 2. Run Notebooks in Order
@@ -243,7 +243,7 @@ Output: 10 class scores
 ### 2. Reachability Analysis
 
 ```python
-from nnv_py.nn.reach.reach_star import reach_star_exact
+from n2v.nn.reach.reach_star import reach_star_exact
 
 output_stars = reach_star_exact(model, [input_star])
 ```
@@ -308,14 +308,14 @@ torch.save(model.state_dict(), 'model.pth')
 
 ```python
 # For FC networks
-from nnv_py.sets import Star
+from n2v.sets import Star
 epsilon = 0.02
 lb = np.clip(image - epsilon, 0, 1)
 ub = np.clip(image + epsilon, 0, 1)
 input_star = Star.from_bounds(lb, ub)
 
 # For CNNs
-from nnv_py.sets import ImageStar
+from n2v.sets import ImageStar
 input_star = ImageStar.from_bounds(
     lb, ub, height=28, width=28, num_channels=1
 )
@@ -324,7 +324,7 @@ input_star = ImageStar.from_bounds(
 ### 3. Verify
 
 ```python
-from nnv_py.nn.reach.reach_star import reach_star_exact
+from n2v.nn.reach.reach_star import reach_star_exact
 
 output_stars = reach_star_exact(model, [input_star])
 

@@ -5,11 +5,11 @@ This module provides various set-based representations used in NNV for
 propagating input specifications through neural networks.
 """
 
-from nnv_py.sets.box import Box
-from nnv_py.sets.zono import Zono
-from nnv_py.sets.star import Star
-from nnv_py.sets.image_star import ImageStar
-from nnv_py.sets.image_zono import ImageZono
-from nnv_py.sets.halfspace import HalfSpace
+from n2v.sets.box import Box
+from n2v.sets.zono import Zono
+from n2v.sets.star import Star
+from n2v.sets.image_star import ImageStar
+from n2v.sets.image_zono import ImageZono
+from n2v.sets.halfspace import HalfSpace
 
 __all__ = ["Box", "Zono", "Star", "ImageStar", "ImageZono", "HalfSpace"]

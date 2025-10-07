@@ -17,9 +17,9 @@ from onnx2torch import convert
 from scipy.io import savemat, loadmat
 
 # Import NNV-Python
-from nnv_py.sets import Star
-from nnv_py.nn.reach.reach_star import reach_star_exact, reach_star_approx
-from nnv_py.utils.model_loader import load_onnx
+from n2v.sets import Star
+from n2v.nn.reach.reach_star import reach_star_exact, reach_star_approx
+from n2v.utils.model_loader import load_onnx
 
 torch.manual_seed(42)
 np.random.seed(42)

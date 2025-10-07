@@ -6,7 +6,7 @@ Translated from MATLAB NNV ImageZono.m
 """
 
 import numpy as np
-from nnv_py.sets.zono import Zono
+from n2v.sets.zono import Zono
 
 
 class ImageZono(Zono):

@@ -4,7 +4,7 @@ Tests for set representations: Star, Zono, Box, HalfSpace.
 
 import pytest
 import numpy as np
-from nnv_py.sets import Star, Zono, Box, HalfSpace
+from n2v.sets import Star, Zono, Box, HalfSpace
 
 
 class TestStar:

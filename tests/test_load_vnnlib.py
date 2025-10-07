@@ -6,8 +6,8 @@ import pytest
 import numpy as np
 import tempfile
 import os
-from nnv_py.utils.load_vnnlib import load_vnnlib
-from nnv_py.sets import HalfSpace
+from n2v.utils.load_vnnlib import load_vnnlib
+from n2v.sets import HalfSpace
 
 
 class TestLoadVNNLib:

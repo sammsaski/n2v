@@ -4,7 +4,7 @@ Tests for image set representations: ImageStar, ImageZono.
 
 import pytest
 import numpy as np
-from nnv_py.sets import ImageStar, ImageZono, Star, Zono
+from n2v.sets import ImageStar, ImageZono, Star, Zono
 
 
 class TestImageStar:

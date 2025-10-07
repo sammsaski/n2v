@@ -4,7 +4,7 @@ Flatten layer reachability operations.
 
 import torch.nn as nn
 from typing import List
-from nnv_py.sets import Star, Zono, Box, ImageStar, ImageZono
+from n2v.sets import Star, Zono, Box, ImageStar, ImageZono
 
 
 def flatten_star(layer: nn.Flatten, input_stars: List[Star]) -> List[Star]:

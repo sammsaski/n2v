@@ -25,7 +25,7 @@ pytest -v
 pytest tests/test_sets.py
 
 # Run with coverage
-pytest --cov=nnv_py --cov-report=html
+pytest --cov=n2v --cov-report=html
 ```
 
 ---
@@ -284,10 +284,10 @@ Generate detailed coverage:
 
 ```bash
 # HTML report
-pytest --cov=nnv_py --cov-report=html
+pytest --cov=n2v --cov-report=html
 
 # Terminal report
-pytest --cov=nnv_py --cov-report=term-missing
+pytest --cov=n2v --cov-report=term-missing
 
 # View HTML report
 open htmlcov/index.html
@@ -314,7 +314,7 @@ jobs:
           python-version: '3.9'
       - run: pip install -e .
       - run: pip install pytest pytest-cov
-      - run: pytest --cov=nnv_py
+      - run: pytest --cov=n2v
 ```
 
 ---

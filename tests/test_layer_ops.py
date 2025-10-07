@@ -6,8 +6,8 @@ import pytest
 import numpy as np
 import torch
 import torch.nn as nn
-from nnv_py.sets import Star, Zono, ImageStar, ImageZono
-from nnv_py.nn.layer_ops import (
+from n2v.sets import Star, Zono, ImageStar, ImageZono
+from n2v.nn.layer_ops import (
     linear_reach, relu_reach, conv2d_reach,
     maxpool2d_reach, avgpool2d_reach, flatten_reach
 )

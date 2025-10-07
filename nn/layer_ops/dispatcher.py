@@ -8,7 +8,7 @@ requiring custom layer wrapper classes.
 import torch.nn as nn
 import numpy as np
 from typing import List, Union
-from nnv_py.sets import Star, Zono, Box
+from n2v.sets import Star, Zono, Box
 
 
 def reach_layer_star(

@@ -10,9 +10,9 @@ Translated from the original MATLAB NNV tool by the VeriVital research group.
 __version__ = "2.0.0"
 __author__ = "NNV Team"
 
-from nnv_py.sets import Star, Zono, Box, ImageStar, ImageZono
-from nnv_py.nn import NeuralNetwork
-from nnv_py import utils
+from n2v.sets import Star, Zono, Box, ImageStar, ImageZono
+from n2v.nn import NeuralNetwork
+from n2v import utils
 
 __all__ = [
     "Star",

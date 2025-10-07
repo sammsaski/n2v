@@ -7,7 +7,7 @@ Translated from MATLAB NNV ImageStar.m
 
 import numpy as np
 from typing import Optional
-from nnv_py.sets.star import Star
+from n2v.sets.star import Star
 
 
 class ImageStar(Star):

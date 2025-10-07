@@ -4,8 +4,8 @@ Tests for verify_specification function.
 
 import pytest
 import numpy as np
-from nnv_py.utils.verify_specification import verify_specification
-from nnv_py.sets import Star, HalfSpace
+from n2v.utils.verify_specification import verify_specification
+from n2v.sets import Star, HalfSpace
 
 
 class TestVerifySpecificationBasic:

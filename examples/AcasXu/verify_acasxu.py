@@ -18,9 +18,9 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from nnv_py.sets import Star
-from nnv_py.nn.reach.reach_star import reach_star_exact, reach_star_approx
-from nnv_py.utils import load_vnnlib, verify_specification
+from n2v.sets import Star
+from n2v.nn.reach.reach_star import reach_star_exact, reach_star_approx
+from n2v.utils import load_vnnlib, verify_specification
 
 
 def verify_acasxu_property(network_file: str, property_file: str,

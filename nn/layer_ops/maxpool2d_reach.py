@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Tuple, Optional
-from nnv_py.sets import Star, ImageStar, ImageZono
+from n2v.sets import Star, ImageStar, ImageZono
 
 
 def maxpool2d_star(

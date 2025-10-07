@@ -303,7 +303,7 @@ problem.solve(solver='default')
 ### File Organization
 
 ```
-nnv_py/
+n2v/
 ├── __init__.py                 # Package exports
 ├── sets/                       # Set representations
 │   ├── star.py                 # Star sets
