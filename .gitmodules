@@ -1,0 +1,3 @@
+[submodule "onnx2torch"]
+	path = onnx2torch
+	url = https://github.com/sammsaski/onnx2torch.git
