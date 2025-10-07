@@ -1,0 +1,173 @@
+"""
+Pytest configuration and shared fixtures for NNV-Python tests.
+"""
+
+import pytest
+import numpy as np
+import torch
+import torch.nn as nn
+from nnv_py.sets import Star, Zono, Box, ImageStar, ImageZono
+
+
+# ============================================================================
+# Basic Set Fixtures
+# ============================================================================
+
+@pytest.fixture
+def simple_star():
+    """Create a simple 3D Star set."""
+    V = np.array([[1.0, 0.1, 0.0],
+                  [0.0, 0.0, 0.2],
+                  [0.0, 0.1, 0.0]])
+    C = np.array([[1.0, 0.0],
+                  [0.0, 1.0]])
+    d = np.array([[1.0], [1.0]])
+    pred_lb = np.array([[0.0], [0.0]])
+    pred_ub = np.array([[1.0], [1.0]])
+    return Star(V, C, d, pred_lb, pred_ub)
+
+
+@pytest.fixture
+def simple_zono():
+    """Create a simple 3D Zonotope."""
+    c = np.array([[0.5], [0.5], [0.5]])
+    V = np.array([[0.1, 0.0],
+                  [0.0, 0.1],
+                  [0.05, 0.05]])
+    return Zono(c, V)
+
+
+@pytest.fixture
+def simple_box():
+    """Create a simple 3D Box."""
+    lb = np.array([[0.0], [0.0], [0.0]])
+    ub = np.array([[1.0], [1.0], [1.0]])
+    return Box(lb, ub)
+
+
+@pytest.fixture
+def simple_image_star():
+    """Create a simple 4x4x1 ImageStar."""
+    lb = np.zeros((4, 4, 1))
+    ub = np.ones((4, 4, 1))
+    return ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+
+@pytest.fixture
+def simple_image_zono():
+    """Create a simple 4x4x1 ImageZono."""
+    lb = np.zeros((4, 4, 1))
+    ub = np.ones((4, 4, 1))
+    return ImageZono.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+
+# ============================================================================
+# PyTorch Model Fixtures
+# ============================================================================
+
+@pytest.fixture
+def simple_linear_model():
+    """Simple 2-layer feedforward network."""
+    model = nn.Sequential(
+        nn.Linear(3, 5),
+        nn.ReLU(),
+        nn.Linear(5, 2)
+    )
+    model.eval()
+    return model
+
+
+@pytest.fixture
+def simple_cnn_model():
+    """Simple CNN for testing."""
+    model = nn.Sequential(
+        nn.Conv2d(1, 4, kernel_size=3, padding=1),
+        nn.ReLU(),
+        nn.AvgPool2d(2, 2),
+        nn.Flatten(),
+        nn.Linear(16, 2)
+    )
+    model.eval()
+    return model
+
+
+@pytest.fixture
+def cnn_with_maxpool():
+    """CNN with MaxPool2D."""
+    model = nn.Sequential(
+        nn.Conv2d(1, 2, kernel_size=3, padding=1),
+        nn.ReLU(),
+        nn.MaxPool2d(2, 2),
+        nn.Flatten(),
+        nn.Linear(8, 2)
+    )
+    model.eval()
+    return model
+
+
+# ============================================================================
+# Test Data Fixtures
+# ============================================================================
+
+@pytest.fixture
+def random_seed():
+    """Set random seed for reproducibility."""
+    np.random.seed(42)
+    torch.manual_seed(42)
+    yield
+    # Reset after test
+    np.random.seed(None)
+
+
+@pytest.fixture
+def sample_image():
+    """Generate a sample 28x28 image."""
+    return np.random.rand(28, 28).astype(np.float32)
+
+
+@pytest.fixture
+def small_epsilon():
+    """Small perturbation value."""
+    return 0.01
+
+
+@pytest.fixture
+def medium_epsilon():
+    """Medium perturbation value."""
+    return 0.05
+
+
+# ============================================================================
+# Assertion Helpers
+# ============================================================================
+
+def assert_star_valid(star):
+    """Assert that a Star set is valid."""
+    assert star.V is not None
+    assert star.C is not None
+    assert star.d is not None
+    assert star.V.shape[1] == star.nVar + 1
+    assert star.C.shape[1] == star.nVar
+
+
+def assert_zono_valid(zono):
+    """Assert that a Zonotope is valid."""
+    assert zono.c is not None
+    assert zono.V is not None
+    assert len(zono.c.shape) == 2
+    assert zono.c.shape[1] == 1
+
+
+def assert_image_star_valid(img_star):
+    """Assert that an ImageStar is valid."""
+    assert_star_valid(img_star)
+    assert img_star.height > 0
+    assert img_star.width > 0
+    assert img_star.num_channels > 0
+    assert img_star.dim == img_star.height * img_star.width * img_star.num_channels
+
+
+# Make helpers available
+pytest.assert_star_valid = assert_star_valid
+pytest.assert_zono_valid = assert_zono_valid
+pytest.assert_image_star_valid = assert_image_star_valid

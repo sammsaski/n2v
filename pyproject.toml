@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nnv-python"
+version = "2.0.0"
+description = "Python Neural Network Verification Tool - Formal verification for deep learning models"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "NNV Team", email = "diego.manzanas.lopez@vanderbilt.edu"}
+]
+keywords = ["neural networks", "verification", "reachability", "formal methods", "pytorch"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "numpy>=1.20.0",
+    "scipy>=1.7.0",
+    "torch>=2.0.0",
+    "cvxpy>=1.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=3.0.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
+    "mypy>=0.950",
+]
+
+[project.urls]
+Homepage = "https://github.com/verivital/nnv"
+Documentation = "https://github.com/verivital/nnv"
+Repository = "https://github.com/verivital/nnv"
+
+[tool.setuptools]
+package-dir = {"nnv_py" = "."}
+packages = ["nnv_py", "nnv_py.sets", "nnv_py.nn", "nnv_py.nn.layer_ops", "nnv_py.nn.reach", "nnv_py.utils"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false

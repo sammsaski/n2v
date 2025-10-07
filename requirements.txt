@@ -1,0 +1,24 @@
+# NNV-Python Dependencies
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+numpy>=1.20.0
+scipy>=1.7.0
+torch>=2.0.0
+cvxpy>=1.2.0
+
+# Optional: For examples
+matplotlib>=3.3.0
+torchvision>=0.15.0
+
+# Optional: For Jupyter notebooks
+jupyter>=1.0.0
+ipykernel>=6.0.0
+
+# Optional: For ONNX model export/import (CompareMATLAB examples)
+onnx>=1.12.0
+onnxruntime>=1.12.0
+onnx2torch>=1.5.0
+
+# Optional: For nice tables in notebooks
+pandas>=1.3.0

@@ -1,0 +1,7 @@
+# Testing requirements for NNV-Python
+
+pytest>=7.0.0
+pytest-cov>=4.0.0
+
+# Optional: for better coverage reports
+coverage[toml]>=7.0.0

@@ -1,0 +1,43 @@
+NNV-MATLAB VERIFICATION RESULTS
+Baseline implementation
+======================================================================
+
+TEST CONFIGURATION:
+  Test sample label: 7
+  L∞ epsilon: 0.0039215686
+  Reach method: exact-star
+EVALUATION RESULTS:
+  Nominal prediction: 8
+  Lower bound prediction: 8
+  Upper bound prediction: 8
+
+NOMINAL OUTPUT LOGITS:
+  Class 0:        -1.3297809362
+  Class 1:        -5.9529390335
+  Class 2:        -0.3856106997
+  Class 3:         3.9721522331
+  Class 4:        -3.8848490715
+  Class 5:        -2.6138916016
+  Class 6:       -10.3729095459
+  Class 7:         8.6877393723 <-- PREDICTED
+  Class 8:        -2.1907858849
+  Class 9:         0.4681070447
+
+REACHABILITY ANALYSIS:
+  Number of output stars: 4
+  Computation time: 0.113401 seconds
+  Robustness result: VERIFIED ROBUST (1)
+
+OUTPUT BOUNDS:
+Class      Lower Bound          Upper Bound          Width          
+----------------------------------------------------------------------
+0          -1.5419847965        -1.0626971722        0.4792876244   
+1          -6.2445216179        -5.7423396111        0.5021820068   
+2          -0.7371275425        -0.0783473402        0.6587802023   
+3          3.8061726093         4.1405816078         0.3344089985   
+4          -4.1542463303        -3.7354717255        0.4187746048   
+5          -2.8609752655        -2.3270912170        0.5338840485   
+6          -10.6962146759       -10.0585746765       0.6376399994   
+7          8.2716236115         9.0131492615         0.7415256500    <-- TRUE CLASS
+8          -2.4257876873        -1.9599360228        0.4658516645   
+9          0.1359409243         0.7758445740         0.6399036497   
