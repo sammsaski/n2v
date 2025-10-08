@@ -29,6 +29,10 @@ jobs:
         pip install -r requirements.txt
         pip install -r requirements-test.txt
         
+    - name: Install n2v package
+      run: |
+        pip install -e .
+        
     - name: Run zonotope basic operations tests
       run: |
         python -m pytest tests/test_zono_basic_operations.py -v --tb=short
