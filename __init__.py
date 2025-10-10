@@ -13,6 +13,7 @@ __author__ = "NNV Team"
 from n2v.sets import Star, Zono, Box, ImageStar, ImageZono
 from n2v.nn import NeuralNetwork
 from n2v import utils
+from n2v.config import config, set_parallel, set_lp_solver, get_config
 
 __all__ = [
     "Star",
@@ -22,4 +23,8 @@ __all__ = [
     "ImageZono",
     "NeuralNetwork",
     "utils",
+    "config",
+    "set_parallel",
+    "set_lp_solver",
+    "get_config",
 ]

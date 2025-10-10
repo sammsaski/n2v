@@ -7,13 +7,16 @@ Translated from MATLAB NNV PosLin.m
 
 import numpy as np
 from typing import List, Optional
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from n2v.sets import Star, Zono
 
 
 def relu_star_exact(
     input_stars: List[Star],
     lp_solver: str = 'default',
-    dis_opt: Optional[str] = None
+    dis_opt: Optional[str] = None,
+    parallel: bool = None,
+    n_workers: int = None
 ) -> List[Star]:
     """
     Exact reachability for ReLU using Star sets.
@@ -22,18 +25,25 @@ def relu_star_exact(
         input_stars: List of input Star sets
         lp_solver: LP solver to use
         dis_opt: 'display' to show progress
+        parallel: Enable parallel Star processing (None = use global config)
+        n_workers: Number of parallel workers (None = auto-detect)
 
     Returns:
         List of output Star sets (may be more than input due to splitting)
     """
-    output_stars = []
+    # Check if we should use parallel processing
+    use_parallel = _should_use_star_parallel(len(input_stars), parallel, n_workers)
 
-    for star in input_stars:
-        # Process each star through exact ReLU
-        result = _relu_single_star_exact(star, lp_solver, dis_opt)
-        output_stars.extend(result)
-
-    return output_stars
+    if use_parallel:
+        return _relu_star_exact_parallel(input_stars, lp_solver, dis_opt, n_workers)
+    else:
+        # Sequential processing
+        output_stars = []
+        for star in input_stars:
+            # Process each star through exact ReLU
+            result = _relu_single_star_exact(star, lp_solver, dis_opt)
+            output_stars.extend(result)
+        return output_stars
 
 
 def _relu_single_star_exact(
@@ -934,3 +944,124 @@ def _get_mins(star: Star, indices: np.ndarray, lp_solver: str = 'default') -> np
         xmin[i], _ = star.get_range(int(idx), lp_solver)
 
     return xmin
+
+
+# ============================================================================
+# Star-Level Parallelization Functions
+# ============================================================================
+
+def _should_use_star_parallel(n_stars: int, parallel: bool = None, n_workers: int = None) -> bool:
+    """
+    Determine if Star-level parallelization should be used.
+
+    Args:
+        n_stars: Number of Stars to process
+        parallel: Explicit parallel setting (None = use global config)
+        n_workers: Number of workers (None = auto)
+
+    Returns:
+        True if parallel processing should be used
+    """
+    # Need at least 2 Stars to benefit from parallelization
+    if n_stars < 2:
+        return False
+
+    # Check explicit setting
+    if parallel is not None:
+        return parallel
+
+    # Check global config
+    try:
+        from n2v.config import config as global_config
+        # Use star_parallel setting if available, otherwise check if parallel is enabled
+        if hasattr(global_config, 'star_parallel'):
+            return global_config.star_parallel and n_stars >= 2
+        elif hasattr(global_config, 'parallel_lp'):
+            # If LP parallel is enabled, also enable Star parallel for n_stars >= 2
+            return global_config.parallel_lp and n_stars >= 2
+    except ImportError:
+        pass
+
+    # Default: use parallel if we have multiple Stars
+    return n_stars >= 4  # Conservative threshold
+
+
+def _get_star_workers(n_stars: int, n_workers: int = None) -> int:
+    """
+    Determine optimal number of workers for Star parallelization.
+
+    Args:
+        n_stars: Number of Stars to process
+        n_workers: Requested workers (None = auto-detect)
+
+    Returns:
+        Number of workers to use
+    """
+    if n_workers is not None:
+        return max(1, min(n_workers, n_stars))
+
+    # Check global config
+    try:
+        from n2v.config import config as global_config
+        workers = global_config.n_workers if hasattr(global_config, 'n_workers') else 4
+    except ImportError:
+        workers = 4
+
+    # Don't use more workers than Stars
+    return max(1, min(workers, n_stars))
+
+
+def _relu_star_exact_parallel(
+    input_stars: List[Star],
+    lp_solver: str = 'default',
+    dis_opt: Optional[str] = None,
+    n_workers: int = None
+) -> List[Star]:
+    """
+    Process multiple Stars through exact ReLU in parallel.
+
+    Uses ProcessPoolExecutor to distribute Stars across workers.
+
+    Args:
+        input_stars: List of input Stars
+        lp_solver: LP solver
+        dis_opt: Display option
+        n_workers: Number of workers
+
+    Returns:
+        List of output Stars
+    """
+    workers = _get_star_workers(len(input_stars), n_workers)
+
+    if workers == 1 or len(input_stars) == 1:
+        # Fall back to sequential
+        output_stars = []
+        for star in input_stars:
+            result = _relu_single_star_exact(star, lp_solver, dis_opt)
+            output_stars.extend(result)
+        return output_stars
+
+    # Parallel processing
+    output_stars = []
+
+    if dis_opt == 'display':
+        print(f'  ⚡ Processing {len(input_stars)} Stars in parallel ({workers} workers)')
+
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        # Submit all Stars for processing
+        future_to_idx = {
+            executor.submit(_relu_single_star_exact, star, lp_solver, None): idx
+            for idx, star in enumerate(input_stars)
+        }
+
+        # Collect results as they complete
+        for future in as_completed(future_to_idx):
+            try:
+                result = future.result()
+                output_stars.extend(result)
+            except Exception as e:
+                if dis_opt == 'display':
+                    print(f'  Error processing Star: {e}')
+                # Continue with other Stars
+
+    return output_stars

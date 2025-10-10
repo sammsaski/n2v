@@ -18,13 +18,15 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+import n2v
 from n2v.sets import Star
 from n2v.nn.reach.reach_star import reach_star_exact, reach_star_approx
 from n2v.utils import load_vnnlib, verify_specification
 
 
 def verify_acasxu_property(network_file: str, property_file: str,
-                           reach_method: str = 'approx', timeout: float = 300.0):
+                           reach_method: str = 'approx', timeout: float = 300.0,
+                           use_parallel: bool = False, n_workers: int = None):
     """
     Verify an ACAS Xu property.
 
@@ -33,15 +35,31 @@ def verify_acasxu_property(network_file: str, property_file: str,
         property_file: Path to VNN-LIB property file
         reach_method: Reachability method ('exact' or 'approx')
         timeout: Timeout in seconds
+        use_parallel: Enable parallel LP solving for better performance
+        n_workers: Number of parallel workers (None = auto-detect)
 
     Returns:
         result: Verification result (0=violated, 1=verified, 2=unknown)
         time_elapsed: Computation time in seconds
         info: Dictionary with additional information
     """
+    # Configure parallel processing if requested
+    if use_parallel:
+        # Enable both LP-level and Star-level parallelization
+        n2v.set_parallel(True, n_workers=n_workers)
+    else:
+        n2v.set_parallel(False)
+
     print("="*80)
     print(f"Verifying: {os.path.basename(network_file)} with {os.path.basename(property_file)}")
     print("="*80)
+
+    # Display parallel configuration
+    if use_parallel:
+        workers = n_workers if n_workers else "auto"
+        print(f"\n⚡ Parallel processing enabled (workers: {workers})")
+        print(f"   - LP-level parallelization: ON (within Stars)")
+        print(f"   - Star-level parallelization: ON (across Stars)")
 
     # Load network
     print("\n1. Loading network...")
@@ -76,7 +94,8 @@ def verify_acasxu_property(network_file: str, property_file: str,
 
     try:
         if reach_method == 'exact':
-            reach_sets = reach_star_exact(net, [input_star])
+            reach_sets = reach_star_exact(net, [input_star],
+                                         parallel=use_parallel, n_workers=n_workers)
         else:  # approx
             reach_sets = reach_star_approx(net, [input_star])
 
@@ -172,6 +191,7 @@ Examples:
   %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib
   %(prog)s onnx/ACASXU_run2a_1_5_batch_2000.onnx vnnlib/prop_3.vnnlib --method approx
   %(prog)s path/to/network.onnx path/to/property.vnnlib --timeout 600
+  %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --parallel --workers 4
         """
     )
     parser.add_argument('network', type=str,
@@ -182,6 +202,10 @@ Examples:
                         help='Reachability method: exact or approx (default: exact)')
     parser.add_argument('--timeout', type=float, default=300.0,
                         help='Timeout in seconds (default: 300.0)')
+    parser.add_argument('--parallel', action='store_true',
+                        help='Enable parallel LP solving for better performance')
+    parser.add_argument('--workers', type=int, default=None,
+                        help='Number of parallel workers (default: auto-detect based on CPU cores)')
 
     args = parser.parse_args()
 
@@ -209,6 +233,12 @@ Examples:
     print("="*80)
     print(f"Network: {network_file.name}")
     print(f"Property: {property_file.name}")
+    print(f"Method: {args.method}")
+    if args.parallel:
+        workers = args.workers if args.workers else "auto"
+        print(f"Parallel: enabled (workers: {workers})")
+    else:
+        print(f"Parallel: disabled")
     print("="*80 + "\n")
 
     try:
@@ -216,7 +246,9 @@ Examples:
             str(network_file),
             str(property_file),
             reach_method=args.method,
-            timeout=args.timeout
+            timeout=args.timeout,
+            use_parallel=args.parallel,
+            n_workers=args.workers
         )
 
         print("\n" + "="*80)

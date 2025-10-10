@@ -38,8 +38,11 @@ def reach_layer_star(
     elif isinstance(layer, nn.ReLU):
         lp_solver = kwargs.get('lp_solver', 'default')
         dis_opt = kwargs.get('dis_opt', None)
+        parallel = kwargs.get('parallel', None)
+        n_workers = kwargs.get('n_workers', None)
         if method == 'exact':
-            return relu_reach.relu_star_exact(input_stars, lp_solver=lp_solver, dis_opt=dis_opt)
+            return relu_reach.relu_star_exact(input_stars, lp_solver=lp_solver, dis_opt=dis_opt,
+                                             parallel=parallel, n_workers=n_workers)
         else:
             relax_factor = kwargs.get('relax_factor', 0.5)
             relax_method = kwargs.get('relax_method', 'standard')

@@ -12,7 +12,9 @@ def reach_star_exact(
     input_stars: List,
     num_cores: int = 1,
     lp_solver: str = 'default',
-    dis_opt: Optional[str] = None
+    dis_opt: Optional[str] = None,
+    parallel: bool = None,
+    n_workers: int = None
 ) -> List:
     """
     Exact reachability using Star sets.
@@ -22,9 +24,11 @@ def reach_star_exact(
     Args:
         model: PyTorch model
         input_stars: List of input Star sets
-        num_cores: Number of cores for parallel computation (TODO)
+        num_cores: Number of cores for parallel computation (deprecated, use n_workers)
         lp_solver: LP solver to use
         dis_opt: 'display' to show progress
+        parallel: Enable Star-level parallelization for ReLU layers
+        n_workers: Number of parallel workers for Star processing
 
     Returns:
         List of output Star sets
@@ -37,7 +41,8 @@ def reach_star_exact(
         if isinstance(model, fx.GraphModule):
             return _reach_graphmodule_star(
                 model, input_stars, method='exact',
-                lp_solver=lp_solver, dis_opt=dis_opt
+                lp_solver=lp_solver, dis_opt=dis_opt,
+                parallel=parallel, n_workers=n_workers
             )
     except ImportError:
         pass
@@ -59,7 +64,9 @@ def reach_star_exact(
             current_stars,
             method='exact',
             lp_solver=lp_solver,
-            dis_opt=dis_opt
+            dis_opt=dis_opt,
+            parallel=parallel,
+            n_workers=n_workers
         )
 
         if dis_opt == 'display':

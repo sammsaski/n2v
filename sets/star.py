@@ -352,18 +352,103 @@ class Star:
 
         return xmin, xmax
 
-    def get_ranges(self, lp_solver: str = 'default') -> Tuple[np.ndarray, np.ndarray]:
+    def get_ranges(self, lp_solver: str = 'default', parallel: bool = None,
+                   n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute exact ranges for all dimensions.
 
+        Args:
+            lp_solver: LP solver to use
+            parallel: If True, use parallel LP solving. If None, use global config (default: None)
+            n_workers: Number of parallel workers. If None, use global config (default: None)
+
         Returns:
             Tuple of (lb, ub) arrays
+
+        Note:
+            Parallel solving is beneficial for high-dimensional outputs (dim > 10).
+            For small dimensions, sequential solving is faster due to overhead.
+
+        Example:
+            >>> # Use global configuration
+            >>> lb, ub = star.get_ranges()
+
+            >>> # Force parallel with 8 workers
+            >>> lb, ub = star.get_ranges(parallel=True, n_workers=8)
+
+            >>> # Force sequential
+            >>> lb, ub = star.get_ranges(parallel=False)
         """
+        # Import config here to avoid circular dependency
+        try:
+            from n2v.config import config as global_config
+        except ImportError:
+            # If config not available, use defaults
+            use_parallel = parallel if parallel is not None else False
+            n_workers = n_workers if n_workers is not None else 4
+        else:
+            # Determine if we should use parallel
+            if parallel is None:
+                use_parallel = global_config.should_use_parallel(self.dim)
+            else:
+                use_parallel = parallel and self.dim > 1
+
+            # Determine number of workers
+            if n_workers is None:
+                n_workers = global_config.get_n_workers(self.dim)
+
+        if use_parallel:
+            return self._get_ranges_parallel(lp_solver, n_workers)
+
+        # Sequential version
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
         for i in range(self.dim):
             lb[i], ub[i] = self.get_range(i, lp_solver)
+
+        return lb, ub
+
+    def _get_ranges_parallel(self, lp_solver: str = 'default',
+                            n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute ranges for all dimensions in parallel using ThreadPoolExecutor.
+
+        Args:
+            lp_solver: LP solver to use
+            n_workers: Number of parallel workers
+
+        Returns:
+            Tuple of (lb, ub) arrays
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        lb = np.zeros((self.dim, 1))
+        ub = np.zeros((self.dim, 1))
+
+        def compute_range(i):
+            """Compute range for dimension i."""
+            try:
+                return i, self.get_range(i, lp_solver)
+            except Exception as e:
+                # If LP fails, return None to indicate failure
+                return i, (None, None)
+
+        # Use ThreadPoolExecutor for IO-bound LP solving
+        # (LP solvers release GIL when calling external libraries)
+        with ThreadPoolExecutor(max_workers=n_workers) as executor:
+            # Submit all tasks
+            futures = [executor.submit(compute_range, i) for i in range(self.dim)]
+
+            # Collect results
+            for future in futures:
+                i, (lb_i, ub_i) = future.result()
+                if lb_i is not None and ub_i is not None:
+                    lb[i] = lb_i
+                    ub[i] = ub_i
+                else:
+                    # LP failed for this dimension, use estimate
+                    lb[i], ub[i] = self.estimate_range(i)
 
         return lb, ub
 
