@@ -2,8 +2,8 @@
 %  if f(x) = y, then forall x' in X s.t. ||x - x'||_{\infty} <= eps,
 %  then f(x') = y = f(x)
 
-% Load network 
-modelName = '/Users/samuel/milos/rgit/nnv2/nnv_py/examples/CompareMATLAB/outputs/fc_mnist.onnx';
+% Load network
+modelName = 'outputs/fc_mnist.onnx';
 netonnx = importONNXNetwork(modelName, "InputDataFormats", "BCSS", "OutputDataFormats", "BC");
 
 % Create NNV model
@@ -11,9 +11,9 @@ net = matlab2nnv(netonnx);
 net.OutputSize = 10;
 numClasses = net.OutputSize;
 
-%% 
+%%
 % Load the data
-load('/Users/samuel/milos/rgit/nnv2/nnv_py/examples/CompareMATLAB/test_sample.mat');
+load('test_sample.mat');
 l = label + 1; % label gets loaded from the data
 
 %%

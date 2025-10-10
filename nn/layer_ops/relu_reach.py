@@ -408,6 +408,7 @@ def _relu_single_zono(I: Zono) -> Zono:
 
     new_c = I.c.copy()
     new_V = I.V.copy()
+    n_orig_generators = I.V.shape[1]  # Track original number of generators
 
     for i in range(I.dim):
         li, ui = lb[i, 0], ub[i, 0]
@@ -426,7 +427,8 @@ def _relu_single_zono(I: Zono) -> Zono:
             lambda_val = ui / (ui - li) if (ui - li) != 0 else 0
 
             new_c[i] = lambda_val * I.c[i, 0] + 0.5 * (1 - lambda_val) * ui
-            new_V[i, :] = lambda_val * I.V[i, :]
+            # Only modify original generators, not error generators added by previous neurons
+            new_V[i, :n_orig_generators] = lambda_val * I.V[i, :]
 
             # Add error term as new generator
             error = 0.5 * (1 - lambda_val) * ui
@@ -448,7 +450,7 @@ def relu_box(input_boxes: List) -> List:
     Returns:
         List of output Boxes
     """
-    from ....sets import Box
+    from n2v.sets import Box
 
     output_boxes = []
 

@@ -80,7 +80,8 @@ def verify_specification(reach_set: Union[List[Star], List], property: Union[dic
 
             S = Set.intersect_half_space(G, g)
 
-            if S is None or (isinstance(S, list) and len(S) == 0):
+            # Check if intersection is empty (no feasible intersection with unsafe region)
+            if S is None or (isinstance(S, list) and len(S) == 0) or (isinstance(S, Star) and S.is_empty_set()):
                 # No intersection with unsafe region = safe (unsat)
                 result = 1
             else:
@@ -114,7 +115,8 @@ def verify_specification(reach_set: Union[List[Star], List], property: Union[dic
 
                 S = Set.intersect_half_space(G, g)
 
-                if S is None or (isinstance(S, list) and len(S) == 0):
+                # Check if intersection is empty (no feasible intersection with unsafe region)
+                if S is None or (isinstance(S, list) and len(S) == 0) or (isinstance(S, Star) and S.is_empty_set()):
                     # No intersection, continue to next reach set
                     continue
                 else:

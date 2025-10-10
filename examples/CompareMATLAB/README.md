@@ -67,13 +67,18 @@ These notebooks demonstrate:
 ### Python Setup
 
 ```bash
-# Install dependencies
+# Navigate to n2v directory
+cd ../../
+
+# Install onnx2torch from submodule
+pip install -e utils/onnx2torch
+
+# Install other dependencies
 pip install torch torchvision numpy scipy matplotlib
-pip install onnx onnxruntime onnx2torch
+pip install onnx onnxruntime
 pip install pandas  # For nice tables
 
-# Install NNV-Python
-cd ../../
+# Install n2v
 pip install -e .
 ```
 

@@ -71,6 +71,33 @@ class Zono:
     def __repr__(self) -> str:
         return f"Zono(dim={self.dim}, n_generators={self.V.shape[1] if self.V.size > 0 else 0})"
 
+    @classmethod
+    def from_bounds(cls, lb: np.ndarray, ub: np.ndarray) -> 'Zono':
+        """
+        Create Zonotope from axis-aligned box bounds.
+
+        Args:
+            lb: Lower bounds (n,) or (n, 1)
+            ub: Upper bounds (n,) or (n, 1)
+
+        Returns:
+            Zonotope with center=(lb+ub)/2 and generators for each dimension
+        """
+        lb = np.asarray(lb, dtype=np.float64).reshape(-1, 1)
+        ub = np.asarray(ub, dtype=np.float64).reshape(-1, 1)
+
+        if lb.shape != ub.shape:
+            raise ValueError(f"lb and ub must have same shape, got {lb.shape} and {ub.shape}")
+
+        # Center at midpoint
+        c = (lb + ub) / 2.0
+
+        # Generators: one per dimension, each with range (ub-lb)/2
+        n = lb.shape[0]
+        V = np.diag(((ub - lb) / 2.0).flatten())
+
+        return cls(c, V)
+
     # ======================== Geometric Operations ========================
 
     def affine_map(self, W: np.ndarray, b: Optional[np.ndarray] = None) -> 'Zono':
@@ -302,17 +329,20 @@ class Zono:
 
     def get_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Get bounds using efficient clip method (Stanley Bak).
+        Get bounds of zonotope.
+
+        For Z = {c + V*alpha | alpha in [-1, 1]^m}, the bounds are:
+        lb[i] = c[i] - sum_j |V[i,j]|
+        ub[i] = c[i] + sum_j |V[i,j]|
 
         Returns:
             Tuple of (lb, ub) arrays
         """
-        # Separate positive and negative parts
-        V_pos = np.maximum(self.V, 0)
-        V_neg = np.minimum(self.V, 0)
+        # Sum absolute values of generators
+        sum_abs_generators = np.sum(np.abs(self.V), axis=1, keepdims=True)
 
-        lb = self.c + np.sum(V_neg, axis=1, keepdims=True)
-        ub = self.c + np.sum(V_pos, axis=1, keepdims=True)
+        lb = self.c - sum_abs_generators
+        ub = self.c + sum_abs_generators
 
         return lb, ub
 

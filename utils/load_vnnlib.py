@@ -60,9 +60,9 @@ def load_vnnlib(property_file: str) -> Dict:
             continue
 
         # Merge multi-line statements
+        lines_consumed = 1  # Default: single line
         if tline.count('(') != tline.count(')'):
             tline, lines_consumed = _merge_lines(lines, line_idx)
-            line_idx += lines_consumed
 
         # Process based on current phase
         if phase == "DeclareInput":
@@ -151,7 +151,7 @@ def load_vnnlib(property_file: str) -> Dict:
                 dim = 0
                 continue  # Redo this line in correct phase
 
-        line_idx += 1
+        line_idx += lines_consumed
 
     return property_dict
 

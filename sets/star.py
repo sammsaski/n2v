@@ -406,6 +406,8 @@ class Star:
         """
         Fast over-approximate ranges for all dimensions.
 
+        Also stores results in state_lb and state_ub for convenience.
+
         Returns:
             Tuple of (lb, ub) arrays
         """
@@ -414,6 +416,10 @@ class Star:
 
         for i in range(self.dim):
             lb[i], ub[i] = self.estimate_range(i)
+
+        # Store in state attributes for later use
+        self.state_lb = lb
+        self.state_ub = ub
 
         return lb, ub
 

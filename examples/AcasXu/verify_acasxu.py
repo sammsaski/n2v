@@ -45,33 +45,8 @@ def verify_acasxu_property(network_file: str, property_file: str,
 
     # Load network
     print("\n1. Loading network...")
-    print(f"   NOTE: ACAS Xu ONNX models have embedded weights as inputs.")
-    print(f"   Current limitation: onnx2torch doesn't support this format.")
-    print(f"   TODO: Implement custom ONNX loader or use ONNX Runtime wrapper.")
-    print(f"   ")
-    print(f"   For now, this is a demonstration of the verification workflow.")
-    print(f"   Skipping actual network loading...")
-
-    # TODO: Implement proper ONNX loading for ACAS Xu format
-    # For now, we'll create a dummy network for demonstration
-    import torch.nn as nn
-    net = nn.Sequential(
-        nn.Linear(5, 50),
-        nn.ReLU(),
-        nn.Linear(50, 50),
-        nn.ReLU(),
-        nn.Linear(50, 50),
-        nn.ReLU(),
-        nn.Linear(50, 50),
-        nn.ReLU(),
-        nn.Linear(50, 50),
-        nn.ReLU(),
-        nn.Linear(50, 50),
-        nn.ReLU(),
-        nn.Linear(50, 5)
-    )
-    net.eval()
-    print(f"   ⚠️  Using dummy network (same architecture as ACAS Xu)")
+    from n2v.utils.model_loader import load_onnx
+    net = load_onnx(network_file)
 
     # Load property
     print("\n2. Loading property...")
@@ -130,7 +105,7 @@ def verify_acasxu_property(network_file: str, property_file: str,
         print(f"   ✗ Reachability failed: {e}")
         import traceback
         traceback.print_exc()
-        return 2, time.time() - t_start, {'error': str(e)}
+        return 2, time.time() - t_start, {'error': str(e), 'reach_method': reach_method, 'num_output_stars': 0}
 
     # Verify specification
     print(f"\n5. Verifying specification...")
@@ -153,14 +128,16 @@ def verify_acasxu_property(network_file: str, property_file: str,
     print(f"\n" + "="*80)
     print("VERIFICATION RESULT")
     print("="*80)
-    print(f"Result: {result}")
 
     if result == 1:
-        print("  Status: ✅ VERIFIED (property holds)")
+        print("  Result: UNSAT")
+        print("  Status: ✅ Property holds (no intersection with unsafe region)")
     elif result == 2:
-        print("  Status: ⚠️  UNKNOWN (property may not hold)")
-    else:
-        print("  Status: ❌ VIOLATED (property does not hold)")
+        print("  Result: UNKNOWN")
+        print("  Status: ⚠️  Cannot determine (possible intersection with unsafe region)")
+    else:  # result == 0
+        print("  Result: SAT")
+        print("  Status: ❌ Property violated (counterexample exists)")
 
     print(f"\nTiming:")
     print(f"  Reachability: {time_reach:.2f}s")
@@ -181,21 +158,50 @@ def verify_acasxu_property(network_file: str, property_file: str,
 
 def main():
     """Main function to run ACAS Xu verification."""
+    import argparse
+
     # Get script directory
     script_dir = Path(__file__).parent
 
-    # Example: Verify property 1 with network 1_1
-    network_file = script_dir / "onnx" / "ACASXU_run2a_1_1_batch_2000.onnx"
-    property_file = script_dir / "vnnlib" / "prop_1.vnnlib"
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description='Verify ACAS Xu neural network properties using VNN-LIB format.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib
+  %(prog)s onnx/ACASXU_run2a_1_5_batch_2000.onnx vnnlib/prop_3.vnnlib --method approx
+  %(prog)s path/to/network.onnx path/to/property.vnnlib --timeout 600
+        """
+    )
+    parser.add_argument('network', type=str,
+                        help='Path to ONNX network file (relative to script dir or absolute)')
+    parser.add_argument('property', type=str,
+                        help='Path to VNN-LIB property file (relative to script dir or absolute)')
+    parser.add_argument('--method', type=str, choices=['exact', 'approx'], default='exact',
+                        help='Reachability method: exact or approx (default: exact)')
+    parser.add_argument('--timeout', type=float, default=300.0,
+                        help='Timeout in seconds (default: 300.0)')
+
+    args = parser.parse_args()
+
+    # Resolve file paths (try relative to script dir first, then absolute)
+    network_file = Path(args.network)
+    if not network_file.is_absolute():
+        network_file = script_dir / args.network
+
+    property_file = Path(args.property)
+    if not property_file.is_absolute():
+        property_file = script_dir / args.property
 
     # Check files exist
     if not network_file.exists():
         print(f"Error: Network file not found: {network_file}")
-        return
+        return 1
 
     if not property_file.exists():
         print(f"Error: Property file not found: {property_file}")
-        return
+        return 1
 
     # Run verification
     print("\n" + "="*80)
@@ -209,8 +215,8 @@ def main():
         result, time_elapsed, info = verify_acasxu_property(
             str(network_file),
             str(property_file),
-            reach_method='approx',  # Start with approx for speed
-            timeout=300.0
+            reach_method=args.method,
+            timeout=args.timeout
         )
 
         print("\n" + "="*80)
@@ -218,7 +224,7 @@ def main():
         print("="*80)
         print(f"Network: {network_file.name}")
         print(f"Property: {property_file.name}")
-        print(f"Result: {['VIOLATED', 'VERIFIED', 'UNKNOWN'][result]}")
+        print(f"Result: {['SAT', 'UNSAT', 'UNKNOWN'][result]}")
         print(f"Time: {time_elapsed:.2f}s")
         print(f"Method: {info['reach_method']}")
         print(f"Output stars: {info['num_output_stars']}")

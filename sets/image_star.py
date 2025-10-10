@@ -133,4 +133,10 @@ class ImageStar(Star):
             lp_solver: LP solver option
         """
         # Call parent class method to estimate ranges
-        super().estimate_ranges(lp_solver)
+        lb, ub = super().estimate_ranges()
+
+        # Store in state_lb and state_ub for use by other operations
+        self.state_lb = lb
+        self.state_ub = ub
+
+        return lb, ub

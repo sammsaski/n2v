@@ -51,6 +51,10 @@ class Box:
         if lb.shape[0] != ub.shape[0]:
             raise ValueError("Lower and upper bounds must have same dimension")
 
+        # Validate bounds
+        if np.any(lb > ub):
+            raise ValueError("Lower bounds must be less than or equal to upper bounds")
+
         self.lb = lb
         self.ub = ub
         self.dim = lb.shape[0]

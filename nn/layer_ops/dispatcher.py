@@ -5,6 +5,7 @@ Dispatches reachability computation based on PyTorch layer type without
 requiring custom layer wrapper classes.
 """
 
+import torch
 import torch.nn as nn
 import numpy as np
 from typing import List, Union

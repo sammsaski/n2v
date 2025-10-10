@@ -209,6 +209,33 @@ class TestVerifySpecificationEdgeCases:
         # Should be satisfied (max sum is 4, need >= 5)
         assert result == 1
 
+    def test_infeasible_intersection(self):
+        """Test when intersection exists but is infeasible (empty Star).
+
+        This is a critical edge case: intersect_half_space may return a Star object,
+        but that Star represents an empty/infeasible set. The verification should
+        check is_empty_set() and treat it as UNSAT (verified).
+
+        This test addresses the bug found in ACAS Xu verification where all
+        intersections were infeasible but verification returned UNKNOWN instead of UNSAT.
+        """
+        # Create a star: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        star = Star.from_bounds(lb, ub)
+
+        # Property: x1 + x2 >= 10 (impossible for [0,1] x [0,1])
+        # This creates a geometric intersection, but the Star will be infeasible
+        # (no points in [0,1] x [0,1] can sum to >= 10)
+        G = np.array([[-1, -1]], dtype=np.float32)
+        g = np.array([[-10]], dtype=np.float32)
+        halfspace = HalfSpace(G, g)
+
+        result = verify_specification([star], halfspace)
+
+        # Intersection is infeasible -> property satisfied (UNSAT)
+        assert result == 1
+
 
 class TestVerifySpecificationRealWorld:
     """Tests simulating real-world verification scenarios."""
@@ -226,8 +253,8 @@ class TestVerifySpecificationRealWorld:
         # i.e., output[0] > output[1]
         # Unsafe region: output[1] >= output[0]
         # Represented as: output[1] - output[0] >= 0
-        # Or in standard form: -output[0] + output[1] <= 0
-        G = np.array([[-1, 1]], dtype=np.float32)
+        # Or in standard form: -output[1] + output[0] <= 0  =>  output[0] - output[1] <= 0
+        G = np.array([[1, -1]], dtype=np.float32)
         g = np.array([[0]], dtype=np.float32)
         unsafe_region = HalfSpace(G, g)
 
@@ -248,14 +275,14 @@ class TestVerifySpecificationRealWorld:
 
         # Property: class 0 should be highest
         # Unsafe region (OR of two conditions):
-        # 1) class1 >= class0  ->  -class0 + class1 <= 0
-        # 2) class2 >= class0  ->  -class0 + class2 <= 0
+        # 1) class1 >= class0  ->  class1 - class0 >= 0  ->  class0 - class1 <= 0
+        # 2) class2 >= class0  ->  class2 - class0 >= 0  ->  class0 - class2 <= 0
 
-        G1 = np.array([[-1, 1, 0]], dtype=np.float32)
+        G1 = np.array([[1, -1, 0]], dtype=np.float32)
         g1 = np.array([[0]], dtype=np.float32)
         unsafe1 = HalfSpace(G1, g1)
 
-        G2 = np.array([[-1, 0, 1]], dtype=np.float32)
+        G2 = np.array([[1, 0, -1]], dtype=np.float32)
         g2 = np.array([[0]], dtype=np.float32)
         unsafe2 = HalfSpace(G2, g2)
 

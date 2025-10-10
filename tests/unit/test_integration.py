@@ -92,24 +92,27 @@ class TestCNNNetworks:
 
     def test_simple_cnn_exact(self):
         """Test simple CNN with exact method."""
+        # Use MUCH smaller network to avoid exponential splitting
+        # Original had 64 ReLU neurons (4x4x4) which caused 2^64 potential splits!
         model = nn.Sequential(
-            nn.Conv2d(1, 4, kernel_size=3, padding=1),
+            nn.Conv2d(1, 2, kernel_size=2, padding=0),  # 2x2 -> 1x1x2 (only 2 neurons!)
             nn.ReLU(),
-            nn.AvgPool2d(2, 2),
             nn.Flatten(),
-            nn.Linear(16, 2)
+            nn.Linear(2, 2)
         )
         model.eval()
 
-        # Create 4x4 input
-        lb = np.zeros((4, 4, 1))
-        ub = np.ones((4, 4, 1))
-        input_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+        # Create 2x2 input (small!)
+        lb = np.zeros((2, 2, 1))
+        ub = np.ones((2, 2, 1))
+        input_star = ImageStar.from_bounds(lb, ub, height=2, width=2, num_channels=1)
 
         # Verify
         output_stars = reach_star_exact(model, [input_star])
 
+        # With only 2 ReLU neurons, max 4 stars (2^2)
         assert len(output_stars) >= 1
+        assert len(output_stars) <= 4  # Reasonable upper bound
         for star in output_stars:
             assert star.dim == 2
 
@@ -133,21 +136,24 @@ class TestCNNNetworks:
 
     def test_cnn_strided_conv(self):
         """Test CNN with strided convolution."""
+        # Use very small network to keep test fast
         model = nn.Sequential(
-            nn.Conv2d(1, 4, kernel_size=3, stride=2, padding=1),
+            nn.Conv2d(1, 1, kernel_size=2, stride=2, padding=0),  # 4x4 -> 2x2x1 (4 neurons)
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(16, 2)
+            nn.Linear(4, 2)
         )
         model.eval()
 
-        lb = np.zeros((8, 8, 1))
-        ub = np.ones((8, 8, 1))
-        input_star = ImageStar.from_bounds(lb, ub, height=8, width=8, num_channels=1)
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        input_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
 
         output_stars = reach_star_exact(model, [input_star])
 
+        # With 4 ReLU neurons, max 16 stars (2^4)
         assert len(output_stars) >= 1
+        assert len(output_stars) <= 16
         for star in output_stars:
             assert star.dim == 2
 

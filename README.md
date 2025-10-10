@@ -68,26 +68,54 @@ NNV-Python is a Python port of the MATLAB NNV tool, designed for:
 
 ## Installation
 
-### From Source
+### Prerequisites
+
+- Python >= 3.8
+- Git (for cloning with submodules)
+
+### Step 1: Clone with Submodules
+
+When cloning the repository, make sure to include the submodules (specifically `onnx2torch`):
+
+```bash
+# Option 1: Clone with submodules
+git clone --recurse-submodules <repository-url>
+
+# Option 2: If already cloned, initialize submodules
+git submodule update --init --recursive
+```
+
+### Step 2: Install Dependencies
 
 ```bash
 cd n2v
+
+# Install core dependencies
+pip install torch numpy scipy cvxpy
+
+# Install onnx2torch from the submodule (for ONNX model support)
+pip install -e utils/onnx2torch
+
+# Install n2v in editable mode
 pip install -e .
 ```
 
-### Dependencies
+### Quick Install (All Dependencies)
+
+```bash
+pip install -r requirements.txt
+pip install -e utils/onnx2torch
+pip install -e .
+```
+
+### Core Dependencies
 
 - Python >= 3.8
 - PyTorch >= 2.0.0
 - NumPy >= 1.20.0
 - SciPy >= 1.7.0
 - CVXPY >= 1.2.0
-
-### Quick Install
-
-```bash
-pip install torch numpy scipy cvxpy
-```
+- onnx2torch (installed from submodule at `utils/onnx2torch`)
 
 ---
 
@@ -464,45 +492,76 @@ for layer in layers:
 
 ### Running Tests
 
-NNV-Python includes comprehensive unit and integration tests using pytest.
+NNV-Python includes comprehensive unit and soundness tests (200+ total tests) using pytest.
 
 ```bash
-# Run all tests
-pytest
+# Run all tests (unit + soundness)
+pytest n2v/tests/
 
 # Run with verbose output
-pytest -v
+pytest n2v/tests/ -v
+
+# Run only unit tests
+pytest n2v/tests/unit/
+
+# Run only soundness tests
+pytest n2v/tests/soundness/
 
 # Run specific test file
-pytest tests/test_sets.py
+pytest n2v/tests/unit/test_sets.py
+pytest n2v/tests/soundness/test_soundness_relu.py -v
 
-# Run tests by category
-pytest tests/test_integration.py
+# Run specific test
+pytest n2v/tests/unit/test_sets.py::TestStar::test_from_bounds -v
 ```
 
 ### Test Structure
 
 ```
-tests/
+n2v/tests/
 ├── conftest.py              # Shared fixtures and helpers
-├── test_sets.py             # Star, Zono, Box tests
-├── test_image_sets.py       # ImageStar, ImageZono tests
-├── test_layer_ops.py        # Layer operation tests
-├── test_dispatcher.py       # Layer dispatcher tests
-└── test_integration.py      # Full network verification tests
+│
+├── unit/                    # Unit tests (~130 tests)
+│   ├── conftest.py          # Unit test fixtures
+│   ├── test_sets.py         # Star, Zono, Box tests
+│   ├── test_image_sets.py   # ImageStar, ImageZono tests
+│   ├── test_layer_ops.py    # Layer operation tests
+│   ├── test_dispatcher.py   # Layer dispatcher tests
+│   ├── test_load_vnnlib.py  # VNN-LIB format parsing tests
+│   ├── test_verify_specification.py  # Property verification tests
+│   └── test_integration.py  # Full network verification tests
+│
+└── soundness/               # Soundness tests (~80 tests)
+    ├── README.md            # Soundness testing methodology
+    ├── test_soundness_linear.py     # Linear layer soundness
+    ├── test_soundness_relu.py       # ReLU activation soundness
+    ├── test_soundness_conv2d.py     # Conv2D soundness
+    ├── test_soundness_maxpool2d.py  # MaxPool2D soundness
+    ├── test_soundness_avgpool2d.py  # AvgPool2D soundness
+    └── test_soundness_flatten.py    # Flatten soundness
 ```
 
 ### Test Coverage
 
-- **Set Representations**: Star, Zono, Box creation and operations
-- **Image Sets**: ImageStar, ImageZono with spatial operations
-- **Layer Operations**: Linear, ReLU, Conv2D, MaxPool2D, AvgPool2D, Flatten
-- **Dispatcher**: Layer-type routing and method selection
-- **Integration**: End-to-end network verification
+**Unit Tests** verify implementation correctness:
+- Set Representations: Star, Zono, Box creation and operations
+- Image Sets: ImageStar, ImageZono with spatial operations
+- Layer Operations: Linear, ReLU, Conv2D, MaxPool2D, AvgPool2D, Flatten
+- Dispatcher: Layer-type routing and method selection
+- VNN-LIB: Property file parsing
+- Integration: End-to-end network verification workflows
+
+**Soundness Tests** verify mathematical correctness:
+- Exact vs. approximate methods produce sound results
+- Over-approximations contain exact reachable sets
+- Bounds computation is correct
+- Ground truth validation for simple cases
+
+See [tests/README.md](tests/README.md) for detailed test organization and [tests/soundness/README.md](tests/soundness/README.md) for soundness testing methodology.
 
 ### Writing New Tests
 
-Use the fixtures in `conftest.py`:
+**Unit Tests**: Use the fixtures in `unit/conftest.py`:
 
 ```python
 def test_my_feature(simple_star, simple_image_star):
@@ -510,6 +569,22 @@ def test_my_feature(simple_star, simple_image_star):
     # Your test code
     result = my_function(simple_star)
     pytest.assert_star_valid(result)
+```
+
+**Soundness Tests**: Compare against ground truth or exact methods:
+
+```python
+def test_layer_soundness(self):
+    """Verify layer produces sound results."""
+    # Generate random input
+    input_set = generate_random_star(dim=10)
+
+    # Compute exact and approximate results
+    exact_result = layer_exact(input_set)
+    approx_result = layer_approx(input_set)
+
+    # Verify soundness: approx should contain exact
+    pytest.assert_soundness(exact_result, approx_result)
 ```
 
 ### Test Requirements
@@ -522,11 +597,19 @@ pip install pytest pytest-cov
 
 ```bash
 # Generate HTML coverage report
-pytest --cov=n2v --cov-report=html
+pytest --cov=n2v --cov-report=html n2v/tests/
 
 # View in browser
 open htmlcov/index.html
 ```
+
+### Current Test Status
+
+- **Unit Tests**: 124 passing, 5 skipped (unimplemented features)
+- **Soundness Tests**: 79 passing
+- **Total**: 203 passing tests
+
+Skipped tests are for features not yet implemented (e.g., `Box.contains()`, `Box.intersect()`, `Box.union()`, `Zono.reduce_order()`). These can be implemented in the future as needed.
 
 ---
 
