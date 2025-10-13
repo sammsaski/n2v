@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
-ACAS Xu Verification Example - Generalized for All Set Types
+ACAS Xu Verification Example
 
 This script demonstrates verification of ACAS Xu neural network properties
-using the NNV-Python toolkit with support for all set representations:
-- Box: Interval arithmetic (fastest, least precise)
-- Zono: Zonotopes (fast, good precision)
-- Star: Star sets (precise, slower)
-- Hexatope: Hexatope sets with DCS constraints (very precise)
-- Octatope: Octatope sets with UTVPI constraints (very precise)
+using the NNV-Python toolkit with VNN-LIB format properties.
 
 ACAS Xu is an airborne collision avoidance system that uses neural networks
 to recommend advisory actions.
@@ -24,76 +19,23 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import n2v
-from n2v.sets import Star, Zono, Box, Hexatope, Octatope
+from n2v.sets import Star
 from n2v.nn import NeuralNetwork
 from n2v.utils import load_vnnlib, verify_specification
 
 
-def create_input_set(set_type: str, lb: np.ndarray, ub: np.ndarray):
-    """
-    Create input set of the specified type.
-
-    Args:
-        set_type: Type of set ('star', 'zono', 'box', 'hexatope', 'octatope')
-        lb: Lower bounds
-        ub: Upper bounds
-
-    Returns:
-        Input set of the specified type
-    """
-    if set_type == 'star':
-        return Star.from_bounds(lb, ub)
-    elif set_type == 'zono':
-        return Zono.from_bounds(lb, ub)
-    elif set_type == 'box':
-        return Box(lb, ub)
-    elif set_type == 'hexatope':
-        return Hexatope.from_bounds(lb, ub)
-    elif set_type == 'octatope':
-        return Octatope.from_bounds(lb, ub)
-    else:
-        raise ValueError(f"Unknown set type: {set_type}")
-
-
-def get_supported_methods(set_type: str):
-    """
-    Get supported reachability methods for a given set type.
-
-    Args:
-        set_type: Type of set
-
-    Returns:
-        List of supported method names
-    """
-    if set_type == 'star':
-        return ['exact', 'approx']
-    elif set_type in ['box', 'zono']:
-        return ['approx']
-    elif set_type in ['hexatope', 'octatope']:
-        return ['exact', 'exact-differentiable', 'approx']
-    else:
-        raise ValueError(f"Unknown set type: {set_type}")
-
-
 def verify_acasxu_property(network_file: str, property_file: str,
-                           set_type: str = 'star',
-                           reach_method: str = 'exact',
-                           timeout: float = 300.0,
-                           use_parallel: bool = False,
-                           n_workers: int = None):
+                           reach_method: str = 'approx', timeout: float = 300.0,
+                           use_parallel: bool = False, n_workers: int = None):
     """
-    Verify an ACAS Xu property using specified set type and method.
+    Verify an ACAS Xu property.
 
     Args:
         network_file: Path to ONNX network file
         property_file: Path to VNN-LIB property file
-        set_type: Set representation ('star', 'zono', 'box', 'hexatope', 'octatope')
-        reach_method: Reachability method:
-            - For Star: 'exact' or 'approx'
-            - For Box/Zono: 'approx'
-            - For Hexatope/Octatope: 'exact', 'exact-differentiable', or 'approx'
+        reach_method: Reachability method ('exact' or 'approx')
         timeout: Timeout in seconds
-        use_parallel: Enable parallel processing (Star only)
+        use_parallel: Enable parallel LP solving for better performance
         n_workers: Number of parallel workers (None = auto-detect)
 
     Returns:
@@ -101,16 +43,9 @@ def verify_acasxu_property(network_file: str, property_file: str,
         time_elapsed: Computation time in seconds
         info: Dictionary with additional information
     """
-    # Validate method for set type
-    supported_methods = get_supported_methods(set_type)
-    if reach_method not in supported_methods:
-        raise ValueError(
-            f"Method '{reach_method}' not supported for {set_type}. "
-            f"Supported methods: {', '.join(supported_methods)}"
-        )
-
-    # Configure parallel processing if requested (Star only)
-    if use_parallel and set_type == 'star':
+    # Configure parallel processing if requested
+    if use_parallel:
+        # Enable both LP-level and Star-level parallelization
         n2v.set_parallel(True, n_workers=n_workers)
     else:
         n2v.set_parallel(False)
@@ -118,17 +53,13 @@ def verify_acasxu_property(network_file: str, property_file: str,
     print("="*80)
     print(f"Verifying: {os.path.basename(network_file)} with {os.path.basename(property_file)}")
     print("="*80)
-    print(f"Set type: {set_type.upper()}")
-    print(f"Method: {reach_method}")
 
     # Display parallel configuration
-    if use_parallel and set_type == 'star':
+    if use_parallel:
         workers = n_workers if n_workers else "auto"
         print(f"\n⚡ Parallel processing enabled (workers: {workers})")
         print(f"   - LP-level parallelization: ON (within Stars)")
         print(f"   - Star-level parallelization: ON (across Stars)")
-    elif use_parallel and set_type != 'star':
-        print(f"\n⚠️  Parallel processing only supported for Star sets")
 
     # Load network
     print("\n1. Loading network...")
@@ -149,44 +80,40 @@ def verify_acasxu_property(network_file: str, property_file: str,
     if prop['prop']:
         print(f"   Property type: {'Single halfspace' if len(prop['prop']) == 1 else 'Multiple halfspaces (OR)'}")
 
-    # Create input set
-    print(f"\n3. Creating input set ({set_type})...")
+    # Create input Star set
+    print("\n3. Creating input set...")
     lb = prop['lb'].reshape(-1, 1).astype(np.float32)
     ub = prop['ub'].reshape(-1, 1).astype(np.float32)
-    input_set = create_input_set(set_type, lb, ub)
-    print(f"   ✓ Input {set_type.capitalize()} created:")
-    print(f"     Dimension: {input_set.dim}")
-    if hasattr(input_set, 'nVar'):
-        print(f"     Number of variables: {input_set.nVar}")
+    input_star = Star.from_bounds(lb, ub)
+    print(f"   ✓ Input Star created:")
+    print(f"     Dimension: {input_star.dim}")
+    print(f"     Number of variables: {input_star.nVar}")
 
     # Perform reachability analysis
     print(f"\n4. Computing reachable set (method: {reach_method})...")
     t_start = time.time()
 
     try:
-        # Use the unified reachability interface
-        kwargs = {}
-        if set_type == 'star' and use_parallel:
-            kwargs['parallel'] = use_parallel
-            kwargs['n_workers'] = n_workers
-
-        reach_sets = net.reach(input_set, method=reach_method, **kwargs)
+        # Use the new unified reachability interface
+        reach_sets = net.reach(
+            input_star,
+            method=reach_method,
+            parallel=use_parallel,
+            n_workers=n_workers
+        )
 
         time_reach = time.time() - t_start
 
         print(f"   ✓ Reachability completed in {time_reach:.2f} seconds")
-        print(f"   Number of output sets: {len(reach_sets)}")
+        print(f"   Number of output stars: {len(reach_sets)}")
 
         # Get output bounds
         if reach_sets:
             lb_out = np.ones(5) * 1000
             ub_out = np.ones(5) * -1000
 
-            for output_set in reach_sets:
-                if set_type == 'box':
-                    lb_temp, ub_temp = output_set.get_range()
-                else:
-                    lb_temp, ub_temp = output_set.estimate_ranges()
+            for star in reach_sets:
+                lb_temp, ub_temp = star.estimate_ranges()
                 lb_temp = lb_temp.flatten()
                 ub_temp = ub_temp.flatten()
                 lb_out = np.minimum(lb_temp, lb_out)
@@ -200,12 +127,7 @@ def verify_acasxu_property(network_file: str, property_file: str,
         print(f"   ✗ Reachability failed: {e}")
         import traceback
         traceback.print_exc()
-        return 2, time.time() - t_start, {
-            'error': str(e),
-            'set_type': set_type,
-            'reach_method': reach_method,
-            'num_output_sets': 0
-        }
+        return 2, time.time() - t_start, {'error': str(e), 'reach_method': reach_method, 'num_output_stars': 0}
 
     # Verify specification
     print(f"\n5. Verifying specification...")
@@ -246,11 +168,10 @@ def verify_acasxu_property(network_file: str, property_file: str,
     print("="*80 + "\n")
 
     info = {
-        'num_output_sets': len(reach_sets),
+        'num_output_stars': len(reach_sets),
         'time_reach': time_reach,
         'time_verify': time_verify,
         'time_total': time_total,
-        'set_type': set_type,
         'reach_method': reach_method
     }
 
@@ -266,60 +187,30 @@ def main():
 
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
-        description='Verify ACAS Xu neural network properties using various set representations.',
+        description='Verify ACAS Xu neural network properties using VNN-LIB format.',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Set Types and Supported Methods:
-  - box:      Fast interval arithmetic [Methods: approx]
-  - zono:     Zonotope representation [Methods: approx]
-  - star:     Star set representation [Methods: exact, approx]
-  - hexatope: Hexatope with DCS [Methods: exact, exact-differentiable, approx]
-  - octatope: Octatope with UTVPI [Methods: exact, exact-differentiable, approx]
-
 Examples:
-  # Use Star sets with exact method
-  %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --set star --method exact
-
-  # Use Hexatope with differentiable LP solver
-  %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --set hexatope --method exact-differentiable
-
-  # Use Box for fast approximate verification
-  %(prog)s onnx/ACASXU_run2a_1_5_batch_2000.onnx vnnlib/prop_3.vnnlib --set box --method approx
-
-  # Use Star with parallel processing
-  %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --set star --method exact --parallel --workers 4
-
-  # Compare different set types
-  %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --set octatope --method approx
+  %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib
+  %(prog)s onnx/ACASXU_run2a_1_5_batch_2000.onnx vnnlib/prop_3.vnnlib --method approx
+  %(prog)s path/to/network.onnx path/to/property.vnnlib --timeout 600
+  %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --parallel --workers 4
         """
     )
     parser.add_argument('network', type=str,
                         help='Path to ONNX network file (relative to script dir or absolute)')
     parser.add_argument('property', type=str,
                         help='Path to VNN-LIB property file (relative to script dir or absolute)')
-    parser.add_argument('--set', type=str, dest='set_type',
-                        choices=['box', 'zono', 'star', 'hexatope', 'octatope'],
-                        default='star',
-                        help='Set representation type (default: star)')
-    parser.add_argument('--method', type=str,
-                        choices=['exact', 'exact-differentiable', 'approx'],
-                        default='exact',
-                        help='Reachability method (default: exact). Note: not all methods supported by all set types.')
+    parser.add_argument('--method', type=str, choices=['exact', 'approx'], default='exact',
+                        help='Reachability method: exact or approx (default: exact)')
     parser.add_argument('--timeout', type=float, default=300.0,
                         help='Timeout in seconds (default: 300.0)')
     parser.add_argument('--parallel', action='store_true',
-                        help='Enable parallel processing (Star only)')
+                        help='Enable parallel LP solving for better performance')
     parser.add_argument('--workers', type=int, default=None,
                         help='Number of parallel workers (default: auto-detect based on CPU cores)')
 
     args = parser.parse_args()
-
-    # Validate that the method is supported for the chosen set type
-    supported_methods = get_supported_methods(args.set_type)
-    if args.method not in supported_methods:
-        print(f"Error: Method '{args.method}' not supported for {args.set_type} sets.")
-        print(f"Supported methods for {args.set_type}: {', '.join(supported_methods)}")
-        return 1
 
     # Resolve file paths (try relative to script dir first, then absolute)
     network_file = Path(args.network)
@@ -341,13 +232,12 @@ Examples:
 
     # Run verification
     print("\n" + "="*80)
-    print("ACAS Xu Verification - Generalized")
+    print("ACAS Xu Verification")
     print("="*80)
     print(f"Network: {network_file.name}")
     print(f"Property: {property_file.name}")
-    print(f"Set type: {args.set_type.upper()}")
     print(f"Method: {args.method}")
-    if args.parallel and args.set_type == 'star':
+    if args.parallel:
         workers = args.workers if args.workers else "auto"
         print(f"Parallel: enabled (workers: {workers})")
     else:
@@ -358,7 +248,6 @@ Examples:
         result, time_elapsed, info = verify_acasxu_property(
             str(network_file),
             str(property_file),
-            set_type=args.set_type,
             reach_method=args.method,
             timeout=args.timeout,
             use_parallel=args.parallel,
@@ -370,11 +259,10 @@ Examples:
         print("="*80)
         print(f"Network: {network_file.name}")
         print(f"Property: {property_file.name}")
-        print(f"Set type: {info['set_type'].upper()}")
-        print(f"Method: {info['reach_method']}")
         print(f"Result: {['SAT', 'UNSAT', 'UNKNOWN'][result]}")
         print(f"Time: {time_elapsed:.2f}s")
-        print(f"Output sets: {info['num_output_sets']}")
+        print(f"Method: {info['reach_method']}")
+        print(f"Output stars: {info['num_output_stars']}")
         print("="*80)
 
     except Exception as e:

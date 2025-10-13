@@ -477,3 +477,43 @@ class Zono:
         new_c = self.c.astype(dtype)
         new_V = self.V.astype(dtype)
         return Zono(new_c, new_V)
+
+    # ======================== Reachability Analysis ========================
+
+    def reach(
+        self,
+        model: 'nn.Module',
+        method: str = 'approx',
+        **kwargs
+    ) -> List['Zono']:
+        """
+        Perform reachability analysis through a neural network model.
+
+        Args:
+            model: PyTorch neural network model
+            method: Reachability method to use. Only 'approx' is supported for Zono.
+            **kwargs: Additional arguments:
+                - dis_opt: 'display' to show progress
+
+        Returns:
+            List of output Zono sets
+
+        Example:
+            >>> from n2v.sets import Zono
+            >>> import torch.nn as nn
+            >>> model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
+            >>> input_zono = Zono.from_bounds(lb, ub)
+            >>> output_zonos = input_zono.reach(model, method='approx')
+        """
+        import torch.nn as nn
+        from n2v.nn.reach.reach_zono import reach_zono_approx
+
+        if not isinstance(model, nn.Module):
+            raise TypeError(f"model must be a PyTorch nn.Module, got {type(model)}")
+
+        if method != 'approx':
+            raise ValueError(
+                f"Only 'approx' method is supported for Zono reachability, got '{method}'"
+            )
+
+        return reach_zono_approx(model, [self], **kwargs)

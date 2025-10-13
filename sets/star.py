@@ -674,3 +674,57 @@ class Star:
             return np.hstack(samples)
         else:
             return np.array([]).reshape(self.dim, 0)
+
+    # ======================== Reachability Analysis ========================
+
+    def reach(
+        self,
+        model: 'nn.Module',
+        method: str = 'exact',
+        **kwargs
+    ) -> List['Star']:
+        """
+        Perform reachability analysis through a neural network model.
+
+        Args:
+            model: PyTorch neural network model
+            method: Reachability method to use:
+                - 'exact': Exact reachability with splitting
+                - 'approx': Over-approximate reachability with relaxation
+            **kwargs: Additional method-specific arguments:
+                For 'exact':
+                    - lp_solver: LP solver to use (default: 'default')
+                    - dis_opt: 'display' to show progress
+                    - parallel: Enable parallel Star processing
+                    - n_workers: Number of parallel workers
+                For 'approx':
+                    - relax_factor: Relaxation factor (0=exact, 1=max, default: 0.5)
+                    - relax_method: Relaxation strategy (default: 'standard')
+                    - lp_solver: LP solver to use (default: 'default')
+                    - dis_opt: 'display' to show progress
+
+        Returns:
+            List of output Star sets
+
+        Example:
+            >>> from n2v.sets import Star
+            >>> import torch.nn as nn
+            >>> model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
+            >>> input_star = Star.from_bounds(lb, ub)
+            >>> output_stars = input_star.reach(model, method='exact')
+        """
+        import torch.nn as nn
+        from n2v.nn.reach.reach_star import reach_star_exact, reach_star_approx
+
+        if not isinstance(model, nn.Module):
+            raise TypeError(f"model must be a PyTorch nn.Module, got {type(model)}")
+
+        if method == 'exact':
+            return reach_star_exact(model, [self], **kwargs)
+        elif method == 'approx':
+            return reach_star_approx(model, [self], **kwargs)
+        else:
+            raise ValueError(
+                f"Unknown method '{method}' for Star reachability. "
+                f"Supported methods: 'exact', 'approx'"
+            )

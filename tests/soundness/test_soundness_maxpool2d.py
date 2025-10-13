@@ -8,8 +8,8 @@ MaxPool is a non-linear operation that may require splitting for exact analysis.
 import numpy as np
 import torch
 import torch.nn as nn
-from n2v.sets import ImageStar
-from n2v.nn.layer_ops.maxpool2d_reach import maxpool2d_star
+from n2v.sets import ImageStar, Hexatope, Octatope
+from n2v.nn.layer_ops.maxpool2d_reach import maxpool2d_star, maxpool2d_hexatope, maxpool2d_octatope
 
 
 class TestMaxPool2DImageStarExact:
@@ -248,3 +248,127 @@ class TestMaxPool2DEdgeCases:
         assert out_star.height == 1
         assert out_star.width == 1
         assert out_star.num_channels == 3
+
+
+class TestMaxPool2DHexatopeSoundness:
+    """Soundness tests for MaxPool2D with Hexatope sets."""
+
+    def test_simple_pooling(self):
+        """Test MaxPool2D with hexatope - basic case."""
+        layer = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        # Create hexatope from flattened 2x2 image
+        lb = np.zeros((4, 1))  # 2x2x1 = 4 dims
+        ub = np.ones((4, 1)) * 2
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply MaxPool2D
+        output_hexatopes = maxpool2d_hexatope(layer, [input_hexatope])
+
+        # Verify output is valid
+        assert len(output_hexatopes) == 1
+        assert isinstance(output_hexatopes[0], Hexatope)
+
+    def test_all_positive_values(self):
+        """Test MaxPool with all positive input bounds."""
+        layer = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        lb = np.ones((4, 1))
+        ub = np.ones((4, 1)) * 3
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        output_hexatopes = maxpool2d_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+        # Max of [1,3] should be at most 3
+        lb_out, ub_out = output_hexatopes[0].estimate_ranges()
+        assert np.all(ub_out <= 3.0 + 1e-6)
+
+    def test_negative_values(self):
+        """Test MaxPool with negative input bounds."""
+        layer = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        lb = np.ones((4, 1)) * -3
+        ub = np.ones((4, 1)) * -1
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        output_hexatopes = maxpool2d_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+        # Max of [-3,-1] should be at most -1
+        lb_out, ub_out = output_hexatopes[0].estimate_ranges()
+        assert np.all(ub_out <= -1.0 + 1e-6)
+
+    def test_mixed_sign_values(self):
+        """Test MaxPool with mixed positive/negative bounds."""
+        layer = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        lb = np.ones((4, 1)) * -2
+        ub = np.ones((4, 1)) * 2
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        output_hexatopes = maxpool2d_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+        # Max of [-2,2] should be at most 2
+        lb_out, ub_out = output_hexatopes[0].estimate_ranges()
+        assert np.all(ub_out <= 2.0 + 1e-6)
+
+
+class TestMaxPool2DOctatopeSoundness:
+    """Soundness tests for MaxPool2D with Octatope sets."""
+
+    def test_simple_pooling(self):
+        """Test MaxPool2D with octatope - basic case."""
+        layer = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        lb = np.zeros((4, 1))
+        ub = np.ones((4, 1)) * 2
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = maxpool2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        assert isinstance(output_octatopes[0], Octatope)
+
+    def test_all_positive_values(self):
+        """Test MaxPool with all positive input bounds."""
+        layer = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        lb = np.ones((4, 1))
+        ub = np.ones((4, 1)) * 3
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = maxpool2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        lb_out, ub_out = output_octatopes[0].estimate_ranges()
+        assert np.all(ub_out <= 3.0 + 1e-6)
+
+    def test_negative_values(self):
+        """Test MaxPool with negative input bounds."""
+        layer = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        lb = np.ones((4, 1)) * -3
+        ub = np.ones((4, 1)) * -1
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = maxpool2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        lb_out, ub_out = output_octatopes[0].estimate_ranges()
+        assert np.all(ub_out <= -1.0 + 1e-6)
+
+    def test_mixed_sign_values(self):
+        """Test MaxPool with mixed positive/negative bounds."""
+        layer = nn.MaxPool2d(kernel_size=2, stride=2)
+
+        lb = np.ones((4, 1)) * -2
+        ub = np.ones((4, 1)) * 2
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = maxpool2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        lb_out, ub_out = output_octatopes[0].estimate_ranges()
+        assert np.all(ub_out <= 2.0 + 1e-6)

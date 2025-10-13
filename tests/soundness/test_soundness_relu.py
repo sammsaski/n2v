@@ -8,10 +8,11 @@ for all set representations (Star, Zono, Box) and methods (exact, approx).
 import pytest
 import numpy as np
 import torch.nn as nn
-from n2v.sets import Star, Zono, Box
+from n2v.sets import Star, Zono, Box, Hexatope, Octatope
 from n2v.nn.layer_ops.relu_reach import (
     relu_star_exact, relu_star_approx,
-    relu_zono_approx, relu_box
+    relu_zono_approx, relu_box,
+    relu_hexatope, relu_octatope
 )
 
 
@@ -400,3 +401,219 @@ class TestReLUEdgeCases:
         # Each dimension should cover [0, 1]
         assert np.all(lb_out <= 0.0 + 1e-6)
         assert np.all(ub_out >= 1.0 - 1e-6)
+
+
+class TestReLUHexatopeSoundness:
+    """Soundness tests for ReLU with Hexatope sets."""
+
+    def test_all_positive_input(self):
+        """Test ReLU hexatope with all-positive input."""
+        lb = np.array([[1.0], [1.0]])
+        ub = np.array([[2.0], [2.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_hexatopes = relu_hexatope([input_hexatope])
+
+        # Ground truth: unchanged
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, lb, atol=1e-6)
+        assert np.allclose(output_ub, ub, atol=1e-6)
+
+    def test_all_negative_input(self):
+        """Test ReLU hexatope with all-negative input."""
+        lb = np.array([[-2.0], [-2.0]])
+        ub = np.array([[-1.0], [-1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_hexatopes = relu_hexatope([input_hexatope])
+
+        # Ground truth: all zeros
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, np.zeros((2, 1)), atol=1e-6)
+        assert np.allclose(output_ub, np.zeros((2, 1)), atol=1e-6)
+
+    def test_crossing_zero(self):
+        """Test ReLU hexatope with input crossing zero."""
+        lb = np.array([[-1.0], [-1.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_hexatopes = relu_hexatope([input_hexatope])
+
+        # Ground truth: [0, 1] x [0, 1]
+        expected_lb = np.array([[0.0], [0.0]])
+        expected_ub = np.array([[1.0], [1.0]])
+
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_mixed_dimensions(self):
+        """Test ReLU with one positive and one negative dimension."""
+        # x1 all positive, x2 all negative
+        lb = np.array([[1.0], [-2.0]])
+        ub = np.array([[2.0], [-1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_hexatopes = relu_hexatope([input_hexatope])
+
+        # Ground truth: [1,2] x [0,0]
+        expected_lb = np.array([[1.0], [0.0]])
+        expected_ub = np.array([[2.0], [0.0]])
+
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_asymmetric_crossing(self):
+        """Test ReLU with asymmetric range crossing zero."""
+        # More negative than positive
+        lb = np.array([[-2.0]])
+        ub = np.array([[1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_hexatopes = relu_hexatope([input_hexatope])
+
+        # Ground truth: [0, 1]
+        expected_lb = np.array([[0.0]])
+        expected_ub = np.array([[1.0]])
+
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_boundary_at_zero(self):
+        """Test ReLU with input exactly at zero."""
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[0.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_hexatopes = relu_hexatope([input_hexatope])
+
+        # Ground truth: [0,0] x [0,1]
+        expected_lb = np.array([[0.0], [0.0]])
+        expected_ub = np.array([[0.0], [1.0]])
+
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+
+class TestReLUOctatopeSoundness:
+    """Soundness tests for ReLU with Octatope sets."""
+
+    def test_all_positive_input(self):
+        """Test ReLU octatope with all-positive input."""
+        lb = np.array([[1.0], [1.0]])
+        ub = np.array([[2.0], [2.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_octatopes = relu_octatope([input_octatope])
+
+        # Ground truth: unchanged
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, lb, atol=1e-6)
+        assert np.allclose(output_ub, ub, atol=1e-6)
+
+    def test_all_negative_input(self):
+        """Test ReLU octatope with all-negative input."""
+        lb = np.array([[-2.0], [-2.0]])
+        ub = np.array([[-1.0], [-1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_octatopes = relu_octatope([input_octatope])
+
+        # Ground truth: all zeros
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, np.zeros((2, 1)), atol=1e-6)
+        assert np.allclose(output_ub, np.zeros((2, 1)), atol=1e-6)
+
+    def test_crossing_zero(self):
+        """Test ReLU octatope with input crossing zero."""
+        lb = np.array([[-1.0], [-1.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_octatopes = relu_octatope([input_octatope])
+
+        # Ground truth: [0, 1] x [0, 1]
+        expected_lb = np.array([[0.0], [0.0]])
+        expected_ub = np.array([[1.0], [1.0]])
+
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_mixed_dimensions(self):
+        """Test ReLU with one positive and one negative dimension."""
+        # x1 all positive, x2 all negative
+        lb = np.array([[1.0], [-2.0]])
+        ub = np.array([[2.0], [-1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_octatopes = relu_octatope([input_octatope])
+
+        # Ground truth: [1,2] x [0,0]
+        expected_lb = np.array([[1.0], [0.0]])
+        expected_ub = np.array([[2.0], [0.0]])
+
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_asymmetric_crossing(self):
+        """Test ReLU with asymmetric range crossing zero."""
+        # More negative than positive
+        lb = np.array([[-2.0]])
+        ub = np.array([[1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_octatopes = relu_octatope([input_octatope])
+
+        # Ground truth: [0, 1]
+        expected_lb = np.array([[0.0]])
+        expected_ub = np.array([[1.0]])
+
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_boundary_at_zero(self):
+        """Test ReLU with input exactly at zero."""
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[0.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Apply ReLU
+        output_octatopes = relu_octatope([input_octatope])
+
+        # Ground truth: [0,0] x [0,1]
+        expected_lb = np.array([[0.0], [0.0]])
+        expected_ub = np.array([[0.0], [1.0]])
+
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)

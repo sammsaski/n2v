@@ -9,8 +9,8 @@ import pytest
 import numpy as np
 import torch
 import torch.nn as nn
-from n2v.sets import Star, Zono, Box
-from n2v.nn.layer_ops.linear_reach import linear_star, linear_zono, linear_box
+from n2v.sets import Star, Zono, Box, Hexatope, Octatope
+from n2v.nn.layer_ops.linear_reach import linear_star, linear_zono, linear_box, linear_hexatope, linear_octatope
 
 
 class TestLinearStarSoundness:
@@ -475,6 +475,456 @@ class TestLinearEdgeCases:
         # y2 = x1 + x2 in [-1-1, 1+1] = [-2, 2]
         assert len(output_stars) == 1
         output_lb, output_ub = output_stars[0].estimate_ranges()
+
+        expected_lb = np.array([[-2.0], [-2.0]])
+        expected_ub = np.array([[2.0], [2.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+
+class TestLinearHexatopeSoundness:
+    """Soundness tests for Linear layer with Hexatope sets."""
+
+    def test_identity_transformation(self):
+        """Test identity transformation: y = x."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Layer: y = x (identity, no bias)
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.eye(2)
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_hexatopes = linear_hexatope(layer, [input_hexatope])
+
+        # Ground truth: output should be identical to input
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+
+        assert np.allclose(output_lb, lb, atol=1e-6)
+        assert np.allclose(output_ub, ub, atol=1e-6)
+
+    def test_translation(self):
+        """Test pure translation: y = x + b."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Layer: y = x + [2, 3]
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.eye(2)
+        layer.bias.data = torch.tensor([2.0, 3.0])
+
+        # Compute reachability
+        output_hexatopes = linear_hexatope(layer, [input_hexatope])
+
+        # Ground truth: [0,1] + 2 = [2,3], [0,1] + 3 = [3,4]
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[2.0], [3.0]])
+        expected_ub = np.array([[3.0], [4.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_scaling(self):
+        """Test scaling transformation: y = 2x."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Layer: y = 2x (scale by 2)
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.eye(2) * 2
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_hexatopes = linear_hexatope(layer, [input_hexatope])
+
+        # Ground truth: [0,1] * 2 = [0,2]
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[0.0], [0.0]])
+        expected_ub = np.array([[2.0], [2.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_rotation_90deg(self):
+        """Test 90-degree rotation in 2D."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Layer: 90-degree counterclockwise rotation
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.tensor([[0.0, -1.0], [1.0, 0.0]])
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_hexatopes = linear_hexatope(layer, [input_hexatope])
+
+        # Ground truth: rotation of [0,1]x[0,1] -> [-1,0]x[0,1]
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[-1.0], [0.0]])
+        expected_ub = np.array([[0.0], [1.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_dimension_reduction(self):
+        """Test dimension reduction: R^3 -> R^2."""
+        # Input: [0,1]^3
+        lb = np.array([[0.0], [0.0], [0.0]])
+        ub = np.array([[1.0], [1.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Layer: project to first two dimensions and sum third
+        layer = nn.Linear(3, 2)
+        layer.weight.data = torch.tensor([[1.0, 0.0, 0.0],
+                                          [0.0, 1.0, 1.0]])
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_hexatopes = linear_hexatope(layer, [input_hexatope])
+
+        # Ground truth: y1 in [0,1], y2 in [0,2]
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[0.0], [0.0]])
+        expected_ub = np.array([[1.0], [2.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_dimension_expansion(self):
+        """Test dimension expansion: R^2 -> R^3."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Layer: expand to 3D
+        layer = nn.Linear(2, 3)
+        layer.weight.data = torch.tensor([[1.0, 0.0],
+                                          [0.0, 1.0],
+                                          [1.0, 1.0]])
+        layer.bias.data = torch.zeros(3)
+
+        # Compute reachability
+        output_hexatopes = linear_hexatope(layer, [input_hexatope])
+
+        # Ground truth: y1 in [0,1], y2 in [0,1], y3 in [0,2]
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[0.0], [0.0], [0.0]])
+        expected_ub = np.array([[1.0], [1.0], [2.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_negative_weights(self):
+        """Test transformation with negative weights."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Layer: y = -x
+        layer = nn.Linear(2, 2)
+        layer.weight.data = -torch.eye(2)
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_hexatopes = linear_hexatope(layer, [input_hexatope])
+
+        # Ground truth: -[0,1] = [-1,0]
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[-1.0], [-1.0]])
+        expected_ub = np.array([[0.0], [0.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_no_bias_layer(self):
+        """Test layer with no bias term."""
+        # Input: [1,2] x [1,2]
+        lb = np.array([[1.0], [1.0]])
+        ub = np.array([[2.0], [2.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Create layer without bias
+        layer = nn.Linear(2, 2, bias=False)
+        layer.weight.data = torch.eye(2)
+
+        # Compute reachability
+        output_hexatopes = linear_hexatope(layer, [input_hexatope])
+
+        # Ground truth: output should equal input (identity with no bias)
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+
+        assert np.allclose(output_lb, lb, atol=1e-6)
+        assert np.allclose(output_ub, ub, atol=1e-6)
+
+    def test_mixed_positive_negative(self):
+        """Test with mixed positive and negative weights."""
+        lb = np.array([[-1.0], [-1.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Layer: y1 = x1 - x2, y2 = x1 + x2
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.tensor([[1.0, -1.0],
+                                          [1.0, 1.0]])
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_hexatopes = linear_hexatope(layer, [input_hexatope])
+
+        # Ground truth: y1 in [-2, 2], y2 in [-2, 2]
+        assert len(output_hexatopes) == 1
+        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[-2.0], [-2.0]])
+        expected_ub = np.array([[2.0], [2.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+
+class TestLinearOctatopeSoundness:
+    """Soundness tests for Linear layer with Octatope sets."""
+
+    def test_identity_transformation(self):
+        """Test identity transformation: y = x."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Layer: y = x (identity, no bias)
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.eye(2)
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_octatopes = linear_octatope(layer, [input_octatope])
+
+        # Ground truth: output should be identical to input
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+
+        assert np.allclose(output_lb, lb, atol=1e-6)
+        assert np.allclose(output_ub, ub, atol=1e-6)
+
+    def test_translation(self):
+        """Test pure translation: y = x + b."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Layer: y = x + [2, 3]
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.eye(2)
+        layer.bias.data = torch.tensor([2.0, 3.0])
+
+        # Compute reachability
+        output_octatopes = linear_octatope(layer, [input_octatope])
+
+        # Ground truth: [0,1] + 2 = [2,3], [0,1] + 3 = [3,4]
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[2.0], [3.0]])
+        expected_ub = np.array([[3.0], [4.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_scaling(self):
+        """Test scaling transformation: y = 2x."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Layer: y = 2x (scale by 2)
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.eye(2) * 2
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_octatopes = linear_octatope(layer, [input_octatope])
+
+        # Ground truth: [0,1] * 2 = [0,2]
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[0.0], [0.0]])
+        expected_ub = np.array([[2.0], [2.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_rotation_90deg(self):
+        """Test 90-degree rotation in 2D."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Layer: 90-degree counterclockwise rotation
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.tensor([[0.0, -1.0], [1.0, 0.0]])
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_octatopes = linear_octatope(layer, [input_octatope])
+
+        # Ground truth: rotation of [0,1]x[0,1] -> [-1,0]x[0,1]
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[-1.0], [0.0]])
+        expected_ub = np.array([[0.0], [1.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_dimension_reduction(self):
+        """Test dimension reduction: R^3 -> R^2."""
+        # Input: [0,1]^3
+        lb = np.array([[0.0], [0.0], [0.0]])
+        ub = np.array([[1.0], [1.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Layer: project to first two dimensions and sum third
+        layer = nn.Linear(3, 2)
+        layer.weight.data = torch.tensor([[1.0, 0.0, 0.0],
+                                          [0.0, 1.0, 1.0]])
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_octatopes = linear_octatope(layer, [input_octatope])
+
+        # Ground truth: y1 in [0,1], y2 in [0,2]
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[0.0], [0.0]])
+        expected_ub = np.array([[1.0], [2.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_dimension_expansion(self):
+        """Test dimension expansion: R^2 -> R^3."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Layer: expand to 3D
+        layer = nn.Linear(2, 3)
+        layer.weight.data = torch.tensor([[1.0, 0.0],
+                                          [0.0, 1.0],
+                                          [1.0, 1.0]])
+        layer.bias.data = torch.zeros(3)
+
+        # Compute reachability
+        output_octatopes = linear_octatope(layer, [input_octatope])
+
+        # Ground truth: y1 in [0,1], y2 in [0,1], y3 in [0,2]
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[0.0], [0.0], [0.0]])
+        expected_ub = np.array([[1.0], [1.0], [2.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_negative_weights(self):
+        """Test transformation with negative weights."""
+        # Input: [0,1] x [0,1]
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Layer: y = -x
+        layer = nn.Linear(2, 2)
+        layer.weight.data = -torch.eye(2)
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_octatopes = linear_octatope(layer, [input_octatope])
+
+        # Ground truth: -[0,1] = [-1,0]
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+
+        expected_lb = np.array([[-1.0], [-1.0]])
+        expected_ub = np.array([[0.0], [0.0]])
+
+        assert np.allclose(output_lb, expected_lb, atol=1e-6)
+        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+
+    def test_no_bias_layer(self):
+        """Test layer with no bias term."""
+        # Input: [1,2] x [1,2]
+        lb = np.array([[1.0], [1.0]])
+        ub = np.array([[2.0], [2.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Create layer without bias
+        layer = nn.Linear(2, 2, bias=False)
+        layer.weight.data = torch.eye(2)
+
+        # Compute reachability
+        output_octatopes = linear_octatope(layer, [input_octatope])
+
+        # Ground truth: output should equal input (identity with no bias)
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
+
+        assert np.allclose(output_lb, lb, atol=1e-6)
+        assert np.allclose(output_ub, ub, atol=1e-6)
+
+    def test_mixed_positive_negative(self):
+        """Test with mixed positive and negative weights."""
+        lb = np.array([[-1.0], [-1.0]])
+        ub = np.array([[1.0], [1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Layer: y1 = x1 - x2, y2 = x1 + x2
+        layer = nn.Linear(2, 2)
+        layer.weight.data = torch.tensor([[1.0, -1.0],
+                                          [1.0, 1.0]])
+        layer.bias.data = torch.zeros(2)
+
+        # Compute reachability
+        output_octatopes = linear_octatope(layer, [input_octatope])
+
+        # Ground truth: y1 in [-2, 2], y2 in [-2, 2]
+        assert len(output_octatopes) == 1
+        output_lb, output_ub = output_octatopes[0].estimate_ranges()
 
         expected_lb = np.array([[-2.0], [-2.0]])
         expected_ub = np.array([[2.0], [2.0]])

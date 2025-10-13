@@ -250,3 +250,42 @@ class Box:
         hull_ub = np.max(all_ub, axis=1, keepdims=True)
 
         return Box(hull_lb, hull_ub)
+
+    # ======================== Reachability Analysis ========================
+
+    def reach(
+        self,
+        model: 'nn.Module',
+        method: str = 'approx',
+        **kwargs
+    ) -> List['Box']:
+        """
+        Perform reachability analysis through a neural network model.
+
+        Args:
+            model: PyTorch neural network model
+            method: Reachability method to use. Only 'approx' is supported for Box.
+            **kwargs: Additional arguments (currently unused for Box)
+
+        Returns:
+            List of output Box sets
+
+        Example:
+            >>> from n2v.sets import Box
+            >>> import torch.nn as nn
+            >>> model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
+            >>> input_box = Box(lb, ub)
+            >>> output_boxes = input_box.reach(model, method='approx')
+        """
+        import torch.nn as nn
+        from n2v.nn.reach.reach_box import reach_box_approx
+
+        if not isinstance(model, nn.Module):
+            raise TypeError(f"model must be a PyTorch nn.Module, got {type(model)}")
+
+        if method != 'approx':
+            raise ValueError(
+                f"Only 'approx' method is supported for Box reachability, got '{method}'"
+            )
+
+        return reach_box_approx(model, [self])

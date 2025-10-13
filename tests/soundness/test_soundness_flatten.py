@@ -7,8 +7,8 @@ from image format to flattened format.
 
 import numpy as np
 import torch.nn as nn
-from n2v.sets import Star, ImageStar, Box
-from n2v.nn.layer_ops.flatten_reach import flatten_star, flatten_box
+from n2v.sets import Star, ImageStar, Box, Hexatope, Octatope
+from n2v.nn.layer_ops.flatten_reach import flatten_star, flatten_box, flatten_hexatope, flatten_octatope
 
 
 class TestFlattenImageStarSoundness:
@@ -253,3 +253,136 @@ class TestFlattenEdgeCases:
         lb_out, ub_out = out_star.estimate_ranges()
         assert np.allclose(lb_out, 0.0, atol=1e-6)
         assert np.allclose(ub_out, 2.0, atol=1e-6)
+
+
+class TestFlattenHexatopeSoundness:
+    """Soundness tests for Flatten with Hexatope sets."""
+
+    def test_flatten_passthrough(self):
+        """Test that Flatten passes through Hexatope unchanged."""
+        layer = nn.Flatten()
+
+        # Hexatopes are already flattened
+        lb = np.zeros((4, 1))
+        ub = np.ones((4, 1)) * 5
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply Flatten
+        output_hexatopes = flatten_hexatope(layer, [input_hexatope])
+
+        # Should be unchanged
+        assert len(output_hexatopes) == 1
+        out_hexatope = output_hexatopes[0]
+        assert out_hexatope.dim == 4
+        lb_out, ub_out = out_hexatope.estimate_ranges()
+        assert np.allclose(lb_out, lb, atol=1e-6)
+        assert np.allclose(ub_out, ub, atol=1e-6)
+
+    def test_flatten_preserves_bounds(self):
+        """Test that Flatten preserves bounds."""
+        layer = nn.Flatten()
+
+        lb = np.array([[1.0], [2.0], [3.0]])
+        ub = np.array([[4.0], [5.0], [6.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        output_hexatopes = flatten_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+        out_hexatope = output_hexatopes[0]
+        lb_out, ub_out = out_hexatope.estimate_ranges()
+        assert np.allclose(lb_out, lb, atol=1e-6)
+        assert np.allclose(ub_out, ub, atol=1e-6)
+
+    def test_flatten_negative_values(self):
+        """Test Flatten with negative values."""
+        layer = nn.Flatten()
+
+        lb = np.ones((5, 1)) * -10
+        ub = np.ones((5, 1)) * -2
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        output_hexatopes = flatten_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+        lb_out, ub_out = output_hexatopes[0].estimate_ranges()
+        assert np.allclose(lb_out, -10.0, atol=1e-6)
+        assert np.allclose(ub_out, -2.0, atol=1e-6)
+
+    def test_flatten_single_dimension(self):
+        """Test Flatten with single dimension."""
+        layer = nn.Flatten()
+
+        lb = np.array([[5.0]])
+        ub = np.array([[8.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        output_hexatopes = flatten_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+        assert output_hexatopes[0].dim == 1
+
+
+class TestFlattenOctatopeSoundness:
+    """Soundness tests for Flatten with Octatope sets."""
+
+    def test_flatten_passthrough(self):
+        """Test that Flatten passes through Octatope unchanged."""
+        layer = nn.Flatten()
+
+        lb = np.zeros((4, 1))
+        ub = np.ones((4, 1)) * 5
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = flatten_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        out_octatope = output_octatopes[0]
+        assert out_octatope.dim == 4
+        lb_out, ub_out = out_octatope.estimate_ranges()
+        assert np.allclose(lb_out, lb, atol=1e-6)
+        assert np.allclose(ub_out, ub, atol=1e-6)
+
+    def test_flatten_preserves_bounds(self):
+        """Test that Flatten preserves bounds."""
+        layer = nn.Flatten()
+
+        lb = np.array([[1.0], [2.0], [3.0]])
+        ub = np.array([[4.0], [5.0], [6.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = flatten_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        out_octatope = output_octatopes[0]
+        lb_out, ub_out = out_octatope.estimate_ranges()
+        assert np.allclose(lb_out, lb, atol=1e-6)
+        assert np.allclose(ub_out, ub, atol=1e-6)
+
+    def test_flatten_negative_values(self):
+        """Test Flatten with negative values."""
+        layer = nn.Flatten()
+
+        lb = np.ones((5, 1)) * -10
+        ub = np.ones((5, 1)) * -2
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = flatten_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        lb_out, ub_out = output_octatopes[0].estimate_ranges()
+        assert np.allclose(lb_out, -10.0, atol=1e-6)
+        assert np.allclose(ub_out, -2.0, atol=1e-6)
+
+    def test_flatten_single_dimension(self):
+        """Test Flatten with single dimension."""
+        layer = nn.Flatten()
+
+        lb = np.array([[5.0]])
+        ub = np.array([[8.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = flatten_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        assert output_octatopes[0].dim == 1

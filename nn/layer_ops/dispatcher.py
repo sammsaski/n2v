@@ -8,7 +8,7 @@ requiring custom layer wrapper classes.
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import List, Union
+from typing import List, Union, Optional
 from n2v.sets import Star, Zono, Box
 
 
@@ -161,4 +161,102 @@ def reach_layer_box(
     else:
         raise NotImplementedError(
             f"Box reachability not implemented for layer type: {type(layer).__name__}"
+        )
+
+
+def reach_layer_hexatope(
+    layer: nn.Module,
+    input_hexatopes: List,
+    method: str = 'exact',
+    **kwargs
+) -> List:
+    """
+    Compute reachable sets through a PyTorch layer using Hexatope sets.
+
+    Args:
+        layer: PyTorch layer (nn.Linear, nn.ReLU, nn.Flatten, etc.)
+        input_hexatopes: List of input Hexatope sets
+        method: 'exact' or 'approx'
+        **kwargs: Additional options (use_differentiable, dis_opt, etc.)
+
+    Returns:
+        List of output Hexatope sets
+    """
+    from . import linear_reach, relu_reach, flatten_reach
+
+    if isinstance(layer, nn.Linear):
+        return linear_reach.linear_hexatope(layer, input_hexatopes)
+
+    elif isinstance(layer, nn.ReLU):
+        dis_opt = kwargs.get('dis_opt', None)
+        if method == 'exact':
+            return relu_reach.relu_hexatope_exact(input_hexatopes, dis_opt=dis_opt)
+        else:
+            return relu_reach.relu_hexatope_approx(input_hexatopes, dis_opt=dis_opt)
+
+    elif isinstance(layer, nn.Flatten):
+        return flatten_reach.flatten_hexatope(layer, input_hexatopes)
+
+    elif isinstance(layer, nn.Identity):
+        return input_hexatopes
+
+    elif isinstance(layer, nn.Sequential):
+        # Recursively handle Sequential
+        current_hexatopes = input_hexatopes
+        for sublayer in layer:
+            current_hexatopes = reach_layer_hexatope(sublayer, current_hexatopes, method, **kwargs)
+        return current_hexatopes
+
+    else:
+        raise NotImplementedError(
+            f"Hexatope reachability not implemented for layer type: {type(layer).__name__}"
+        )
+
+
+def reach_layer_octatope(
+    layer: nn.Module,
+    input_octatopes: List,
+    method: str = 'exact',
+    **kwargs
+) -> List:
+    """
+    Compute reachable sets through a PyTorch layer using Octatope sets.
+
+    Args:
+        layer: PyTorch layer (nn.Linear, nn.ReLU, nn.Flatten, etc.)
+        input_octatopes: List of input Octatope sets
+        method: 'exact' or 'approx'
+        **kwargs: Additional options (use_differentiable, dis_opt, etc.)
+
+    Returns:
+        List of output Octatope sets
+    """
+    from . import linear_reach, relu_reach, flatten_reach
+
+    if isinstance(layer, nn.Linear):
+        return linear_reach.linear_octatope(layer, input_octatopes)
+
+    elif isinstance(layer, nn.ReLU):
+        dis_opt = kwargs.get('dis_opt', None)
+        if method == 'exact':
+            return relu_reach.relu_octatope_exact(input_octatopes, dis_opt=dis_opt)
+        else:
+            return relu_reach.relu_octatope_approx(input_octatopes, dis_opt=dis_opt)
+
+    elif isinstance(layer, nn.Flatten):
+        return flatten_reach.flatten_octatope(layer, input_octatopes)
+
+    elif isinstance(layer, nn.Identity):
+        return input_octatopes
+
+    elif isinstance(layer, nn.Sequential):
+        # Recursively handle Sequential
+        current_octatopes = input_octatopes
+        for sublayer in layer:
+            current_octatopes = reach_layer_octatope(sublayer, current_octatopes, method, **kwargs)
+        return current_octatopes
+
+    else:
+        raise NotImplementedError(
+            f"Octatope reachability not implemented for layer type: {type(layer).__name__}"
         )

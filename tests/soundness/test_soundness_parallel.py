@@ -9,7 +9,7 @@ import pytest
 import numpy as np
 
 import n2v
-from n2v.sets import Star, Box
+from n2v.sets import Star, Box, Hexatope, Octatope
 from n2v.config import set_parallel, config
 
 
@@ -319,3 +319,159 @@ class TestStarParallelSoundness:
         assert len(output_seq) > len(input_stars)
         assert len(output_par) > len(input_stars)
         assert len(output_seq) == len(output_par)
+
+
+class TestHexatopeSoundness:
+    """Test soundness of Hexatope operations."""
+
+    def setup_method(self):
+        """Reset configuration before each test."""
+        config.reset()
+
+    def test_hexatope_bounds_computation(self):
+        """Test that hexatope bounds computation is sound."""
+        lb = np.array([[0], [0], [0]], dtype=np.float32)
+        ub = np.array([[1], [1], [1]], dtype=np.float32)
+        hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Get ranges
+        lb_out, ub_out = hexatope.estimate_ranges()
+
+        # Verify soundness
+        assert np.all(lb_out >= lb - 1e-6)
+        assert np.all(ub_out <= ub + 1e-6)
+
+    def test_hexatope_affine_transformation(self):
+        """Test that hexatope affine transformation is sound."""
+        lb = np.zeros((3, 1), dtype=np.float32)
+        ub = np.ones((3, 1), dtype=np.float32)
+        hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply affine transformation: y = 2x + 1
+        W = np.eye(3) * 2
+        b = np.ones((3, 1))
+        result = hexatope.affine_map(W, b)
+
+        # Verify bounds
+        lb_out, ub_out = result.estimate_ranges()
+        expected_lb = 2 * lb + b
+        expected_ub = 2 * ub + b
+
+        np.testing.assert_allclose(lb_out, expected_lb, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(ub_out, expected_ub, rtol=1e-5, atol=1e-6)
+
+    def test_hexatope_negative_bounds(self):
+        """Test hexatope with negative bounds."""
+        lb = np.array([[-2], [-3], [-1]], dtype=np.float32)
+        ub = np.array([[-1], [-1], [0]], dtype=np.float32)
+        hexatope = Hexatope.from_bounds(lb, ub)
+
+        lb_out, ub_out = hexatope.estimate_ranges()
+
+        np.testing.assert_allclose(lb_out, lb, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(ub_out, ub, rtol=1e-5, atol=1e-6)
+
+    def test_hexatope_dimension_expansion(self):
+        """Test hexatope dimension expansion."""
+        lb = np.zeros((2, 1), dtype=np.float32)
+        ub = np.ones((2, 1), dtype=np.float32)
+        hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Expand to 3D
+        W = np.array([[1, 0], [0, 1], [1, 1]], dtype=np.float32)
+        b = np.zeros((3, 1), dtype=np.float32)
+        result = hexatope.affine_map(W, b)
+
+        # Verify output dimension
+        assert result.dim == 3
+
+    def test_hexatope_to_box_conversion(self):
+        """Test hexatope estimate_ranges soundness."""
+        lb = np.array([[1], [2], [3]], dtype=np.float32)
+        ub = np.array([[4], [5], [6]], dtype=np.float32)
+        hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Get ranges using estimation (exact get_ranges requires full DCS implementation)
+        lb_out, ub_out = hexatope.estimate_ranges()
+
+        # Estimated ranges should contain the original bounds
+        np.testing.assert_allclose(lb_out, lb, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(ub_out, ub, rtol=1e-5, atol=1e-6)
+
+
+class TestOctatopeSoundness:
+    """Test soundness of Octatope operations."""
+
+    def setup_method(self):
+        """Reset configuration before each test."""
+        config.reset()
+
+    def test_octatope_bounds_computation(self):
+        """Test that octatope bounds computation is sound."""
+        lb = np.array([[0], [0], [0]], dtype=np.float32)
+        ub = np.array([[1], [1], [1]], dtype=np.float32)
+        octatope = Octatope.from_bounds(lb, ub)
+
+        # Get ranges
+        lb_out, ub_out = octatope.estimate_ranges()
+
+        # Verify soundness
+        assert np.all(lb_out >= lb - 1e-6)
+        assert np.all(ub_out <= ub + 1e-6)
+
+    def test_octatope_affine_transformation(self):
+        """Test that octatope affine transformation is sound."""
+        lb = np.zeros((3, 1), dtype=np.float32)
+        ub = np.ones((3, 1), dtype=np.float32)
+        octatope = Octatope.from_bounds(lb, ub)
+
+        # Apply affine transformation: y = 2x + 1
+        W = np.eye(3) * 2
+        b = np.ones((3, 1))
+        result = octatope.affine_map(W, b)
+
+        # Verify bounds
+        lb_out, ub_out = result.estimate_ranges()
+        expected_lb = 2 * lb + b
+        expected_ub = 2 * ub + b
+
+        np.testing.assert_allclose(lb_out, expected_lb, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(ub_out, expected_ub, rtol=1e-5, atol=1e-6)
+
+    def test_octatope_negative_bounds(self):
+        """Test octatope with negative bounds."""
+        lb = np.array([[-2], [-3], [-1]], dtype=np.float32)
+        ub = np.array([[-1], [-1], [0]], dtype=np.float32)
+        octatope = Octatope.from_bounds(lb, ub)
+
+        lb_out, ub_out = octatope.estimate_ranges()
+
+        np.testing.assert_allclose(lb_out, lb, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(ub_out, ub, rtol=1e-5, atol=1e-6)
+
+    def test_octatope_dimension_expansion(self):
+        """Test octatope dimension expansion."""
+        lb = np.zeros((2, 1), dtype=np.float32)
+        ub = np.ones((2, 1), dtype=np.float32)
+        octatope = Octatope.from_bounds(lb, ub)
+
+        # Expand to 3D
+        W = np.array([[1, 0], [0, 1], [1, 1]], dtype=np.float32)
+        b = np.zeros((3, 1), dtype=np.float32)
+        result = octatope.affine_map(W, b)
+
+        # Verify output dimension
+        assert result.dim == 3
+
+    def test_octatope_to_box_conversion(self):
+        """Test octatope estimate_ranges soundness."""
+        lb = np.array([[1], [2], [3]], dtype=np.float32)
+        ub = np.array([[4], [5], [6]], dtype=np.float32)
+        octatope = Octatope.from_bounds(lb, ub)
+
+        # Get ranges using estimation (exact get_ranges requires full UTVPI implementation)
+        lb_out, ub_out = octatope.estimate_ranges()
+
+        # Estimated ranges should contain the original bounds
+        np.testing.assert_allclose(lb_out, lb, rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(ub_out, ub, rtol=1e-5, atol=1e-6)
