@@ -1067,13 +1067,39 @@ def _relu_star_exact_parallel(
     return output_stars
 
 
+def _relu_single_hexatope(I: Hexatope) -> Hexatope:
+    """
+    Approximate ReLU for a single Hexatope.
+
+    Uses interval arithmetic over-approximation. For each dimension:
+    - If ub <= 0: set to zero
+    - If lb >= 0: keep unchanged
+    - If crosses zero: use box over-approximation [0, max(0, ub)]
+
+    Args:
+        I: Input Hexatope
+
+    Returns:
+        Output Hexatope (over-approximation)
+    """
+    # Get bounds
+    lb, ub = I.estimate_ranges()
+
+    # Apply ReLU element-wise
+    new_lb = np.maximum(lb, 0)
+    new_ub = np.maximum(ub, 0)
+
+    # Create new hexatope from bounds
+    return Hexatope.from_bounds(new_lb, new_ub)
+
+
 def relu_hexatope(input_hexatopes: List[Hexatope]) -> List[Hexatope]:
     """
     ReLU for Hexatopes (approximate, interval-based).
 
     Uses interval arithmetic over-approximation. For each dimension:
     - If ub <= 0: set to zero
-    - If lb >= 0: keep unchanged  
+    - If lb >= 0: keep unchanged
     - If crosses zero: use box over-approximation [0, max(0, ub)]
 
     Args:
@@ -1083,20 +1109,55 @@ def relu_hexatope(input_hexatopes: List[Hexatope]) -> List[Hexatope]:
         List of output Hexatopes (over-approximation)
     """
     output_hexatopes = []
-
     for hexatope in input_hexatopes:
-        # Get bounds
-        lb, ub = hexatope.estimate_ranges()
-        
-        # Apply ReLU element-wise
-        new_lb = np.maximum(lb, 0)
-        new_ub = np.maximum(ub, 0)
-        
-        # Create new hexatope from bounds
-        output_hexatope = Hexatope.from_bounds(new_lb, new_ub)
-        output_hexatopes.append(output_hexatope)
-
+        output_hexatopes.append(_relu_single_hexatope(hexatope))
     return output_hexatopes
+
+
+def relu_hexatope_approx(
+    input_hexatopes: List[Hexatope],
+    dis_opt: Optional[str] = None
+) -> List[Hexatope]:
+    """
+    Approximate reachability for ReLU using Hexatope sets.
+
+    Uses interval arithmetic over-approximation without splitting. This is the
+    same as relu_hexatope but with consistent naming and signature.
+
+    Args:
+        input_hexatopes: List of input Hexatope sets
+        dis_opt: 'display' to show progress (not used for approx)
+
+    Returns:
+        List of output Hexatope sets (same count as input, no splitting)
+    """
+    return relu_hexatope(input_hexatopes)
+
+
+def _relu_single_octatope(I: Octatope) -> Octatope:
+    """
+    Approximate ReLU for a single Octatope.
+
+    Uses interval arithmetic over-approximation. For each dimension:
+    - If ub <= 0: set to zero
+    - If lb >= 0: keep unchanged
+    - If crosses zero: use box over-approximation [0, max(0, ub)]
+
+    Args:
+        I: Input Octatope
+
+    Returns:
+        Output Octatope (over-approximation)
+    """
+    # Get bounds
+    lb, ub = I.estimate_ranges()
+
+    # Apply ReLU element-wise
+    new_lb = np.maximum(lb, 0)
+    new_ub = np.maximum(ub, 0)
+
+    # Create new octatope from bounds
+    return Octatope.from_bounds(new_lb, new_ub)
 
 
 def relu_octatope(input_octatopes: List[Octatope]) -> List[Octatope]:
@@ -1115,20 +1176,29 @@ def relu_octatope(input_octatopes: List[Octatope]) -> List[Octatope]:
         List of output Octatopes (over-approximation)
     """
     output_octatopes = []
-
     for octatope in input_octatopes:
-        # Get bounds
-        lb, ub = octatope.estimate_ranges()
-
-        # Apply ReLU element-wise
-        new_lb = np.maximum(lb, 0)
-        new_ub = np.maximum(ub, 0)
-
-        # Create new octatope from bounds
-        output_octatope = Octatope.from_bounds(new_lb, new_ub)
-        output_octatopes.append(output_octatope)
-
+        output_octatopes.append(_relu_single_octatope(octatope))
     return output_octatopes
+
+
+def relu_octatope_approx(
+    input_octatopes: List[Octatope],
+    dis_opt: Optional[str] = None
+) -> List[Octatope]:
+    """
+    Approximate reachability for ReLU using Octatope sets.
+
+    Uses interval arithmetic over-approximation without splitting. This is the
+    same as relu_octatope but with consistent naming and signature.
+
+    Args:
+        input_octatopes: List of input Octatope sets
+        dis_opt: 'display' to show progress (not used for approx)
+
+    Returns:
+        List of output Octatope sets (same count as input, no splitting)
+    """
+    return relu_octatope(input_octatopes)
 
 
 def relu_hexatope_exact(
