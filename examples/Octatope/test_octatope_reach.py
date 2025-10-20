@@ -173,6 +173,11 @@ def test_tiny_network():
                                      set_type='octatope', method='exact',
                                      test_name='Octatope Exact')
 
+    # Run with Octatope exact-differentiable
+    result_oct_exact_diff = run_benchmark(model, input_lb, input_ub,
+                                          set_type='octatope', method='exact-differentiable',
+                                          test_name='Octatope Exact (Differentiable)')
+
     # Run with Octatope approx
     result_oct_approx = run_benchmark(model, input_lb, input_ub,
                                       set_type='octatope', method='approx',
@@ -182,6 +187,7 @@ def test_tiny_network():
         'test': 'tiny_network',
         'star_exact': result_star,
         'oct_exact': result_oct_exact,
+        'oct_exact_diff': result_oct_exact_diff,
         'oct_approx': result_oct_approx
     }
 
@@ -209,6 +215,11 @@ def test_small_network():
                                      set_type='octatope', method='exact',
                                      test_name='Octatope Exact')
 
+    # Run with Octatope exact-differentiable
+    result_oct_exact_diff = run_benchmark(model, input_lb, input_ub,
+                                          set_type='octatope', method='exact-differentiable',
+                                          test_name='Octatope Exact (Differentiable)')
+
     # Run with Octatope approx
     result_oct_approx = run_benchmark(model, input_lb, input_ub,
                                       set_type='octatope', method='approx',
@@ -218,6 +229,7 @@ def test_small_network():
         'test': 'small_network',
         'star_exact': result_star,
         'oct_exact': result_oct_exact,
+        'oct_exact_diff': result_oct_exact_diff,
         'oct_approx': result_oct_approx
     }
 
@@ -242,7 +254,7 @@ def test_medium_network():
                                 test_name='Baseline: Star Exact')
 
     if result_star['success'] and result_star['time'] > 60:
-        print("\n⚠️  Star exact took > 60s, skipping Octatope exact to save time")
+        print("\n⚠️  Star exact took > 60s, skipping Octatope exact methods to save time")
         print("    (Octatope exact would likely take much longer)")
         result_oct_exact = {
             'success': False,
@@ -250,11 +262,22 @@ def test_medium_network():
             'reason': 'Star baseline too slow',
             'test_name': 'Octatope Exact (Skipped)'
         }
+        result_oct_exact_diff = {
+            'success': False,
+            'skipped': True,
+            'reason': 'Star baseline too slow',
+            'test_name': 'Octatope Exact Differentiable (Skipped)'
+        }
     else:
         print("\n⏱ Running Octatope exact...")
         result_oct_exact = run_benchmark(model, input_lb, input_ub,
                                          set_type='octatope', method='exact',
                                          test_name='Octatope Exact')
+
+        print("\n⏱ Running Octatope exact-differentiable...")
+        result_oct_exact_diff = run_benchmark(model, input_lb, input_ub,
+                                              set_type='octatope', method='exact-differentiable',
+                                              test_name='Octatope Exact (Differentiable)')
 
     # Run with Octatope approx
     print("\n⏱ Running Octatope approx...")
@@ -266,6 +289,7 @@ def test_medium_network():
         'test': 'medium_network',
         'star_exact': result_star,
         'oct_exact': result_oct_exact,
+        'oct_exact_diff': result_oct_exact_diff,
         'oct_approx': result_oct_approx
     }
 
@@ -291,20 +315,30 @@ def print_summary(all_results):
         # Octatope exact
         oct_exact = test_results.get('oct_exact', {})
         if oct_exact.get('skipped'):
-            print(f"  Octatope Exact:    SKIPPED - {oct_exact.get('reason', '')}")
+            print(f"  Octatope Exact:             SKIPPED - {oct_exact.get('reason', '')}")
         elif oct_exact.get('success'):
             speedup = star_result['time'] / oct_exact['time'] if star_result.get('success') else 0
-            print(f"  Octatope Exact:    {oct_exact['time']:>8.3f}s  ({oct_exact['num_output_sets']} sets)  [{speedup:.2f}x vs Star]")
+            print(f"  Octatope Exact:             {oct_exact['time']:>8.3f}s  ({oct_exact['num_output_sets']} sets)  [{speedup:.2f}x vs Star]")
         else:
-            print(f"  Octatope Exact:    FAILED - {oct_exact.get('error', 'Unknown error')}")
+            print(f"  Octatope Exact:             FAILED - {oct_exact.get('error', 'Unknown error')}")
+
+        # Octatope exact-differentiable
+        oct_exact_diff = test_results.get('oct_exact_diff', {})
+        if oct_exact_diff.get('skipped'):
+            print(f"  Octatope Exact (Diff):      SKIPPED - {oct_exact_diff.get('reason', '')}")
+        elif oct_exact_diff.get('success'):
+            speedup = star_result['time'] / oct_exact_diff['time'] if star_result.get('success') else 0
+            print(f"  Octatope Exact (Diff):      {oct_exact_diff['time']:>8.3f}s  ({oct_exact_diff['num_output_sets']} sets)  [{speedup:.2f}x vs Star]")
+        else:
+            print(f"  Octatope Exact (Diff):      FAILED - {oct_exact_diff.get('error', 'Unknown error')}")
 
         # Octatope approx
         oct_approx = test_results.get('oct_approx', {})
         if oct_approx.get('success'):
             speedup = star_result['time'] / oct_approx['time'] if star_result.get('success') else 0
-            print(f"  Octatope Approx:   {oct_approx['time']:>8.3f}s  ({oct_approx['num_output_sets']} sets)  [{speedup:.2f}x vs Star]")
+            print(f"  Octatope Approx:            {oct_approx['time']:>8.3f}s  ({oct_approx['num_output_sets']} sets)  [{speedup:.2f}x vs Star]")
         else:
-            print(f"  Octatope Approx:   FAILED - {oct_approx.get('error', 'Unknown error')}")
+            print(f"  Octatope Approx:            FAILED - {oct_approx.get('error', 'Unknown error')}")
 
     print("\n" + "="*60)
     print("PERFORMANCE ANALYSIS")
@@ -314,6 +348,7 @@ def print_summary(all_results):
     for test_results in all_results:
         star_time = test_results.get('star_exact', {}).get('time', 0)
         oct_exact_time = test_results.get('oct_exact', {}).get('time', 0)
+        oct_exact_diff_time = test_results.get('oct_exact_diff', {}).get('time', 0)
         oct_approx_time = test_results.get('oct_approx', {}).get('time', 0)
 
         if star_time > 0 and oct_exact_time > 0:
@@ -322,6 +357,15 @@ def print_summary(all_results):
                 print(f"    This suggests a performance bottleneck in Octatope exact reachability.")
             elif oct_exact_time > star_time * 2:
                 print(f"\n⚠️  {test_results['test']}: Octatope exact is {oct_exact_time/star_time:.1f}x slower than Star.")
+
+        # Compare exact vs exact-differentiable
+        if oct_exact_time > 0 and oct_exact_diff_time > 0:
+            if oct_exact_diff_time < oct_exact_time:
+                speedup = oct_exact_time / oct_exact_diff_time
+                print(f"\n✓  {test_results['test']}: Differentiable solver is {speedup:.1f}x FASTER than CVXPY!")
+            elif oct_exact_diff_time > oct_exact_time * 1.5:
+                slowdown = oct_exact_diff_time / oct_exact_time
+                print(f"\n⚠️  {test_results['test']}: Differentiable solver is {slowdown:.1f}x slower than CVXPY.")
 
 
 def main():
