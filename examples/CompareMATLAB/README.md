@@ -157,7 +157,7 @@ input_star = Star(lb, ub);
 ```matlab
 % Exact reachability
 tic;
-output_stars = net.reach(input_star, 'exact-star');
+output_stars = net.reach(input_star, 'exact');
 elapsed_time = toc;
 
 fprintf('Computation time: %.2f seconds\\n', elapsed_time);

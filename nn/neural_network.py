@@ -151,7 +151,7 @@ class NeuralNetwork:
             >>> input_star = Star.from_bounds(lb, ub)
             >>> output_stars = net.reach(input_star, method='exact')
         """
-        from .reach import reach_pytorch_model
+        from n2v.nn.reach import reach_pytorch_model
 
         return reach_pytorch_model(
             self.model,
@@ -159,33 +159,6 @@ class NeuralNetwork:
             method=method,
             **kwargs
         )
-
-    def verify_property(
-        self,
-        input_set: Union['Star', 'Zono', 'Box'],
-        property_fn,
-        method: str = 'exact-star',
-    ) -> bool:
-        """
-        Verify a safety property.
-
-        Args:
-            input_set: Input specification
-            property_fn: Function that takes output set and returns True if safe
-            method: Reachability method to use
-
-        Returns:
-            True if property holds, False if violated, None if unknown
-        """
-        # Compute reachable sets
-        output_sets = self.reach(input_set, method=method)
-
-        # Check property on all output sets
-        for output_set in output_sets:
-            if not property_fn(output_set):
-                return False
-
-        return True
 
     def __repr__(self) -> str:
         return f"NeuralNetwork(layers={len(self.layers)}, input_size={self.input_size})"

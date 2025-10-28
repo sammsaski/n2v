@@ -6,9 +6,8 @@ import pytest
 import numpy as np
 import torch
 import torch.nn as nn
-from n2v.sets import Star, ImageStar
-from n2v.nn.reach.reach_star import reach_star_exact
-from n2v.nn.reach.reach_zono import reach_zono_approx
+from n2v.sets import Star, ImageStar, Zono
+from n2v.nn import NeuralNetwork
 
 
 class TestFeedforwardNetworks:
@@ -30,7 +29,7 @@ class TestFeedforwardNetworks:
         input_star = Star.from_bounds(lb, ub)
 
         # Verify
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         assert len(output_stars) >= 1
         for star in output_stars:
@@ -56,7 +55,7 @@ class TestFeedforwardNetworks:
         input_star = Star.from_bounds(lb, ub)
 
         # Verify
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         # Should preserve bounds (identity)
         assert len(output_stars) == 1
@@ -79,7 +78,7 @@ class TestFeedforwardNetworks:
         ub = np.array([[1.0], [1.0]])
         input_star = Star.from_bounds(lb, ub)
 
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         # May have significant splitting
         assert len(output_stars) >= 1
@@ -108,7 +107,7 @@ class TestCNNNetworks:
         input_star = ImageStar.from_bounds(lb, ub, height=2, width=2, num_channels=1)
 
         # Verify
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         # With only 2 ReLU neurons, max 4 stars (2^2)
         assert len(output_stars) >= 1
@@ -129,7 +128,7 @@ class TestCNNNetworks:
         ub = np.ones((4, 4, 1))
         input_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
 
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         # No ReLU, so should be exactly 1 star
         assert len(output_stars) == 1
@@ -149,7 +148,7 @@ class TestCNNNetworks:
         ub = np.ones((4, 4, 1))
         input_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
 
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         # With 4 ReLU neurons, max 16 stars (2^4)
         assert len(output_stars) >= 1
@@ -179,7 +178,7 @@ class TestRobustnessVerification:
         input_star = Star.from_bounds(lb, ub)
 
         # Verify
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         # Check all stars for robustness
         true_class = 1
@@ -216,7 +215,7 @@ class TestRobustnessVerification:
         ub = np.array([[0.5], [0.5]])
         input_star = Star.from_bounds(lb, ub)
 
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         # Get output bounds
         assert len(output_stars) == 1
@@ -246,7 +245,7 @@ class TestApproximateMethods:
         input_zono = Zono.from_bounds(lb, ub)
 
         # Approximate verification
-        output_zonos = reach_zono_approx(model, [input_zono])
+        output_zonos = NeuralNetwork(model).reach(input_zono, method="approx")
 
         # Approx should not split
         assert len(output_zonos) == 1
@@ -267,12 +266,12 @@ class TestApproximateMethods:
         # Exact method
         from n2v.sets import Star
         star = Star.from_bounds(lb, ub)
-        exact_output = reach_star_exact(model, [star])
+        exact_output = NeuralNetwork(model).reach(star, method="exact")
 
         # Approximate method
         from n2v.sets import Zono
         zono = Zono.from_bounds(lb, ub)
-        approx_output = reach_zono_approx(model, [zono])
+        approx_output = NeuralNetwork(model).reach(zono, method="approx")
 
         # Approximate should have fewer sets (no splitting)
         assert len(approx_output) <= len(exact_output)
@@ -292,7 +291,7 @@ class TestEdgeCases:
         ub = np.array([[1.0], [1.0]])
         input_star = Star.from_bounds(lb, ub)
 
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         assert len(output_stars) == 1
         assert output_stars[0].dim == 1
@@ -312,7 +311,7 @@ class TestEdgeCases:
         ub = center + epsilon
         input_star = Star.from_bounds(lb, ub)
 
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         # Small perturbation should still work
         assert len(output_stars) >= 1
@@ -328,7 +327,7 @@ class TestEdgeCases:
         point = np.array([[0.5], [0.5]])
         input_star = Star.from_bounds(point, point)
 
-        output_stars = reach_star_exact(model, [input_star])
+        output_stars = NeuralNetwork(model).reach(input_star, method="exact")
 
         # Point input might still split due to ReLU, but should be valid
         assert len(output_stars) >= 1

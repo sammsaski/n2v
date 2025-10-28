@@ -1,76 +1,124 @@
 """
-Layer reachability dispatcher - works directly with PyTorch layer types.
+Layer reachability dispatcher - routes computation based on layer type and set type.
 
-Dispatches reachability computation based on PyTorch layer type without
-requiring custom layer wrapper classes.
+Dispatches reachability computation for a single layer based on PyTorch layer type
+and input set type, without requiring custom layer wrapper classes.
 """
 
-import torch
 import torch.nn as nn
-import numpy as np
-from typing import List, Union, Optional
-from n2v.sets import Star, Zono, Box
+from typing import List, Union
 
 
-def reach_layer_star(
+def reach_layer(
     layer: nn.Module,
-    input_stars: List[Star],
+    input_sets: List,
     method: str = 'exact',
     **kwargs
-) -> List[Star]:
+) -> List:
     """
-    Compute reachable sets through a PyTorch layer using Star sets.
+    Compute reachable sets through a PyTorch layer.
+
+    Automatically detects the input set type and dispatches to the appropriate
+    layer-specific implementation.
 
     Args:
         layer: PyTorch layer (nn.Linear, nn.ReLU, nn.Conv2d, etc.)
-        input_stars: List of input Star sets
-        method: 'exact' or 'approx'
-        **kwargs: Additional options (lp_solver, relax_factor, etc.)
+        input_sets: List of input sets (Star, Zono, Box, Hexatope, or Octatope)
+        method: 'exact' or 'approx' (not all combinations supported)
+        **kwargs: Additional options:
+            - lp_solver: LP solver to use
+            - dis_opt: Display option
+            - parallel: Enable parallel processing
+            - n_workers: Number of workers
+            - relax_factor: Relaxation factor for approx methods
+            - relax_method: Relaxation strategy
 
     Returns:
-        List of output Star sets
+        List of output sets (same type as input)
+
+    Raises:
+        NotImplementedError: If layer/set combination is not supported
     """
-    from . import linear_reach, relu_reach, conv2d_reach, flatten_reach, maxpool2d_reach, avgpool2d_reach
+    from n2v.sets import Star, Zono, Box, Hexatope, Octatope
+    from n2v.sets.image_star import ImageStar
+    from n2v.sets.image_zono import ImageZono
+
+    if not input_sets:
+        return []
+
+    # Detect set type from first input
+    first_set = input_sets[0]
+
+    # Route based on set type (including ImageStar/ImageZono as subclasses)
+    if isinstance(first_set, (Star, ImageStar)):
+        return _reach_layer_star(layer, input_sets, method, **kwargs)
+    elif isinstance(first_set, (Zono, ImageZono)):
+        return _reach_layer_zono(layer, input_sets, method, **kwargs)
+    elif isinstance(first_set, Box):
+        return _reach_layer_box(layer, input_sets, method, **kwargs)
+    elif isinstance(first_set, Hexatope):
+        return _reach_layer_hexatope(layer, input_sets, method, **kwargs)
+    elif isinstance(first_set, Octatope):
+        return _reach_layer_octatope(layer, input_sets, method, **kwargs)
+    else:
+        raise TypeError(
+            f"Unsupported set type: {type(first_set).__name__}. "
+            f"Supported: Star, ImageStar, Zono, ImageZono, Box, Hexatope, Octatope"
+        )
+
+
+def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
+    """Star set reachability through a layer."""
+    from . import linear_reach, relu_reach, conv2d_reach, flatten_reach
+    from . import maxpool2d_reach, avgpool2d_reach
 
     if isinstance(layer, nn.Linear):
-        return linear_reach.linear_star(layer, input_stars)
+        return linear_reach.linear_star(layer, input_sets)
 
     elif isinstance(layer, nn.ReLU):
         lp_solver = kwargs.get('lp_solver', 'default')
         dis_opt = kwargs.get('dis_opt', None)
         parallel = kwargs.get('parallel', None)
         n_workers = kwargs.get('n_workers', None)
+
         if method == 'exact':
-            return relu_reach.relu_star_exact(input_stars, lp_solver=lp_solver, dis_opt=dis_opt,
-                                             parallel=parallel, n_workers=n_workers)
-        else:
+            return relu_reach.relu_star_exact(
+                input_sets, lp_solver=lp_solver, dis_opt=dis_opt,
+                parallel=parallel, n_workers=n_workers
+            )
+        else:  # approx
             relax_factor = kwargs.get('relax_factor', 0.5)
             relax_method = kwargs.get('relax_method', 'standard')
-            return relu_reach.relu_star_approx(input_stars, relax_factor, lp_solver, relax_method)
+            return relu_reach.relu_star_approx(
+                input_sets, relax_factor, lp_solver, relax_method
+            )
 
     elif isinstance(layer, nn.Conv2d):
-        return conv2d_reach.conv2d_star(layer, input_stars, method=method, **kwargs)
+        return conv2d_reach.conv2d_star(layer, input_sets, method=method, **kwargs)
 
     elif isinstance(layer, nn.MaxPool2d):
         lp_solver = kwargs.get('lp_solver', 'default')
         dis_opt = kwargs.get('dis_opt', None)
-        return maxpool2d_reach.maxpool2d_star(layer, input_stars, method=method, lp_solver=lp_solver, dis_opt=dis_opt, **kwargs)
+        return maxpool2d_reach.maxpool2d_star(
+            layer, input_sets, method=method, lp_solver=lp_solver,
+            dis_opt=dis_opt, **kwargs
+        )
 
     elif isinstance(layer, nn.AvgPool2d):
-        return avgpool2d_reach.avgpool2d_star(layer, input_stars, **kwargs)
+        return avgpool2d_reach.avgpool2d_star(layer, input_sets, **kwargs)
 
     elif isinstance(layer, nn.Flatten):
-        return flatten_reach.flatten_star(layer, input_stars)
+        return flatten_reach.flatten_star(layer, input_sets)
 
     elif isinstance(layer, nn.Identity):
-        return input_stars
+        return input_sets
 
     elif isinstance(layer, nn.Sequential):
         # Recursively handle Sequential
-        current_stars = input_stars
+        current_sets = input_sets
         for sublayer in layer:
-            current_stars = reach_layer_star(sublayer, current_stars, method, **kwargs)
-        return current_stars
+            current_sets = reach_layer(sublayer, current_sets, method, **kwargs)
+        return current_sets
 
     else:
         raise NotImplementedError(
@@ -78,45 +126,34 @@ def reach_layer_star(
         )
 
 
-def reach_layer_zono(
-    layer: nn.Module,
-    input_zonos: List[Zono]
-) -> List[Zono]:
-    """
-    Compute reachable sets through a PyTorch layer using Zonotopes.
-
-    Args:
-        layer: PyTorch layer
-        input_zonos: List of input Zonotopes
-
-    Returns:
-        List of output Zonotopes
-    """
-    from . import linear_reach, relu_reach, flatten_reach, maxpool2d_reach, avgpool2d_reach
+def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
+    """Zonotope reachability through a layer."""
+    from . import linear_reach, relu_reach, flatten_reach
+    from . import maxpool2d_reach, avgpool2d_reach
 
     if isinstance(layer, nn.Linear):
-        return linear_reach.linear_zono(layer, input_zonos)
+        return linear_reach.linear_zono(layer, input_sets)
 
     elif isinstance(layer, nn.ReLU):
-        return relu_reach.relu_zono_approx(input_zonos)
+        return relu_reach.relu_zono_approx(input_sets)
 
     elif isinstance(layer, nn.MaxPool2d):
-        return maxpool2d_reach.maxpool2d_zono(layer, input_zonos)
+        return maxpool2d_reach.maxpool2d_zono(layer, input_sets)
 
     elif isinstance(layer, nn.AvgPool2d):
-        return avgpool2d_reach.avgpool2d_zono(layer, input_zonos)
+        return avgpool2d_reach.avgpool2d_zono(layer, input_sets)
 
     elif isinstance(layer, nn.Flatten):
-        return flatten_reach.flatten_zono(layer, input_zonos)
+        return flatten_reach.flatten_zono(layer, input_sets)
 
     elif isinstance(layer, nn.Identity):
-        return input_zonos
+        return input_sets
 
     elif isinstance(layer, nn.Sequential):
-        current_zonos = input_zonos
+        current_sets = input_sets
         for sublayer in layer:
-            current_zonos = reach_layer_zono(sublayer, current_zonos)
-        return current_zonos
+            current_sets = reach_layer(sublayer, current_sets, method, **kwargs)
+        return current_sets
 
     else:
         raise NotImplementedError(
@@ -124,39 +161,27 @@ def reach_layer_zono(
         )
 
 
-def reach_layer_box(
-    layer: nn.Module,
-    input_boxes: List[Box]
-) -> List[Box]:
-    """
-    Compute reachable sets through a PyTorch layer using Boxes.
-
-    Args:
-        layer: PyTorch layer
-        input_boxes: List of input Boxes
-
-    Returns:
-        List of output Boxes
-    """
+def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
+    """Box reachability through a layer."""
     from . import linear_reach, relu_reach, flatten_reach
 
     if isinstance(layer, nn.Linear):
-        return linear_reach.linear_box(layer, input_boxes)
+        return linear_reach.linear_box(layer, input_sets)
 
     elif isinstance(layer, nn.ReLU):
-        return relu_reach.relu_box(input_boxes)
+        return relu_reach.relu_box(input_sets)
 
     elif isinstance(layer, nn.Flatten):
-        return flatten_reach.flatten_box(layer, input_boxes)
+        return flatten_reach.flatten_box(layer, input_sets)
 
     elif isinstance(layer, nn.Identity):
-        return input_boxes
+        return input_sets
 
     elif isinstance(layer, nn.Sequential):
-        current_boxes = input_boxes
+        current_sets = input_sets
         for sublayer in layer:
-            current_boxes = reach_layer_box(sublayer, current_boxes)
-        return current_boxes
+            current_sets = reach_layer(sublayer, current_sets, method, **kwargs)
+        return current_sets
 
     else:
         raise NotImplementedError(
@@ -164,48 +189,31 @@ def reach_layer_box(
         )
 
 
-def reach_layer_hexatope(
-    layer: nn.Module,
-    input_hexatopes: List,
-    method: str = 'exact',
-    **kwargs
-) -> List:
-    """
-    Compute reachable sets through a PyTorch layer using Hexatope sets.
-
-    Args:
-        layer: PyTorch layer (nn.Linear, nn.ReLU, nn.Flatten, etc.)
-        input_hexatopes: List of input Hexatope sets
-        method: 'exact' or 'approx'
-        **kwargs: Additional options (use_differentiable, dis_opt, etc.)
-
-    Returns:
-        List of output Hexatope sets
-    """
+def _reach_layer_hexatope(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
+    """Hexatope reachability through a layer."""
     from . import linear_reach, relu_reach, flatten_reach
 
     if isinstance(layer, nn.Linear):
-        return linear_reach.linear_hexatope(layer, input_hexatopes)
+        return linear_reach.linear_hexatope(layer, input_sets)
 
     elif isinstance(layer, nn.ReLU):
         dis_opt = kwargs.get('dis_opt', None)
         if method == 'exact':
-            return relu_reach.relu_hexatope_exact(input_hexatopes, dis_opt=dis_opt)
-        else:
-            return relu_reach.relu_hexatope_approx(input_hexatopes, dis_opt=dis_opt)
+            return relu_reach.relu_hexatope_exact(input_sets, dis_opt=dis_opt)
+        else:  # approx
+            return relu_reach.relu_hexatope_approx(input_sets, dis_opt=dis_opt)
 
     elif isinstance(layer, nn.Flatten):
-        return flatten_reach.flatten_hexatope(layer, input_hexatopes)
+        return flatten_reach.flatten_hexatope(layer, input_sets)
 
     elif isinstance(layer, nn.Identity):
-        return input_hexatopes
+        return input_sets
 
     elif isinstance(layer, nn.Sequential):
-        # Recursively handle Sequential
-        current_hexatopes = input_hexatopes
+        current_sets = input_sets
         for sublayer in layer:
-            current_hexatopes = reach_layer_hexatope(sublayer, current_hexatopes, method, **kwargs)
-        return current_hexatopes
+            current_sets = reach_layer(sublayer, current_sets, method, **kwargs)
+        return current_sets
 
     else:
         raise NotImplementedError(
@@ -213,48 +221,31 @@ def reach_layer_hexatope(
         )
 
 
-def reach_layer_octatope(
-    layer: nn.Module,
-    input_octatopes: List,
-    method: str = 'exact',
-    **kwargs
-) -> List:
-    """
-    Compute reachable sets through a PyTorch layer using Octatope sets.
-
-    Args:
-        layer: PyTorch layer (nn.Linear, nn.ReLU, nn.Flatten, etc.)
-        input_octatopes: List of input Octatope sets
-        method: 'exact' or 'approx'
-        **kwargs: Additional options (use_differentiable, dis_opt, etc.)
-
-    Returns:
-        List of output Octatope sets
-    """
+def _reach_layer_octatope(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
+    """Octatope reachability through a layer."""
     from . import linear_reach, relu_reach, flatten_reach
 
     if isinstance(layer, nn.Linear):
-        return linear_reach.linear_octatope(layer, input_octatopes)
+        return linear_reach.linear_octatope(layer, input_sets)
 
     elif isinstance(layer, nn.ReLU):
         dis_opt = kwargs.get('dis_opt', None)
         if method == 'exact':
-            return relu_reach.relu_octatope_exact(input_octatopes, dis_opt=dis_opt)
-        else:
-            return relu_reach.relu_octatope_approx(input_octatopes, dis_opt=dis_opt)
+            return relu_reach.relu_octatope_exact(input_sets, dis_opt=dis_opt)
+        else:  # approx
+            return relu_reach.relu_octatope_approx(input_sets, dis_opt=dis_opt)
 
     elif isinstance(layer, nn.Flatten):
-        return flatten_reach.flatten_octatope(layer, input_octatopes)
+        return flatten_reach.flatten_octatope(layer, input_sets)
 
     elif isinstance(layer, nn.Identity):
-        return input_octatopes
+        return input_sets
 
     elif isinstance(layer, nn.Sequential):
-        # Recursively handle Sequential
-        current_octatopes = input_octatopes
+        current_sets = input_sets
         for sublayer in layer:
-            current_octatopes = reach_layer_octatope(sublayer, current_octatopes, method, **kwargs)
-        return current_octatopes
+            current_sets = reach_layer(sublayer, current_sets, method, **kwargs)
+        return current_sets
 
     else:
         raise NotImplementedError(

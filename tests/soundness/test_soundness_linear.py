@@ -17,7 +17,39 @@ class TestLinearStarSoundness:
     """Soundness tests for Linear layer with Star sets."""
 
     def test_identity_transformation(self):
-        """Test identity transformation: y = x."""
+        """
+        Test identity transformation: y = x.
+
+        Mathematical Setup:
+        -------------------
+        Input set: X = [0, 1] × [0, 1] (2D box)
+        Linear transformation: y = W·x + b where W = I₂, b = 0
+
+        Handwritten Solution:
+        --------------------
+        Step 1: Write the transformation
+            y = [1 0] · [x₁] + [0]
+                [0 1]   [x₂]   [0]
+
+        Step 2: Apply to each component
+            y₁ = 1·x₁ + 0·x₂ + 0 = x₁
+            y₂ = 0·x₁ + 1·x₂ + 0 = x₂
+
+        Step 3: Determine output bounds
+            Since x₁ ∈ [0, 1]:  y₁ = x₁ ∈ [0, 1]
+            Since x₂ ∈ [0, 1]:  y₂ = x₂ ∈ [0, 1]
+
+        Step 4: Result
+            Output set: Y = [0, 1] × [0, 1] (identical to input)
+
+        Verification:
+        ------------
+        Corner points:
+            (0, 0) → (0, 0) ✓
+            (1, 0) → (1, 0) ✓
+            (0, 1) → (0, 1) ✓
+            (1, 1) → (1, 1) ✓
+        """
         # Input: [0,1] x [0,1]
         lb = np.array([[0.0], [0.0]])
         ub = np.array([[1.0], [1.0]])
@@ -89,7 +121,37 @@ class TestLinearStarSoundness:
         assert np.allclose(output_ub, expected_ub, atol=1e-6)
 
     def test_rotation_90deg(self):
-        """Test 90-degree rotation in 2D."""
+        """
+        Test 90-degree rotation in 2D.
+
+        Mathematical Setup:
+        -------------------
+        Input set: X = [0, 1] × [0, 1] (unit square)
+        Rotation matrix: W = [0  -1]  (90° counterclockwise)
+                            [1   0]
+
+        Handwritten Solution:
+        --------------------
+        Step 1: Apply transformation to each corner
+            (0, 0) → (0·0 - 1·0, 1·0 + 0·0) = (0, 0)
+            (1, 0) → (0·1 - 1·0, 1·1 + 0·0) = (0, 1)
+            (0, 1) → (0·0 - 1·1, 1·0 + 0·1) = (-1, 0)
+            (1, 1) → (0·1 - 1·1, 1·1 + 0·1) = (-1, 1)
+
+        Step 2: Find bounding box of rotated corners
+            y₁ values: {0, 0, -1, -1} → y₁ ∈ [-1, 0]
+            y₂ values: {0, 1, 0, 1}   → y₂ ∈ [0, 1]
+
+        Step 3: Result
+            Output set bounds: Y = [-1, 0] × [0, 1]
+
+        Verification:
+        ------------
+        The unit square rotated 90° CCW gives a square with:
+         - Original (1,0) → new (0,1) (top)
+         - Original (0,1) → new (-1,0) (left)
+         - Bounding box: [-1,0] × [0,1] ✓
+        """
         # Input: [0,1] x [0,1]
         lb = np.array([[0.0], [0.0]])
         ub = np.array([[1.0], [1.0]])

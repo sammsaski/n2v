@@ -129,7 +129,7 @@ print("\nThe differences could be due to:")
 print("1. Different internal network representations after ONNX import")
 print("2. Different Star set initialization (ImageStar vs Star.from_bounds)")
 print("3. Different numerical precision or optimization in reach algorithms")
-print("4. Different approximation strategies in 'approx-star'")
+print("4. Different approximation strategies in 'approx'")
 
 print("\nTo verify Python implementation soundness:")
 print("- ✅ Nominal outputs match (< 1e-5): Network evaluation is consistent")
@@ -147,8 +147,8 @@ print("\nRECOMMENDATION:")
 if matlab_robust == python_robust and max_diff_nominal < 1e-5:
     print("Both implementations appear to be working correctly.")
     print("Bound differences are likely due to different approximation strategies,")
-    print("which is expected for 'approx-star' methods.")
-    print("\nTo verify exact equivalence, try using 'exact-star' method in both.")
+    print("which is expected for 'approx' methods.")
+    print("\nTo verify exact equivalence, try using 'exact' method in both.")
 else:
     print("Further investigation needed - check network loading and Star set creation.")
 

@@ -255,7 +255,7 @@ The verification returns one of three results:
 ACAS Xu properties test various safety conditions:
 
 - **Property 1-2**: If the intruder is distant and slower, COC advisory should not be issued
-- **Properties 3-4**: Test advisories for head-on scenarios (use approx-star first in MATLAB)
+- **Properties 3-4**: Test advisories for head-on scenarios (use approx first in MATLAB)
 - **Properties 5-10**: Various other safety-critical scenarios
 
 ### Property Format
@@ -283,13 +283,13 @@ Example (Property 3):
 
 ### Python vs MATLAB Comparison
 
-**Performance** (for ACAS Xu 1_4 + prop_3 with exact-star):
+**Performance** (for ACAS Xu 1_4 + prop_3 with exact):
 - **MATLAB**: ~60s (with multi-core)
 - **Python**: ~118s (single-core)
 
 **Method Selection** (from MATLAB `run_vnncomp_instance.m`):
-- For properties 3 and 4: Try `approx-star` first, fall back to `exact-star` if needed
-- For other properties: Use `exact-star` directly
+- For properties 3 and 4: Try `approx` (Star) first, fall back to `exact` (Star) if needed
+- For other properties: Use `exact` (Star) directly
 
 **Verification Logic**:
 Both implementations check intersection with unsafe regions:

@@ -52,24 +52,23 @@ class DifferenceConstraintSystem:
         Convert DCS to constraint graph for minimum cost flow
 
         For each constraint x_i - x_j ≤ b, add edge (v_j, v_i) with cost b.
-        Add extra vertex v_0 with edges (v_0, v_i) with cost 0 for all i > 0.
+
+        Graph nodes correspond directly to DCS variable indices (x_i → node i).
+
+        Only edges corresponding to actual DCS constraints are added. There are no
+        unconditional zero-cost edges, as those would create a short-circuit that
+        allows MCF to satisfy demands at zero cost, breaking the dual objective.
         """
         G = nx.DiGraph()
 
-        # Add vertices
-        G.add_node(0)  # Extra vertex v_0
-        for i in range(1, self.num_vars + 1):
+        # Add vertices for DCS variables (direct indexing: x_i → node i)
+        for i in range(self.num_vars):
             G.add_node(i)
 
-        # Add edges for each difference constraint
+        # Add edges for each difference constraint ONLY
         for dc in self.constraints:
             # Constraint x_i - x_j ≤ b becomes edge (v_j, v_i) with cost b
-            # Note: using 1-indexed for non-zero vertices
-            G.add_edge(dc.j + 1, dc.i + 1, cost=dc.b, capacity=float('inf'))
-
-        # Add edges from v_0 to all other vertices
-        for i in range(1, self.num_vars + 1):
-            G.add_edge(0, i, cost=0, capacity=float('inf'))
+            G.add_edge(dc.j, dc.i, cost=dc.b, capacity=float('inf'))
 
         return G
 
@@ -126,9 +125,7 @@ class Hexatope:
     def __init__(self, center: np.ndarray, generators: np.ndarray,
                  dcs: DifferenceConstraintSystem,
                  state_lb: Optional[np.ndarray] = None,
-                 state_ub: Optional[np.ndarray] = None,
-                 extra_A: Optional[np.ndarray] = None,
-                 extra_b: Optional[np.ndarray] = None):
+                 state_ub: Optional[np.ndarray] = None):
         """
         Initialize a hexatope
 
@@ -138,8 +135,6 @@ class Hexatope:
             dcs: Difference constraint system defining the kernel
             state_lb: Lower bounds for state variables (optional)
             state_ub: Upper bounds for state variables (optional)
-            extra_A: Additional linear constraint matrix (optional, for constraints beyond DCS)
-            extra_b: Additional linear constraint bounds (optional)
         """
         self.center = np.asarray(center, dtype=np.float64).reshape(-1)
         self.generators = np.asarray(generators, dtype=np.float64)
@@ -168,21 +163,6 @@ class Hexatope:
         self.state_lb = state_lb
         self.state_ub = state_ub
 
-        # Store extra linear constraints (for constraints that can't be expressed in DCS)
-        if extra_A is not None:
-            extra_A = np.asarray(extra_A, dtype=np.float64)
-            if extra_A.ndim == 1:
-                extra_A = extra_A.reshape(1, -1)
-            if extra_A.shape[1] != p:
-                raise ValueError(f"Extra constraint matrix has {extra_A.shape[1]} columns, expected {p}")
-        if extra_b is not None:
-            extra_b = np.asarray(extra_b, dtype=np.float64).reshape(-1, 1)
-            if extra_A is not None and extra_A.shape[0] != extra_b.shape[0]:
-                raise ValueError(f"Extra constraint matrix and vector size mismatch")
-
-        self.extra_A = extra_A
-        self.extra_b = extra_b
-
     @property
     def dim(self) -> int:
         """Dimension of the hexatope (output dimension)"""
@@ -202,6 +182,25 @@ class Hexatope:
         """
         Create a hexatope representing a hyperrectangle [lower, upper]
 
+        Uses the anchor variable technique to represent absolute bounds in DCS.
+
+        Implementation Detail:
+        ----------------------
+        A pure DCS cannot express absolute bounds on variables without a reference point.
+        We introduce an "anchor variable" x_0 that serves as the reference (conceptually x_0 = 0).
+
+        For each generator variable x_i ∈ [-1, 1], we encode:
+        - x_i - x_0 ≤ 1   (upper bound: x_i ≤ 1 when x_0 = 0)
+        - x_0 - x_i ≤ 1   (lower bound: x_i ≥ -1 when x_0 = 0)
+
+        The anchor variable has a ZERO generator column, so it doesn't affect
+        the affine transformation y = Gx + c. All affine operations work correctly
+        because the anchor column contributes 0 to all output dimensions.
+
+        Kernel structure:
+        - Index 0: anchor variable x_0 (generator column is zero)
+        - Index 1..n: actual generator variables corresponding to box dimensions
+
         Args:
             lb: Lower bounds
             ub: Upper bounds
@@ -216,40 +215,25 @@ class Hexatope:
         # Center: midpoint of box
         center = (lb + ub) / 2
 
-        # Generators: diagonal matrix with half-widths
+        # Generators: (n × n+1) matrix
+        # - Column 0 (anchor): all zeros (doesn't affect affine map)
+        # - Columns 1..n: diagonal with half-widths
         half_widths = (ub - lb) / 2
-        generators = np.diag(half_widths)
+        generators = np.zeros((n, n + 1))
+        generators[:, 0] = 0  # Anchor column: zero vector
+        generators[:, 1:] = np.diag(half_widths)  # Box generators
 
-        # DCS: -1 ≤ x_i ≤ 1 for each i in generator space
-        #
-        # Standard DCS representation for box [-1, 1]^n uses implicit reference x_0 = 0:
-        # For the constraint graph, vertex v_0 represents x_0 = 0 (implicit)
-        # Vertices v_1, ..., v_n represent x_1, ..., x_n
-        #
-        # However, in the DCS class, we only track n variables (x_1, ..., x_n).
-        # The reference x_0 = 0 is handled implicitly in the constraint graph.
-        #
-        # To represent x_i ≤ 1, we need to anchor to a known value.
-        # Since all vars are in [-1, 1], we can use relative constraints.
-        # But DCS alone without reference point cannot bound absolute values.
-        #
-        # Solution: Use both upper and lower bound constraints relative to other variables
-        # For box [-1, 1]^n, add constraints to bound each variable:
-        dcs = DifferenceConstraintSystem(n)
+        # DCS with n+1 variables (index 0 = anchor, indices 1..n = box dimensions)
+        dcs = DifferenceConstraintSystem(n + 1)
 
-        if n == 1:
-            # For 1D, we can't use difference constraints alone
-            # The constraint graph will handle this with v_0 reference
-            # No explicit DCS constraints needed - bounds come from optimization
-            pass
-        else:
-            # For multi-dimensional boxes, add constraints to maintain box structure
-            # x_i - x_j ≤ 2 for all i,j ensures max spread of 2
-            for i in range(n):
-                for j in range(n):
-                    if i != j:
-                        # x_i - x_j ≤ 2 (when x_i=1, x_j=-1: 1-(-1)=2)
-                        dcs.add_constraint(i, j, 2.0)
+        # Encode bounds [-1, 1] for each generator variable using anchor
+        # x_i - x_0 ≤ 1 and x_0 - x_i ≤ 1 means -1 ≤ x_i - x_0 ≤ 1
+        # When x_0 = 0 (fixed in LP), this gives -1 ≤ x_i ≤ 1
+        for i in range(1, n + 1):
+            # x_i - x_0 ≤ 1   (upper bound)
+            dcs.add_constraint(i, 0, 1.0)
+            # x_0 - x_i ≤ 1   (lower bound: x_i ≥ -1)
+            dcs.add_constraint(0, i, 1.0)
 
         return cls(center, generators, dcs, state_lb=lb.reshape(-1, 1),
                    state_ub=ub.reshape(-1, 1))
@@ -289,9 +273,8 @@ class Hexatope:
         # New generators: G' = WG
         new_generators = W @ self.generators
 
-        # Kernel constraints remain unchanged (both DCS and extra constraints)
-        return Hexatope(new_center, new_generators, self.dcs,
-                       extra_A=self.extra_A, extra_b=self.extra_b)
+        # Kernel constraints remain unchanged - deep copy to avoid aliasing bugs
+        return Hexatope(new_center, new_generators, self.dcs.copy())
 
     # ======================== Bounds Computation ========================
 
@@ -344,12 +327,16 @@ class Hexatope:
         if parallel and self.dim > 1:
             return self._get_ranges_parallel(use_mcf, n_workers)
 
-        # Sequential version - use LP for reliability
+        # Sequential version - use MCF by default with LP fallback
         for i in range(self.dim):
-            lb_i, ub_i = self.get_range(i, use_mcf=False)  # Force LP for now
+            lb_i, ub_i = self.get_range(i, use_mcf=use_mcf)
             if lb_i is None or ub_i is None:
-                # Fallback to estimation if exact fails
-                lb_i, ub_i = self.estimate_range(i)
+                # Try LP fallback if MCF failed
+                if use_mcf:
+                    lb_i, ub_i = self.get_range(i, use_mcf=False)
+                # Final fallback to estimation if both failed
+                if lb_i is None or ub_i is None:
+                    lb_i, ub_i = self.estimate_range(i)
             lb[i] = lb_i
             ub[i] = ub_i
 
@@ -360,7 +347,7 @@ class Hexatope:
         Alias for get_ranges() for API consistency with other set types.
 
         Args:
-            use_mcf: If True, use min-cost flow; else use LP
+            use_mcf: If True, use min-cost flow; else use LP (default: MCF)
 
         Returns:
             Tuple of (lb, ub) arrays
@@ -444,7 +431,7 @@ class Hexatope:
         return Box(lb, ub)
 
     def optimize_linear(self, objective: np.ndarray, maximize: bool = True,
-                       use_mcf: bool = True) -> Optional[float]:
+                       use_mcf: bool = True, use_differentiable: bool = False) -> Optional[float]:
         """
         Optimize linear objective over hexatope
 
@@ -458,6 +445,7 @@ class Hexatope:
             objective: Objective vector f ∈ ℝⁿ
             maximize: If True, maximize; else minimize
             use_mcf: If True, use min-cost flow; else use LP
+            use_differentiable: If True, use differentiable solver (MCF or LP)
 
         Returns:
             Optimal value, or None if infeasible
@@ -474,53 +462,104 @@ class Hexatope:
 
         # Now optimize w^T x over DCS
         if use_mcf:
-            result = self._optimize_dcs_mcf(composed_obj, constant_term, maximize)
+            result = self._optimize_dcs_mcf(composed_obj, constant_term, maximize, use_differentiable)
         else:
-            result = self._optimize_dcs_lp(composed_obj, constant_term, maximize)
+            result = self._optimize_dcs_lp(composed_obj, constant_term, maximize, use_differentiable)
 
         return result
 
     def _optimize_dcs_mcf(self, w: np.ndarray, constant: float,
-                          maximize: bool) -> Optional[float]:
+                          maximize: bool, use_differentiable: bool = False) -> Optional[float]:
         """
         Optimize linear objective w^T x + constant over DCS using min-cost flow
 
         Reduces to minimum cost flow problem on constraint graph.
-        """
-        if maximize:
-            w = -w
-            constant = -constant
+        Can use either NetworkX's network_simplex (traditional) or
+        differentiable DCS solver (gradient-based).
 
+        Args:
+            w: Objective coefficients
+            constant: Constant term
+            maximize: If True, maximize; else minimize
+            use_differentiable: If True, use differentiable solver
+
+        Returns:
+            Optimal value, or None if infeasible
+        """
         # Build constraint graph
         G = self.dcs.to_constraint_graph()
 
-        # Set demands as node attributes based on objective coefficients
-        # d(v_i) = w_i for i > 0, d(v_0) = -sum(w)
-        nx.set_node_attributes(G, 0, 'demand')  # Default all to 0
-        G.nodes[0]['demand'] = float(-np.sum(w))
-        for i in range(self.dcs.num_vars):
-            G.nodes[i + 1]['demand'] = float(w[i])
+        if use_differentiable:
+            # Use differentiable DCS solver
+            try:
+                from n2v.utils.lpsolver import solve_dcs_differentiable
 
-        # Check if total demand is zero (required for feasibility)
-        total_demand = sum(G.nodes[n]['demand'] for n in G.nodes())
-        if not np.isclose(total_demand, 0):
-            return None
+                optimal_value, info = solve_dcs_differentiable(
+                    constraint_graph=G,
+                    objective_coef=w,
+                    constant_term=constant,
+                    maximize=maximize,
+                    num_epochs=100,
+                    batch_size=32,
+                    verbose=False
+                )
 
-        try:
-            # Solve minimum cost flow using network simplex
-            # demand parameter is the attribute name (default 'demand')
-            flow_cost, flow_dict = nx.network_simplex(G, demand='demand', weight='cost')
+                return optimal_value
 
-            # The optimal value is flow_cost + constant
-            optimal_value = flow_cost + constant
+            except Exception as e:
+                # Fall back to NetworkX if differentiable solver fails
+                print(f"Differentiable DCS solver failed: {e}, falling back to network_simplex")
+                use_differentiable = False
 
+        if not use_differentiable:
+            # Use traditional network simplex (NetworkX)
+            # MCF with demands=w computes max w^T x (dual objective = primal max)
+            # To compute min: feed -w and negate result
+            # To compute max: feed +w directly
             if maximize:
-                optimal_value = -optimal_value
+                w_adj = w
+                constant_adj = constant
+                sgn = +1
+            else:
+                w_adj = -w
+                constant_adj = -constant
+                sgn = -1
 
-            return optimal_value
+            # Set demands as node attributes based on objective coefficients
+            # Balance total demand at the anchor node (x_0, node 0)
+            # This is the dual analogue of the primal constraint x_0 = 0
+            d = w_adj.astype(float).copy()
+            d[0] -= d.sum()  # Soak imbalance into anchor; now sum(d) = 0
 
-        except (nx.NetworkXUnfeasible, nx.NetworkXUnbounded):
-            return None
+            for i in range(self.dcs.num_vars):
+                G.nodes[i]['demand'] = float(d[i])
+
+            # Verify total demand is zero (required for MCF feasibility)
+            total_demand = sum(G.nodes[n]['demand'] for n in G.nodes())
+            if not np.isclose(total_demand, 0):
+                return None
+
+            try:
+                # Solve minimum cost flow using network simplex
+                flow_cost, flow_dict = nx.network_simplex(G, demand='demand', weight='cost')
+
+                # The optimal value with correct sign
+                optimal_value = sgn * (flow_cost + constant_adj)
+
+                return optimal_value
+
+            except nx.NetworkXUnfeasible:
+                # DCS constraints are infeasible
+                return None
+            except nx.NetworkXUnbounded:
+                # DCS is unbounded in objective direction
+                # This should not happen with proper anchor constraints
+                # but handle gracefully by returning None
+                return None
+            except Exception as e:
+                # Catch any other MCF solver errors and fall back
+                print(f"MCF solver error: {e}, returning None")
+                return None
 
     def _optimize_dcs_lp(self, w: np.ndarray, constant: float,
                          maximize: bool, use_differentiable: bool = False) -> Optional[float]:
@@ -528,7 +567,7 @@ class Hexatope:
         Optimize linear objective w^T x + constant over DCS using LP
 
         Fallback method using standard LP solver.
-        For hexatopes created from bounds, we assume x ∈ [-1, 1]^n in generator space.
+        Bounds on variables come from the DCS constraints themselves (via anchor variable).
 
         Args:
             w: Objective coefficients
@@ -538,44 +577,29 @@ class Hexatope:
         """
         A, b = self.dcs.to_matrix_form()
 
-        # Combine DCS constraints with extra constraints
-        if self.extra_A is not None and self.extra_A.shape[0] > 0:
-            if A.shape[0] > 0:
-                A = np.vstack([A, self.extra_A])
-                b = np.concatenate([b, self.extra_b.flatten()])
-            else:
-                A = self.extra_A
-                b = self.extra_b.flatten()
-
-        # Use differentiable solver if requested
+        # Use differentiable DCS solver if requested
         if use_differentiable:
             try:
-                from n2v.utils.lpsolver import solve_lp_differentiable
+                from n2v.utils.lpsolver import solve_dcs_differentiable
 
-                # Prepare bounds
-                lb = np.full(self.dcs.num_vars, -1.0)
-                ub = np.full(self.dcs.num_vars, 1.0)
+                # Build constraint graph
+                G = self.dcs.to_constraint_graph()
 
-                # Solve
-                x_opt, fval, status, _ = solve_lp_differentiable(
-                    f=w,
-                    A=A if A.shape[0] > 0 else None,
-                    b=b if A.shape[0] > 0 else None,
-                    lb=lb,
-                    ub=ub,
-                    minimize=not maximize,
+                # Solve using differentiable DCS solver
+                optimal_value, info = solve_dcs_differentiable(
+                    constraint_graph=G,
+                    objective_coef=w,
+                    constant_term=constant,
+                    maximize=maximize,
                     num_epochs=50,
                     batch_size=16,
                     verbose=False
                 )
 
-                if status == 'optimal' and fval is not None:
-                    return fval + constant
-                else:
-                    return None
+                return optimal_value
             except Exception as e:
                 # Fall back to standard LP if differentiable solver fails
-                print(f"Differentiable solver failed: {e}, falling back to CVXPY")
+                print(f"Differentiable DCS solver failed: {e}, falling back to CVXPY")
                 pass
 
         # Standard CVXPY solver
@@ -588,18 +612,18 @@ class Hexatope:
 
         constraints = []
 
-        # Add combined constraints if any
+        # Add DCS constraints
         if A.shape[0] > 0:
             constraints.append(A @ x <= b)
 
-        # Add box constraints [-1, 1]^n for generator space
-        # This is the key: DCS alone doesn't bound individual variables
-        constraints.append(x >= -1)
-        constraints.append(x <= 1)
+        # Fix anchor variable (index 0) to zero for LP
+        # Note: MCF handles this differently through demand structure,
+        # but LP needs explicit bound to avoid unbounded problem
+        constraints.append(x[0] == 0)
 
         prob = cp.Problem(objective, constraints)
         try:
-            prob.solve()
+            prob.solve(solver=cp.OSQP, eps_abs=1e-7, eps_rel=1e-7)
 
             if prob.status in ['optimal', 'optimal_inaccurate']:
                 return prob.value
@@ -617,46 +641,53 @@ class Hexatope:
         Section 5.2: Intersection with half-spaces.
 
         For hexatope H = <c, G, A, b> and halfspace {y | Hy ≤ g},
-        the result is H' = <c, G, A', b'> where A'x ≤ b' comprises:
-        - Original constraints: Ax ≤ b (DCS)
-        - New constraints: HGx ≤ g - Hc (may not be expressible in DCS)
+        we compute the tightest DCS bounding box that over-approximates
+        the intersection. This keeps the result in the DCS template domain.
 
         Uses Algorithm 5.1 (DCSBoundingBox) to compute DCS bounding box.
-        Additional linear constraints are stored separately since DCS cannot
-        express all linear constraints.
+
+        Following ChatGPT's recommendation: process constraints incrementally row-by-row
+        for empirically tighter and simpler results.
+
+        Note: This is an OVER-APPROXIMATION. The true intersection may include
+        points outside the DCS template. To get exactness, use star sets with
+        hexatope/octatope prefilters (as described in Section 5.3).
 
         Args:
-            H: Half-space matrix
-            g: Half-space vector
+            H: Half-space matrix (m × n)
+            g: Half-space vector (m × 1)
 
         Returns:
-            New Hexatope (over-approximation of intersection)
+            New Hexatope (over-approximation of intersection, DCS-only)
         """
         H = np.asarray(H, dtype=np.float64)
         g = np.asarray(g, dtype=np.float64).reshape(-1, 1)
 
+        # Ensure H is 2D
+        if len(H.shape) == 1:
+            H = H.reshape(1, -1)
+
         # New constraint in generator space: HGx ≤ g - Hc
-        constraint_coef = H @ self.generators  # Shape: (m, p) where m = #half-spaces, p = #generators
-        constraint_bound = g - H @ self.center.reshape(-1, 1)  # Shape: (m, 1)
+        constraint_coef = H @ self.generators  # (m × p) where m = #half-spaces, p = #generators
+        constraint_bound = g - H @ self.center.reshape(-1, 1)  # (m × 1)
 
-        # Combine with existing extra constraints
-        if self.extra_A is not None:
-            new_extra_A = np.vstack([self.extra_A, constraint_coef])
-            new_extra_b = np.vstack([self.extra_b, constraint_bound])
-        else:
-            new_extra_A = constraint_coef
-            new_extra_b = constraint_bound
+        # Process constraints incrementally (row-by-row) for tighter results
+        current_dcs = self.dcs
+        for k in range(constraint_coef.shape[0]):
+            # Extract single row
+            row_coef = constraint_coef[k:k+1, :]  # Keep 2D: (1 × p)
+            row_bound = constraint_bound[k:k+1, :]  # Keep 2D: (1 × 1)
 
-        # Create new DCS with bounding box (over-approximation)
-        new_dcs = self._dcs_bounding_box(self.dcs, constraint_coef, constraint_bound)
+            # Compute bounding box with this constraint
+            current_dcs = self._dcs_bounding_box(current_dcs, row_coef, row_bound)
 
-        return Hexatope(self.center, self.generators, new_dcs,
-                       state_lb=None, state_ub=None,
-                       extra_A=new_extra_A, extra_b=new_extra_b)
+        return Hexatope(self.center, self.generators, current_dcs,
+                       state_lb=None, state_ub=None)
 
     def _dcs_bounding_box(self, D: DifferenceConstraintSystem,
                          constraint_coef: np.ndarray,
-                         constraint_bound: np.ndarray) -> DifferenceConstraintSystem:
+                         constraint_bound: np.ndarray,
+                         use_mcf: bool = True) -> DifferenceConstraintSystem:
         """
         Algorithm 5.1: DCSBoundingBox (adapted for DCS)
 
@@ -665,18 +696,50 @@ class Hexatope:
         This computes an over-approximation of the intersection by finding
         the tightest difference constraints that bound the intersection.
 
-        Note: DCS constraints alone cannot express absolute bounds on individual
-        variables. The LP solver adds box constraints [-1, 1]^n when optimizing,
-        which provides the necessary bounding.
+        According to the paper (Section 5.2), these inner optimizations can and
+        should use MCF instead of LP for better performance.
 
         Args:
             D: Original DCS system
-            constraint_coef: Coefficients of new constraint
-            constraint_bound: Bound of new constraint
+            constraint_coef: Coefficients of new constraint (should be single row)
+            constraint_bound: Bound of new constraint (should be single value)
+            use_mcf: If True, use MCF for inner optimizations; else use LP
 
         Returns:
             New DCS system over-approximating the intersection
         """
+        # Ensure constraint_coef is 2D for processing
+        constraint_coef = np.atleast_2d(constraint_coef)
+        constraint_bound = np.atleast_1d(constraint_bound.flatten())
+
+        # Fast-path: If constraint is already DCS-expressible, add it directly
+        # Also handle normalized constraints (positive scalar multiples)
+        if constraint_coef.shape[0] == 1:
+            row = constraint_coef[0, :]
+            nonzero_indices = np.nonzero(row)[0]
+
+            # Check if DCS-expressible (exactly 2 nonzeros)
+            if len(nonzero_indices) == 2:
+                vals = row[nonzero_indices]
+                # Check if it's a scaled version of [+1, -1] or [-1, +1]
+                # i.e., vals = k * [+1, -1] for some k > 0
+                sorted_vals = sorted(vals)
+                if sorted_vals[0] < 0 and sorted_vals[1] > 0:
+                    # Positive scalar multiple check: vals[1] / vals[0] should be -1
+                    if np.isclose(sorted_vals[1] / (-sorted_vals[0]), 1.0):
+                        # This is a normalized DCS constraint: k*(x_i - x_j) <= b
+                        # Normalize to: x_i - x_j <= b/k
+                        scale = sorted_vals[1]  # The positive coefficient
+                        normalized_bound = constraint_bound[0] / scale
+
+                        new_dcs = D.copy()
+                        i_idx = nonzero_indices[np.argmax(vals)]  # Index with positive coef
+                        j_idx = nonzero_indices[np.argmin(vals)]  # Index with negative coef
+                        new_dcs.add_constraint(i_idx, j_idx, normalized_bound)
+                        return new_dcs
+
+        # Fall back to full bounding box algorithm for non-DCS constraints
+        # This is expensive: O(n²) optimizations
         # Start with a copy of the original DCS to preserve existing constraints
         new_dcs = D.copy()
 
@@ -694,8 +757,10 @@ class Hexatope:
                 obj[j] = -1.0  # Coefficient for x_j
 
                 # Maximize x_i - x_j to get upper bound
+                # Paper suggests using MCF here for performance
                 u_ij = self._optimize_with_constraint(D, obj, constraint_coef,
-                                                     constraint_bound, maximize=True)
+                                                     constraint_bound, maximize=True,
+                                                     use_mcf=use_mcf)
 
                 if u_ij is not None:
                     # Only add constraint if it's tighter than what we have
@@ -718,25 +783,80 @@ class Hexatope:
                                   obj: np.ndarray,
                                   constraint_coef: np.ndarray,
                                   constraint_bound: np.ndarray,
-                                  maximize: bool) -> Optional[float]:
+                                  maximize: bool,
+                                  use_mcf: bool = True) -> Optional[float]:
         """
-        Helper: optimize objective over DCS with additional linear constraint
+        Helper: optimize objective over DCS with additional linear constraints
 
         Solves: max/min obj^T x subject to:
-                - Dx ≤ d (original DCS constraints)
-                - constraint_coef^T x ≤ constraint_bound (new constraint)
-                - x ∈ [-1, 1]^n (box constraints for generator space)
+                - Dx ≤ d (original DCS constraints, including anchor bounds)
+                - constraint_coef @ x ≤ constraint_bound (new constraints, may be multiple rows)
+
+        According to the paper, when the new constraint can be expressed in DCS,
+        we can use MCF. Otherwise, we fall back to LP.
 
         Args:
             D: DCS system
             obj: Objective vector
-            constraint_coef: Coefficients of additional constraint
-            constraint_bound: Bound of additional constraint
+            constraint_coef: Coefficients of additional constraints (m × p matrix, m >= 1)
+            constraint_bound: Bounds of additional constraints (m × 1 vector)
             maximize: If True, maximize; else minimize
+            use_mcf: If True, try to use MCF fast-path when possible
 
         Returns:
             Optimal value, or None if infeasible
         """
+        constraint_coef = np.atleast_2d(constraint_coef)  # Ensure 2D
+        constraint_bound = np.atleast_1d(constraint_bound.flatten())  # Ensure 1D
+
+        # MCF fast-path: Check if ALL added constraints are DCS-expressible
+        # A constraint is DCS-expressible if it has exactly two nonzeros: +1 and -1
+        # (representing x_i - x_j ≤ b)
+        all_dcs_expressible = True
+        dcs_constraints = []  # List of (i, j, b) for each DCS-expressible constraint
+
+        if use_mcf:
+            for k in range(constraint_coef.shape[0]):
+                row = constraint_coef[k, :]
+                nonzero_indices = np.nonzero(row)[0]
+
+                # Check: exactly 2 nonzeros with values +1 and -1
+                if len(nonzero_indices) == 2:
+                    vals = row[nonzero_indices]
+                    if np.allclose(sorted(vals), [-1.0, 1.0]):
+                        # DCS-expressible: x_i - x_j ≤ b
+                        i_idx = nonzero_indices[np.argmax(vals)]  # Index with +1
+                        j_idx = nonzero_indices[np.argmin(vals)]  # Index with -1
+                        dcs_constraints.append((i_idx, j_idx, constraint_bound[k]))
+                    else:
+                        all_dcs_expressible = False
+                        break
+                else:
+                    all_dcs_expressible = False
+                    break
+
+        # If all constraints are DCS-expressible, use MCF fast-path
+        if use_mcf and all_dcs_expressible and len(dcs_constraints) > 0:
+            # Create augmented DCS with additional constraints
+            D_aug = D.copy()
+            for i, j, b in dcs_constraints:
+                D_aug.add_constraint(i, j, b)
+
+            # Create temporary hexatope for MCF optimization
+            temp_center = np.zeros(D_aug.num_vars)
+            temp_generators = np.eye(D_aug.num_vars)
+            temp_hex = Hexatope(temp_center, temp_generators, D_aug)
+
+            # Use MCF to optimize
+            try:
+                result = temp_hex._optimize_dcs_mcf(obj, 0.0, maximize, use_differentiable=False)
+                if result is not None:
+                    return result
+            except Exception:
+                # Fall back to LP if MCF fails
+                pass
+
+        # Fall back to LP for non-DCS constraints or if MCF failed
         A, b = D.to_matrix_form()
 
         x = cp.Variable(D.num_vars)
@@ -748,20 +868,20 @@ class Hexatope:
 
         constraints = []
 
-        # Add original DCS constraints
+        # Add original DCS constraints (includes bounds via anchor)
         if A.shape[0] > 0:
             constraints.append(A @ x <= b)
 
-        # Add new constraint
-        constraints.append(constraint_coef.flatten() @ x <= constraint_bound.flatten())
+        # Fix anchor variable (index 0) to zero for LP
+        constraints.append(x[0] == 0)
 
-        # Add box constraints for generator space
-        constraints.append(x >= -1)
-        constraints.append(x <= 1)
+        # Add new constraints (iterate over all rows if multiple)
+        for k in range(constraint_coef.shape[0]):
+            constraints.append(constraint_coef[k, :] @ x <= constraint_bound[k])
 
         prob = cp.Problem(objective, constraints)
         try:
-            prob.solve()
+            prob.solve(solver=cp.OSQP, eps_abs=1e-7, eps_rel=1e-7)
 
             if prob.status in ['optimal', 'optimal_inaccurate']:
                 return prob.value
@@ -781,12 +901,20 @@ class Hexatope:
 
     # ======================== Utility Methods ========================
 
-    def contains(self, x: np.ndarray) -> bool:
+    def contains(self, x: np.ndarray, tolerance: float = 1e-7) -> bool:
         """
         Check if point x is in the Hexatope
 
+        Uses two-phase approach per ChatGPT V3 feedback:
+        1. Fast-path: Least-squares solve to propose alpha
+        2. Explicit verification: Check residuals and constraints
+        3. Fallback: CVXPY feasibility LP if fast-path fails
+
+        This prevents false positives from solver inaccuracies.
+
         Args:
             x: Point to check (dim,) or (dim, 1)
+            tolerance: Numerical tolerance for feasibility checks
 
         Returns:
             True if x is in the Hexatope
@@ -796,41 +924,104 @@ class Hexatope:
         if x.shape[0] != self.dim:
             raise ValueError(f"Point dimension {x.shape[0]} doesn't match dim {self.dim}")
 
-        # Solve: find alpha such that G * alpha + c = x and DCS constraints hold
-        # This is: G * alpha = x - c
-
+        # Target: G * alpha = x - c
+        target = x - self.center
         A, b = self.dcs.to_matrix_form()
 
+        # Phase 1: Fast-path least-squares solve
+        # For hexatope, enforce alpha[0] = 0 (anchor variable)
+        try:
+            # Use least-squares to propose alpha
+            # Note: Need to handle anchor constraint alpha[0] = 0
+            # Approach: Solve only for alpha[1:], set alpha[0] = 0
+
+            G_reduced = self.generators[:, 1:]  # Remove anchor column (all zeros anyway)
+            if G_reduced.shape[1] > 0:
+                alpha_reduced, residuals, rank, s = np.linalg.lstsq(G_reduced, target, rcond=None)
+                # Reconstruct full alpha with anchor = 0
+                alpha_proposed = np.zeros(self.dcs.num_vars)
+                alpha_proposed[1:] = alpha_reduced
+            else:
+                # Edge case: only anchor variable
+                alpha_proposed = np.zeros(self.dcs.num_vars)
+
+            # Verify feasibility explicitly
+            # 1. Check residual: ||G*alpha - target||_inf <= tol
+            residual = self.generators @ alpha_proposed - target
+            if np.linalg.norm(residual, ord=np.inf) > tolerance:
+                # Residual too large, try LP fallback
+                pass
+            else:
+                # 2. Check anchor: alpha[0] == 0
+                if not np.isclose(alpha_proposed[0], 0.0, atol=tolerance):
+                    pass  # Anchor violated, try LP fallback
+                else:
+                    # 3. Check DCS constraints: A*alpha <= b + tol
+                    if A.shape[0] > 0:
+                        constraint_violations = A @ alpha_proposed - b
+                        if np.max(constraint_violations) > tolerance:
+                            pass  # Constraints violated, try LP fallback
+                        else:
+                            # All checks passed - fast-path success
+                            return True
+                    else:
+                        # No DCS constraints, residual check sufficient
+                        return True
+
+        except np.linalg.LinAlgError:
+            # Least-squares failed, fall through to LP
+            pass
+
+        # Phase 2: Fallback to CVXPY feasibility LP with OSQP solver
+        # Use OSQP (not SCS) for better accuracy in feasibility contexts
         alpha = cp.Variable(self.dcs.num_vars)
 
-        # For overdetermined systems (dim > nVar), use tolerance-based constraints
-        # instead of exact equality to handle numerical errors
-        tolerance = 1e-6
-        diff = self.generators @ alpha - (x - self.center)
+        diff = self.generators @ alpha - target
 
-        # Use soft constraints: ||G*alpha - (x-c)||_inf <= tolerance
+        # Use soft constraints: ||G*alpha - target||_inf <= tolerance
         constraints = [
             diff <= tolerance,
             diff >= -tolerance
         ]
 
+        # Add DCS constraints (includes bounds via anchor)
         if A.shape[0] > 0:
             constraints.append(A @ alpha <= b)
 
-        # Add box constraints [-1, 1]^n for generator space
-        # This is critical: hexatopes from bounds assume alpha ∈ [-1, 1]^n
-        constraints.append(alpha >= -1)
-        constraints.append(alpha <= 1)
-
-        # Also check extra constraints if present
-        if self.extra_A is not None and self.extra_A.shape[0] > 0:
-            constraints.append(self.extra_A @ alpha <= self.extra_b.flatten())
+        # Fix anchor variable (index 0) to zero
+        constraints.append(alpha[0] == 0)
 
         prob = cp.Problem(cp.Minimize(0), constraints)
         try:
-            prob.solve()
-            return prob.status in ['optimal', 'optimal_inaccurate']
-        except:
+            # Use OSQP solver with tight tolerances
+            prob.solve(solver=cp.OSQP, eps_abs=tolerance, eps_rel=tolerance, verbose=False)
+
+            if prob.status not in ['optimal', 'optimal_inaccurate']:
+                return False
+
+            # Explicit post-solve verification (prevents false positives)
+            alpha_val = alpha.value
+            if alpha_val is None:
+                return False
+
+            # Recheck residual
+            residual = self.generators @ alpha_val - target
+            if np.linalg.norm(residual, ord=np.inf) > tolerance:
+                return False
+
+            # Recheck anchor
+            if not np.isclose(alpha_val[0], 0.0, atol=tolerance):
+                return False
+
+            # Recheck DCS constraints
+            if A.shape[0] > 0:
+                constraint_violations = A @ alpha_val - b
+                if np.max(constraint_violations) > tolerance:
+                    return False
+
+            return True
+
+        except Exception:
             return False
 
     # ======================== Conversion Methods ========================
@@ -839,13 +1030,17 @@ class Hexatope:
         """
         Convert Hexatope to Star set representation
 
-        A Hexatope H = <c, G, DCS> represents {Gx + c : Ax ≤ b, x ∈ [-1, 1]^n}
-        where Ax ≤ b is the DCS constraint system.
+        A Hexatope H = <c, G, DCS> represents {Gx + c : Ax ≤ b}
+        where Ax ≤ b is the DCS constraint system (including anchor variable bounds).
 
         The corresponding Star set is:
         - V = [c, G] where c is the center and G columns are generators
-        - C = [A; -I; I] where A is DCS matrix, -I/I enforce box bounds
-        - d = [b; 1...1; 1...1] where b is DCS bounds, 1s are box bounds
+        - C = A where A is the DCS matrix
+        - d = b where b is the DCS bounds
+
+        Note: The anchor variable (index 0) has a zero generator column,
+        so it doesn't affect the affine transformation but does provide
+        bounds for the other variables through DCS constraints.
 
         This conversion is sound: if a point is in the Hexatope, it is also
         in the resulting Star set.
@@ -855,48 +1050,29 @@ class Hexatope:
         """
         from n2v.sets.star import Star
 
-        # Get DCS constraints in matrix form
+        # Get DCS constraints in matrix form (includes anchor bounds)
         A_dcs, b_dcs = self.dcs.to_matrix_form()
-
-        # Build constraint matrix C and bound vector d
-        # C includes:
-        # 1. DCS constraints: A_dcs * x <= b_dcs
-        # 2. Extra constraints (if any): extra_A * x <= extra_b
-        # 3. Box constraints: -1 <= x <= 1 (i.e., -x <= 1 and x <= 1)
 
         n_vars = self.dcs.num_vars
 
-        # Start with DCS constraints
+        # Build constraint matrix C and bound vector d
         if A_dcs.shape[0] > 0:
-            C_list = [A_dcs]
-            d_list = [b_dcs]
+            C = A_dcs
+            d = b_dcs.reshape(-1, 1)
         else:
-            C_list = []
-            d_list = []
-
-        # Add extra constraints if present
-        if self.extra_A is not None and self.extra_A.shape[0] > 0:
-            C_list.append(self.extra_A)
-            d_list.append(self.extra_b.flatten())
-
-        # Add box constraints: x <= 1 and -x <= 1 (i.e., x >= -1)
-        C_list.append(np.eye(n_vars))  # x <= 1
-        d_list.append(np.ones(n_vars))
-
-        C_list.append(-np.eye(n_vars))  # -x <= 1 (x >= -1)
-        d_list.append(np.ones(n_vars))
-
-        # Combine all constraints
-        C = np.vstack(C_list)
-        d = np.concatenate(d_list).reshape(-1, 1)
+            # Empty constraints (shouldn't happen with anchor, but handle gracefully)
+            C = np.zeros((0, n_vars))
+            d = np.zeros((0, 1))
 
         # Build basis matrix V = [c, G]
         # c is the center (dim,), G is the generator matrix (dim, n_vars)
         V = np.hstack([self.center.reshape(-1, 1), self.generators])
 
-        # Create predicate bounds (all generators are in [-1, 1])
-        pred_lb = np.full((n_vars, 1), -1.0)
-        pred_ub = np.full((n_vars, 1), 1.0)
+        # Predicate bounds: Hexatope generator variables are bounded in [-1, 1]
+        # The DCS constraints enforce this through the anchor variable
+        # Star expects predicate_lb and predicate_ub to be (nVar, 1) arrays
+        pred_lb = -np.ones((n_vars, 1))
+        pred_ub = np.ones((n_vars, 1))
 
         # Create Star set
         star = Star(V, C, d, pred_lb=pred_lb, pred_ub=pred_ub,
@@ -905,57 +1081,20 @@ class Hexatope:
         return star
 
     # ======================== Reachability Analysis ========================
-
-    def reach(
-        self,
-        model: 'nn.Module',
-        method: str = 'exact',
-        **kwargs
-    ) -> List['Hexatope']:
-        """
-        Perform reachability analysis through a neural network model.
-
-        Args:
-            model: PyTorch neural network model
-            method: Reachability method to use:
-                - 'exact': Exact reachability with exact ReLU handling using CVXPY
-                - 'exact-differentiable': Exact reachability using differentiable LP solver
-                - 'approx': Over-approximate reachability
-            **kwargs: Additional arguments:
-                - dis_opt: 'display' to show progress
-
-        Returns:
-            List of output Hexatope sets
-
-        Example:
-            >>> from n2v.sets import Hexatope
-            >>> import torch.nn as nn
-            >>> model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
-            >>> input_hex = Hexatope.from_bounds(lb, ub)
-            >>> # Standard exact method with CVXPY
-            >>> output_hexes = input_hex.reach(model, method='exact')
-            >>> # Exact method with differentiable solver
-            >>> output_hexes = input_hex.reach(model, method='exact-differentiable')
-        """
-        import torch.nn as nn
-        from n2v.nn.reach.reach_hexatope import reach_hexatope_exact, reach_hexatope_approx
-
-        if not isinstance(model, nn.Module):
-            raise TypeError(f"model must be a PyTorch nn.Module, got {type(model)}")
-
-        # Determine if we should use differentiable solver
-        use_differentiable = (method == 'exact-differentiable')
-
-        if method in ('exact', 'exact-differentiable'):
-            return reach_hexatope_exact(
-                model, [self],
-                use_differentiable=use_differentiable,
-                **kwargs
-            )
-        elif method == 'approx':
-            return reach_hexatope_approx(model, [self], **kwargs)
-        else:
-            raise ValueError(
-                f"Unknown method '{method}' for Hexatope reachability. "
-                f"Supported methods: 'exact', 'exact-differentiable', 'approx'"
-            )
+    # Note: Reachability analysis should be performed through NeuralNetwork.reach()
+    # instead of calling reach() on set objects directly. This maintains proper
+    # separation of concerns where sets represent geometric objects and reachability
+    # is a neural network operation.
+    #
+    # Example usage:
+    #     from n2v.nn import NeuralNetwork
+    #     from n2v.sets import Hexatope
+    #     import torch.nn as nn
+    #
+    #     model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
+    #     net = NeuralNetwork(model)
+    #     input_hex = Hexatope.from_bounds(lb, ub)
+    #     # Standard exact method with CVXPY
+    #     output_hexes = net.reach(input_hex, method='exact')
+    #     # Exact method with differentiable solver
+    #     output_hexes = net.reach(input_hex, method='exact-differentiable')

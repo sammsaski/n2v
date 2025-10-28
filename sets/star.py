@@ -525,38 +525,30 @@ class Star:
         if self.nVar == 0:
             return 0.0
 
-        # Define optimization variable
-        alpha = cp.Variable(self.nVar)
+        # Import locally to avoid circular dependency
+        from n2v.utils.lpsolver import solve_lp
 
-        # Objective
-        if minimize:
-            objective = cp.Minimize(f.T @ alpha)
+        # Prepare constraints for solve_lp
+        A = self.C if self.C.size > 0 else None
+        b = self.d if self.C.size > 0 else None
+        lb = self.predicate_lb if self.predicate_lb is not None else None
+        ub = self.predicate_ub if self.predicate_ub is not None else None
+
+        # Call centralized LP solver
+        x_opt, fval, status, info = solve_lp(
+            f=f,
+            A=A,
+            b=b,
+            lb=lb,
+            ub=ub,
+            solver=lp_solver,
+            minimize=minimize
+        )
+
+        # Return objective value or None if infeasible
+        if status in ['optimal', 'optimal_inaccurate']:
+            return fval
         else:
-            objective = cp.Maximize(f.T @ alpha)
-
-        # Constraints
-        constraints = []
-        if self.C.size > 0:
-            constraints.append(self.C @ alpha <= self.d.flatten())
-
-        if self.predicate_lb is not None:
-            constraints.append(alpha >= self.predicate_lb.flatten())
-        if self.predicate_ub is not None:
-            constraints.append(alpha <= self.predicate_ub.flatten())
-
-        # Solve
-        prob = cp.Problem(objective, constraints)
-        try:
-            if lp_solver == 'default':
-                prob.solve()
-            else:
-                prob.solve(solver=lp_solver)
-
-            if prob.status in ['optimal', 'optimal_inaccurate']:
-                return prob.value
-            else:
-                return None
-        except:
             return None
 
     def is_empty_set(self, lp_solver: str = 'default') -> bool:
@@ -566,10 +558,16 @@ class Star:
         Returns:
             True if empty, False otherwise
         """
-        # Try to solve feasibility LP
-        f = np.zeros((self.nVar, 1))
-        result = self._solve_lp(f, minimize=True, lp_solver=lp_solver)
-        return result is None
+        # Import locally to avoid circular dependency
+        from n2v.utils.lpsolver import check_feasibility
+
+        # Use centralized feasibility checker
+        A = self.C if self.C.size > 0 else None
+        b = self.d if self.C.size > 0 else None
+        lb = self.predicate_lb if self.predicate_lb is not None else None
+        ub = self.predicate_ub if self.predicate_ub is not None else None
+
+        return not check_feasibility(A=A, b=b, lb=lb, ub=ub, solver=lp_solver)
 
     def contains(self, x: np.ndarray, lp_solver: str = 'default') -> bool:
         """
@@ -676,55 +674,17 @@ class Star:
             return np.array([]).reshape(self.dim, 0)
 
     # ======================== Reachability Analysis ========================
-
-    def reach(
-        self,
-        model: 'nn.Module',
-        method: str = 'exact',
-        **kwargs
-    ) -> List['Star']:
-        """
-        Perform reachability analysis through a neural network model.
-
-        Args:
-            model: PyTorch neural network model
-            method: Reachability method to use:
-                - 'exact': Exact reachability with splitting
-                - 'approx': Over-approximate reachability with relaxation
-            **kwargs: Additional method-specific arguments:
-                For 'exact':
-                    - lp_solver: LP solver to use (default: 'default')
-                    - dis_opt: 'display' to show progress
-                    - parallel: Enable parallel Star processing
-                    - n_workers: Number of parallel workers
-                For 'approx':
-                    - relax_factor: Relaxation factor (0=exact, 1=max, default: 0.5)
-                    - relax_method: Relaxation strategy (default: 'standard')
-                    - lp_solver: LP solver to use (default: 'default')
-                    - dis_opt: 'display' to show progress
-
-        Returns:
-            List of output Star sets
-
-        Example:
-            >>> from n2v.sets import Star
-            >>> import torch.nn as nn
-            >>> model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
-            >>> input_star = Star.from_bounds(lb, ub)
-            >>> output_stars = input_star.reach(model, method='exact')
-        """
-        import torch.nn as nn
-        from n2v.nn.reach.reach_star import reach_star_exact, reach_star_approx
-
-        if not isinstance(model, nn.Module):
-            raise TypeError(f"model must be a PyTorch nn.Module, got {type(model)}")
-
-        if method == 'exact':
-            return reach_star_exact(model, [self], **kwargs)
-        elif method == 'approx':
-            return reach_star_approx(model, [self], **kwargs)
-        else:
-            raise ValueError(
-                f"Unknown method '{method}' for Star reachability. "
-                f"Supported methods: 'exact', 'approx'"
-            )
+    # Note: Reachability analysis should be performed through NeuralNetwork.reach()
+    # instead of calling reach() on set objects directly. This maintains proper
+    # separation of concerns where sets represent geometric objects and reachability
+    # is a neural network operation.
+    #
+    # Example usage:
+    #     from n2v.nn import NeuralNetwork
+    #     from n2v.sets import Star
+    #     import torch.nn as nn
+    #
+    #     model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
+    #     net = NeuralNetwork(model)
+    #     input_star = Star.from_bounds(lb, ub)
+    #     output_stars = net.reach(input_star, method='exact')

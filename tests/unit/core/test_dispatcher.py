@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 import torch.nn as nn
 from n2v.sets import Star
-from n2v.nn.layer_ops.dispatcher import reach_layer_star, reach_layer_zono, reach_layer_box
+from n2v.nn.layer_ops.dispatcher import reach_layer
 
 
 class TestDispatcherStar:
@@ -17,7 +17,7 @@ class TestDispatcherStar:
         layer = nn.Linear(3, 2)
         layer.eval()
 
-        result = reach_layer_star(layer, [simple_star], method='exact')
+        result = reach_layer(layer, [simple_star], method='exact')
 
         assert len(result) == 1
         assert result[0].dim == 2
@@ -26,7 +26,7 @@ class TestDispatcherStar:
         """Test dispatching ReLU layer with Star."""
         layer = nn.ReLU()
 
-        result = reach_layer_star(layer, [simple_star], method='exact')
+        result = reach_layer(layer, [simple_star], method='exact')
 
         assert len(result) >= 1
         for star in result:
@@ -37,7 +37,7 @@ class TestDispatcherStar:
         layer = nn.Conv2d(1, 2, kernel_size=3, padding=1)
         layer.eval()
 
-        result = reach_layer_star(layer, [simple_image_star], method='exact')
+        result = reach_layer(layer, [simple_image_star], method='exact')
 
         assert len(result) == 1
         assert result[0].num_channels == 2
@@ -46,7 +46,7 @@ class TestDispatcherStar:
         """Test dispatching MaxPool2D layer with ImageStar."""
         layer = nn.MaxPool2d(2, 2)
 
-        result = reach_layer_star(layer, [simple_image_star], method='exact')
+        result = reach_layer(layer, [simple_image_star], method='exact')
 
         assert len(result) >= 1
         assert result[0].height == 2
@@ -55,7 +55,7 @@ class TestDispatcherStar:
         """Test dispatching AvgPool2D layer with ImageStar."""
         layer = nn.AvgPool2d(2, 2)
 
-        result = reach_layer_star(layer, [simple_image_star], method='exact')
+        result = reach_layer(layer, [simple_image_star], method='exact')
 
         # AvgPool should never split
         assert len(result) == 1
@@ -65,7 +65,7 @@ class TestDispatcherStar:
         """Test dispatching Flatten layer with ImageStar."""
         layer = nn.Flatten()
 
-        result = reach_layer_star(layer, [simple_image_star], method='exact')
+        result = reach_layer(layer, [simple_image_star], method='exact')
 
         assert len(result) == 1
         assert result[0].dim == 16  # 4*4*1
@@ -78,7 +78,7 @@ class TestDispatcherStar:
         )
         layer.eval()
 
-        result = reach_layer_star(layer, [simple_star], method='exact')
+        result = reach_layer(layer, [simple_star], method='exact')
 
         assert len(result) >= 1
 
@@ -91,7 +91,7 @@ class TestDispatcherStar:
         layer = CustomLayer()
 
         with pytest.raises((ValueError, NotImplementedError)):
-            reach_layer_star(layer, [simple_star], method='exact')
+            reach_layer(layer, [simple_star], method='exact')
 
 
 class TestDispatcherZono:
@@ -102,7 +102,7 @@ class TestDispatcherZono:
         layer = nn.Linear(3, 2)
         layer.eval()
 
-        result = reach_layer_zono(layer, [simple_zono])
+        result = reach_layer(layer, [simple_zono])
 
         assert len(result) == 1
         assert result[0].dim == 2
@@ -111,7 +111,7 @@ class TestDispatcherZono:
         """Test dispatching ReLU layer with Zono."""
         layer = nn.ReLU()
 
-        result = reach_layer_zono(layer, [simple_zono])
+        result = reach_layer(layer, [simple_zono])
 
         assert len(result) == 1
         pytest.assert_zono_valid(result[0])
@@ -122,7 +122,7 @@ class TestDispatcherZono:
         layer = nn.Conv2d(1, 2, kernel_size=3, padding=1)
         layer.eval()
 
-        result = reach_layer_zono(layer, [simple_image_zono])
+        result = reach_layer(layer, [simple_image_zono])
 
         assert len(result) == 1
         assert result[0].num_channels == 2
@@ -131,7 +131,7 @@ class TestDispatcherZono:
         """Test dispatching MaxPool2D layer with ImageZono."""
         layer = nn.MaxPool2d(2, 2)
 
-        result = reach_layer_zono(layer, [simple_image_zono])
+        result = reach_layer(layer, [simple_image_zono])
 
         assert len(result) == 1
         assert result[0].height == 2
@@ -140,7 +140,7 @@ class TestDispatcherZono:
         """Test dispatching AvgPool2D layer with ImageZono."""
         layer = nn.AvgPool2d(2, 2)
 
-        result = reach_layer_zono(layer, [simple_image_zono])
+        result = reach_layer(layer, [simple_image_zono])
 
         assert len(result) == 1
         assert result[0].height == 2
@@ -149,7 +149,7 @@ class TestDispatcherZono:
         """Test dispatching Flatten layer with ImageZono."""
         layer = nn.Flatten()
 
-        result = reach_layer_zono(layer, [simple_image_zono])
+        result = reach_layer(layer, [simple_image_zono])
 
         assert len(result) == 1
         assert result[0].dim == 16
@@ -163,7 +163,7 @@ class TestDispatcherBox:
         layer = nn.Linear(3, 2)
         layer.eval()
 
-        result = reach_layer_box(layer, [simple_box])
+        result = reach_layer(layer, [simple_box])
 
         assert len(result) == 1
         assert result[0].dim == 2
@@ -172,7 +172,7 @@ class TestDispatcherBox:
         """Test dispatching ReLU layer with Box."""
         layer = nn.ReLU()
 
-        result = reach_layer_box(layer, [simple_box])
+        result = reach_layer(layer, [simple_box])
 
         assert len(result) == 1
         assert result[0].dim == simple_box.dim
@@ -189,7 +189,7 @@ class TestDispatcherBox:
 
         layer = nn.Flatten()
 
-        result = reach_layer_box(layer, [box])
+        result = reach_layer(layer, [box])
 
         assert len(result) == 1
 
@@ -201,8 +201,8 @@ class TestDispatcherOptions:
         """Test exact vs approx method for ReLU."""
         layer = nn.ReLU()
 
-        exact_result = reach_layer_star(layer, [simple_star], method='exact')
-        approx_result = reach_layer_star(layer, [simple_star], method='approx')
+        exact_result = reach_layer(layer, [simple_star], method='exact')
+        approx_result = reach_layer(layer, [simple_star], method='approx')
 
         # Approx should not split
         assert len(approx_result) <= len(exact_result)
@@ -211,8 +211,8 @@ class TestDispatcherOptions:
         """Test exact vs approx method for MaxPool2D."""
         layer = nn.MaxPool2d(2, 2)
 
-        exact_result = reach_layer_star(layer, [simple_image_star], method='exact')
-        approx_result = reach_layer_star(layer, [simple_image_star], method='approx')
+        exact_result = reach_layer(layer, [simple_image_star], method='exact')
+        approx_result = reach_layer(layer, [simple_image_star], method='approx')
 
         # Approx should not split
         assert len(approx_result) <= len(exact_result)
@@ -226,7 +226,7 @@ class TestDispatcherOptions:
         ub = np.array([[1.0], [1.0]])
         star_crossing_zero = Star.from_bounds(lb, ub)
 
-        reach_layer_star(layer, [star_crossing_zero], method='exact', dis_opt='display')
+        reach_layer(layer, [star_crossing_zero], method='exact', dis_opt='display')
 
         captured = capsys.readouterr()
         # Should print something about ReLU processing

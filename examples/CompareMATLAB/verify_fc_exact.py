@@ -18,7 +18,7 @@ from scipy.io import savemat, loadmat
 
 # Import NNV-Python
 from n2v.sets import Star
-from n2v.nn.reach.reach_star import reach_star_exact, reach_star_approx
+from n2v.nn import NeuralNetwork
 from n2v.utils.model_loader import load_onnx
 
 torch.manual_seed(42)
@@ -53,7 +53,7 @@ print(f"Test sample loaded. True label: {test_label} (MATLAB index: {l})")
 
 # In MATLAB: reachOptions.reachMethod = "relax-star-area"; reachOptions.relaxFactor = 0.5;
 # For comparison, we'll use exact-star method
-reach_method = "exact-star"
+reach_method = "exact"
 print(f"Reach method: {reach_method}\n")
 
 # =============================================================================
@@ -123,7 +123,8 @@ t_start = time.time()
 try:
     # Run reachability analysis (MATLAB verify_robustness)
     # In Python NNV, we compute reach set directly
-    R_list = reach_star_exact(net, [IS])
+    net_wrapper = NeuralNetwork(net)
+    R_list = net_wrapper.reach(IS, method="exact")
 
     # Check robustness: true class should be highest for all reachable outputs
     res = -1  # -1 means not robust, 1 means robust

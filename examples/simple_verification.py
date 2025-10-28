@@ -77,7 +77,7 @@ def example_basic_reachability():
 
     # Perform reachability analysis
     print("\nPerforming reachability analysis...")
-    output_sets = nn_verifier.reach(input_box, method='approx-box')
+    output_sets = nn_verifier.reach(input_box, method='approx')
 
     print(f"Number of output sets: {len(output_sets)}")
     for i, output_set in enumerate(output_sets):
@@ -142,7 +142,7 @@ def example_property_verification():
     is_safe = nn_verifier.verify_property(
         input_box,
         safety_property,
-        method='approx-box'
+        method='approx'
     )
 
     print(f"\nVerification result: {'SAFE' if is_safe else 'UNSAFE (or UNKNOWN)'}")
