@@ -488,3 +488,274 @@ class TestOctatope:
         np.testing.assert_allclose(bounds_mcf[1], bounds_lp[1], atol=1e-5)
 
 
+
+    # ========================================================================
+    # Octatope Soundness Tests (from test_octatope_soundness.py)
+    # ========================================================================
+
+    def test_from_bounds_utvpi_structure(self):
+        """Test that from_bounds creates proper UTVPI constraints"""
+        lb = np.array([0.0, 1.0])
+        ub = np.array([2.0, 3.0])
+
+        O = Octatope.from_bounds(lb, ub)
+
+        # Check dimensions
+        assert O.dim == 2, f"Expected dim=2, got {O.dim}"
+        assert O.nVar == 2, f"Expected nVar=2, got {O.nVar}"
+
+        # Check generator structure (diagonal with half-widths)
+        expected_gen = np.array([[1.0, 0.0],
+                                 [0.0, 1.0]])
+        assert np.allclose(O.generators, expected_gen), \
+            f"Expected generators:\n{expected_gen}\nGot:\n{O.generators}"
+
+        # Check center
+        expected_center = np.array([1.0, 2.0])
+        assert np.allclose(O.center, expected_center), \
+            f"Expected center {expected_center}, got {O.center}"
+
+        # Check UTVPI has absolute bounds
+        # Should have constraints like: x_i ≤ 1 and -x_i ≤ 1 for each i
+        assert O.utvpi.num_vars == 2, f"UTVPI should have 2 vars, got {O.utvpi.num_vars}"
+        assert len(O.utvpi.constraints) == 4, \
+            f"UTVPI should have 4 constraints (±x_i ≤ 1 for each i), got {len(O.utvpi.constraints)}"
+
+    def test_utvpi_includes_absolute_bounds(self):
+        """Verify UTVPI explicitly includes ±x_i ≤ 1 constraints"""
+        lb = np.array([0.0])
+        ub = np.array([1.0])
+
+        O = Octatope.from_bounds(lb, ub)
+
+        # Check UTVPI constraints
+        found_pos = False
+        found_neg = False
+        for c in O.utvpi.constraints:
+            # Check for x_0 ≤ 1 (i=0, j=0, ai=1, aj=0, b=1)
+            if c.i == 0 and c.j == 0 and c.ai == 1 and c.aj == 0 and np.isclose(c.b, 1.0):
+                found_pos = True
+            # Check for -x_0 ≤ 1 (i=0, j=0, ai=-1, aj=0, b=1)
+            if c.i == 0 and c.j == 0 and c.ai == -1 and c.aj == 0 and np.isclose(c.b, 1.0):
+                found_neg = True
+
+        assert found_pos, "UTVPI should contain x_0 ≤ 1"
+        assert found_neg, "UTVPI should contain -x_0 ≤ 1"
+
+    # ========================================================================
+    # Contains V3 Tests (from test_contains_v3.py)
+    # ========================================================================
+
+    def test_octatope_contains_interior_point(self):
+        """Basic test: Interior point should be contained"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        oct_box = Octatope.from_bounds(lb, ub)
+
+        # Interior point
+        assert oct_box.contains(np.array([0.5, 0.5]))
+        assert oct_box.contains(np.array([0.1, 0.9]))
+
+    def test_octatope_contains_boundary_point(self):
+        """Boundary points should be contained (within tolerance)"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        oct_box = Octatope.from_bounds(lb, ub)
+
+        # Boundary points
+        assert oct_box.contains(np.array([0.0, 0.5]))
+        assert oct_box.contains(np.array([1.0, 0.5]))
+        assert oct_box.contains(np.array([0.5, 0.0]))
+        assert oct_box.contains(np.array([0.5, 1.0]))
+
+        # Corners
+        assert oct_box.contains(np.array([0.0, 0.0]))
+        assert oct_box.contains(np.array([1.0, 1.0]))
+
+    def test_octatope_contains_exterior_point(self):
+        """Exterior points should NOT be contained"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        oct_box = Octatope.from_bounds(lb, ub)
+
+        # Clearly outside
+        assert not oct_box.contains(np.array([-0.1, 0.5]))
+        assert not oct_box.contains(np.array([1.1, 0.5]))
+        assert not oct_box.contains(np.array([0.5, -0.1]))
+        assert not oct_box.contains(np.array([0.5, 1.1]))
+
+        # Far outside
+        assert not oct_box.contains(np.array([2.0, 2.0]))
+        assert not oct_box.contains(np.array([-1.0, -1.0]))
+
+    def test_octatope_contains_near_boundary(self):
+        """Test points very close to boundary (edge case for false positives)"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        oct_box = Octatope.from_bounds(lb, ub)
+
+        tol = 1e-7
+
+        # Just inside (should pass)
+        assert oct_box.contains(np.array([0.0 + tol/2, 0.5]))
+        assert oct_box.contains(np.array([1.0 - tol/2, 0.5]))
+
+        # Just outside (should fail - critical test for false positives)
+        assert not oct_box.contains(np.array([-10*tol, 0.5]))
+        assert not oct_box.contains(np.array([1.0 + 10*tol, 0.5]))
+
+    def test_octatope_contains_after_affine_map(self):
+        """Test contains after affine transformation"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        oct_box = Octatope.from_bounds(lb, ub)
+
+        # Scale by 2 and translate by [1, 1]
+        W = 2.0 * np.eye(2)
+        b = np.array([1.0, 1.0])
+
+        oct_transformed = oct_box.affine_map(W, b)
+
+        # Original [0, 1]² becomes [1, 3]² after transformation
+        assert oct_transformed.contains(np.array([2.0, 2.0]))  # Center
+        assert oct_transformed.contains(np.array([1.0, 1.0]))  # Corner
+        assert oct_transformed.contains(np.array([3.0, 3.0]))  # Corner
+
+        # Outside transformed set
+        assert not oct_transformed.contains(np.array([0.5, 2.0]))
+        assert not oct_transformed.contains(np.array([3.5, 2.0]))
+
+    def test_octatope_contains_diagonal_constraint(self):
+        """Test octatope with diagonal UTVPI constraint"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        oct_box = Octatope.from_bounds(lb, ub)
+
+        # Intersect with x1 + x2 ≤ 1.0 (UTVPI constraint)
+        H = np.array([[1.0, 1.0]])
+        g = np.array([[1.0]])
+
+        oct_result = oct_box.intersect_half_space(H, g)
+
+        # Point (0.25, 0.25) has sum 0.5 < 1.0, should be inside
+        assert oct_result.contains(np.array([0.25, 0.25]))
+
+        # Point (0.4, 0.4) has sum 0.8 < 1.0, should be inside
+        assert oct_result.contains(np.array([0.4, 0.4]))
+
+    def test_octatope_contains_custom_tolerance(self):
+        """Test that custom tolerance parameter works"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        oct_box = Octatope.from_bounds(lb, ub)
+
+        # With looser tolerance
+        loose_tol = 1e-3
+        point = np.array([1.0 + 0.5e-3, 0.5])
+
+        # With default tight tolerance, should fail
+        assert not oct_box.contains(point, tolerance=1e-7)
+
+    def test_octatope_contains_degenerate_case(self):
+        """Test contains on very small/degenerate octatope"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1e-6, 1e-6])
+        oct_tiny = Octatope.from_bounds(lb, ub)
+
+        # Origin should be inside
+        assert oct_tiny.contains(np.array([0.0, 0.0]))
+
+        # Small point inside
+        assert oct_tiny.contains(np.array([0.5e-6, 0.5e-6]))
+
+        # Point outside tiny box
+        assert not oct_tiny.contains(np.array([2e-6, 0.0]))
+
+    # ========================================================================
+    # Multi-row Constraint Tests (from test_multirow_constraints.py)
+    # ========================================================================
+
+    def test_octatope_multirow_intersection(self):
+        """Test octatope intersection with multiple half-space constraints"""
+        # Create a 2D box [0, 2] × [0, 2]
+        lb = np.array([0.0, 0.0])
+        ub = np.array([2.0, 2.0])
+        oct_box = Octatope.from_bounds(lb, ub)
+
+        # Intersect with two half-spaces:
+        # x1 ≤ 1.5
+        # x2 ≤ 1.0
+        H = np.array([
+            [1.0, 0.0],
+            [0.0, 1.0]
+        ])
+        g = np.array([[1.5], [1.0]])
+
+        # Perform intersection
+        oct_result = oct_box.intersect_half_space(H, g)
+
+        # Test containment
+        assert oct_result.contains(np.array([0.5, 0.5]))
+        assert oct_result.contains(np.array([1.4, 0.9]))
+
+        # Verify optimization respects constraints
+        lb_result, ub_result = oct_result.get_ranges(use_mcf=False)
+
+        # Check tightening occurred
+        assert ub_result[0] <= 2.0
+        assert ub_result[1] <= 1.5
+
+    def test_octatope_three_row_intersection(self):
+        """Test octatope with 3 simultaneous constraints"""
+        lb = np.array([-1.0, -1.0])
+        ub = np.array([1.0, 1.0])
+        oct = Octatope.from_bounds(lb, ub)
+
+        # Three constraints defining a triangle:
+        # x1 + x2 ≤ 0.5   (diagonal constraint - UTVPI expressible)
+        # x1 ≤ 0.5        (axis-aligned - UTVPI expressible)
+        # x2 ≤ 0.5        (axis-aligned - UTVPI expressible)
+        H = np.array([
+            [1.0, 1.0],   # x1 + x2 ≤ 0.5
+            [1.0, 0.0],   # x1 ≤ 0.5
+            [0.0, 1.0]    # x2 ≤ 0.5
+        ])
+        g = np.array([[0.5], [0.5], [0.5]])
+
+        result = oct.intersect_half_space(H, g)
+
+        # Point (0, 0) should definitely be inside
+        assert result.contains(np.array([0.0, 0.0]))
+
+        # Point (0.2, 0.2) should be inside (sum = 0.4 < 0.5)
+        assert result.contains(np.array([0.2, 0.2]))
+
+        # Verify bounds are tightened
+        lb_result, ub_result = result.get_ranges(use_mcf=False)
+        assert ub_result[0] <= 1.0  # Should be tightened
+        assert ub_result[1] <= 1.0  # Should be tightened
+
+    def test_octatope_utvpi_fastpath_activation(self):
+        """
+        Test that MCF fast-path is activated for UTVPI-expressible constraints
+        """
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        oct_box = Octatope.from_bounds(lb, ub)
+
+        # UTVPI-expressible constraints:
+        # x1 + x2 ≤ 1.2  (two variables with ±1 coefficients)
+        # x1 ≤ 0.8       (single variable)
+        H = np.array([
+            [1.0, 1.0],
+            [1.0, 0.0]
+        ])
+        g = np.array([[1.2], [0.8]])
+
+        result = oct_box.intersect_half_space(H, g)
+
+        # Point (0.5, 0.5) should be inside (sum = 1.0 < 1.2, x1 = 0.5 < 0.8)
+        assert result.contains(np.array([0.5, 0.5]))
+
+        lb_result, ub_result = result.get_ranges(use_mcf=False)
+

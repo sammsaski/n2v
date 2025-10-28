@@ -506,4 +506,346 @@ class TestHexatope:
         np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
         np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
 
+    # ========================================================================
+    # Anchor Variable Tests (from test_hexatope_anchor.py)
+    # ========================================================================
+
+    def test_from_bounds_anchor_structure(self):
+        """Test that from_bounds creates proper anchor variable structure"""
+        lb = np.array([0.0, 1.0])
+        ub = np.array([2.0, 3.0])
+
+        H = Hexatope.from_bounds(lb, ub)
+
+        # Check dimensions
+        assert H.dim == 2, f"Expected dim=2, got {H.dim}"
+        assert H.nVar == 3, f"Expected nVar=3 (anchor + 2 vars), got {H.nVar}"
+
+        # Check generator structure
+        # Column 0 should be zero (anchor)
+        assert np.allclose(H.generators[:, 0], 0), "Anchor column should be zero"
+
+        # Columns 1-2 should be diagonal half-widths
+        expected_gen = np.array([[1.0, 0.0],
+                                 [0.0, 1.0]])
+        assert np.allclose(H.generators[:, 1:], expected_gen), \
+            f"Expected generators:\n{expected_gen}\nGot:\n{H.generators[:, 1:]}"
+
+        # Check center
+        expected_center = np.array([1.0, 2.0])
+        assert np.allclose(H.center, expected_center), \
+            f"Expected center {expected_center}, got {H.center}"
+
+        # Check DCS has anchor bounds
+        # Should have constraints like: x_1 - x_0 <= 1, x_0 - x_1 <= 1, etc.
+        assert H.dcs.num_vars == 3, f"DCS should have 3 vars, got {H.dcs.num_vars}"
+        assert len(H.dcs.constraints) == 4, \
+            f"DCS should have 4 constraints (2 per var), got {len(H.dcs.constraints)}"
+
+    def test_affine_map_preserves_anchor(self):
+        """Test that affine maps preserve anchor structure"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        H = Hexatope.from_bounds(lb, ub)
+
+        # Apply affine map: 2*x + [1, 1]
+        W = 2 * np.eye(2)
+        b = np.array([1.0, 1.0])
+
+        H2 = H.affine_map(W, b)
+
+        # Check dimensions preserved
+        assert H2.dim == 2
+        assert H2.nVar == 3, "Affine map should preserve nVar (including anchor)"
+
+        # Check anchor column still zero
+        assert np.allclose(H2.generators[:, 0], 0), \
+            "Affine map should preserve zero anchor column"
+
+        # Check transformed generators
+        # Original: diag([0.5, 0.5])
+        # After W: diag([1.0, 1.0])
+        expected_gen = np.array([[1.0, 0.0],
+                                 [0.0, 1.0]])
+        assert np.allclose(H2.generators[:, 1:], expected_gen), \
+            f"Expected generators:\n{expected_gen}\nGot:\n{H2.generators[:, 1:]}"
+
+        # Check transformed center
+        # Original center: [0.5, 0.5]
+        # After W*c + b: [2.0, 2.0]
+        expected_center = np.array([2.0, 2.0])
+        assert np.allclose(H2.center, expected_center), \
+            f"Expected center {expected_center}, got {H2.center}"
+
+        # Verify the transformed box has correct bounds [1, 3]
+        min_val, max_val = H2.get_range(0, use_mcf=False)
+        assert np.isclose(min_val, 1.0, atol=1e-4), \
+            f"Expected min=1.0, got {min_val}"
+        assert np.isclose(max_val, 3.0, atol=1e-4), \
+            f"Expected max=3.0, got {max_val}"
+
+    def test_no_extra_constraints(self):
+        """Verify extra_A and extra_b are gone"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        H = Hexatope.from_bounds(lb, ub)
+
+        # These attributes should not exist
+        assert not hasattr(H, 'extra_A'), "extra_A should be removed"
+        assert not hasattr(H, 'extra_b'), "extra_b should be removed"
+
+    def test_intersect_half_space_template_closed(self):
+        """Verify half-space intersection returns DCS-only (no extra constraints)"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([2.0, 2.0])
+
+        H = Hexatope.from_bounds(lb, ub)
+
+        # Intersect with half-space x + y <= 3
+        H_half = np.array([[1.0, 1.0]])
+        g_half = np.array([3.0])
+
+        H2 = H.intersect_half_space(H_half, g_half)
+
+        # Should still have no extra constraints
+        assert not hasattr(H2, 'extra_A'), "Result should have no extra_A"
+        assert not hasattr(H2, 'extra_b'), "Result should have no extra_b"
+
+        # Should have more DCS constraints (tightened bounding box)
+        assert len(H2.dcs.constraints) >= len(H.dcs.constraints), \
+            "Should have at least as many DCS constraints"
+
+    # ========================================================================
+    # Contains V3 Tests (from test_contains_v3.py)
+    # ========================================================================
+
+    def test_hexatope_contains_interior_point(self):
+        """Basic test: Interior point should be contained"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        hex_box = Hexatope.from_bounds(lb, ub)
+
+        # Interior point
+        assert hex_box.contains(np.array([0.5, 0.5]))
+        assert hex_box.contains(np.array([0.1, 0.9]))
+
+    def test_hexatope_contains_boundary_point(self):
+        """Boundary points should be contained (within tolerance)"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        hex_box = Hexatope.from_bounds(lb, ub)
+
+        # Boundary points
+        assert hex_box.contains(np.array([0.0, 0.5]))
+        assert hex_box.contains(np.array([1.0, 0.5]))
+        assert hex_box.contains(np.array([0.5, 0.0]))
+        assert hex_box.contains(np.array([0.5, 1.0]))
+
+        # Corners
+        assert hex_box.contains(np.array([0.0, 0.0]))
+        assert hex_box.contains(np.array([1.0, 1.0]))
+
+    def test_hexatope_contains_exterior_point(self):
+        """Exterior points should NOT be contained"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        hex_box = Hexatope.from_bounds(lb, ub)
+
+        # Clearly outside
+        assert not hex_box.contains(np.array([-0.1, 0.5]))
+        assert not hex_box.contains(np.array([1.1, 0.5]))
+        assert not hex_box.contains(np.array([0.5, -0.1]))
+        assert not hex_box.contains(np.array([0.5, 1.1]))
+
+        # Far outside
+        assert not hex_box.contains(np.array([2.0, 2.0]))
+        assert not hex_box.contains(np.array([-1.0, -1.0]))
+
+    def test_hexatope_contains_near_boundary(self):
+        """Test points very close to boundary (edge case for false positives)"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        hex_box = Hexatope.from_bounds(lb, ub)
+
+        tol = 1e-7  # Default tolerance
+
+        # Just inside (should pass)
+        assert hex_box.contains(np.array([0.0 + tol/2, 0.5]))
+        assert hex_box.contains(np.array([1.0 - tol/2, 0.5]))
+
+        # Just outside (should fail - this is the critical test for false positives)
+        # Note: Due to over-approximation in DCS, some points slightly outside may be included
+        # But points clearly outside (> 2*tol) should definitely be rejected
+        assert not hex_box.contains(np.array([-10*tol, 0.5]))
+        assert not hex_box.contains(np.array([1.0 + 10*tol, 0.5]))
+
+    def test_hexatope_contains_after_affine_map(self):
+        """Test contains after affine transformation"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        hex_box = Hexatope.from_bounds(lb, ub)
+
+        # Scale by 2 and translate by [1, 1]
+        W = 2.0 * np.eye(2)
+        b = np.array([1.0, 1.0])
+
+        hex_transformed = hex_box.affine_map(W, b)
+
+        # Original [0, 1]² becomes [1, 3]² after transformation
+        assert hex_transformed.contains(np.array([2.0, 2.0]))  # Center of [1, 3]²
+        assert hex_transformed.contains(np.array([1.0, 1.0]))  # Corner
+        assert hex_transformed.contains(np.array([3.0, 3.0]))  # Corner
+
+        # Outside transformed set
+        assert not hex_transformed.contains(np.array([0.5, 2.0]))  # Below lower bound
+        assert not hex_transformed.contains(np.array([3.5, 2.0]))  # Above upper bound
+
+    def test_hexatope_contains_custom_tolerance(self):
+        """Test that custom tolerance parameter works"""
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        hex_box = Hexatope.from_bounds(lb, ub)
+
+        # With looser tolerance, point slightly outside might pass
+        loose_tol = 1e-3
+        point = np.array([1.0 + 0.5e-3, 0.5])  # Slightly outside
+
+        # With default tight tolerance, should fail
+        assert not hex_box.contains(point, tolerance=1e-7)
+
+    def test_hexatope_contains_degenerate_case(self):
+        """Test contains on very small/degenerate hexatope"""
+        # Create a very small box
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1e-6, 1e-6])
+        hex_tiny = Hexatope.from_bounds(lb, ub)
+
+        # Origin should be inside
+        assert hex_tiny.contains(np.array([0.0, 0.0]))
+
+        # Small point inside
+        assert hex_tiny.contains(np.array([0.5e-6, 0.5e-6]))
+
+        # Point outside tiny box
+        assert not hex_tiny.contains(np.array([2e-6, 0.0]))
+
+    # ========================================================================
+    # Multi-row Constraint Tests (from test_multirow_constraints.py)
+    # ========================================================================
+
+    def test_hexatope_multirow_intersection(self):
+        """Test hexatope intersection with multiple half-space constraints"""
+        # Create a 2D box [0, 2] × [0, 2]
+        lb = np.array([0.0, 0.0])
+        ub = np.array([2.0, 2.0])
+        hex_box = Hexatope.from_bounds(lb, ub)
+
+        # Intersect with two half-spaces:
+        # x1 ≤ 1.5  (represented as [1, 0] @ x ≤ 1.5)
+        # x2 ≤ 1.0  (represented as [0, 1] @ x ≤ 1.0)
+        # This should give us the box [0, 1.5] × [0, 1.0]
+
+        # Multi-row constraint matrix
+        H = np.array([
+            [1.0, 0.0],  # x1 ≤ 1.5
+            [0.0, 1.0]   # x2 ≤ 1.0
+        ])
+        g = np.array([[1.5], [1.0]])
+
+        # Perform intersection
+        hex_result = hex_box.intersect_half_space(H, g)
+
+        # Verify the result is bounded correctly
+        # The intersection should be contained in [0, 1.5] × [0, 1.0]
+
+        # Test corner points
+        # Point (0.5, 0.5) should be inside
+        assert hex_result.contains(np.array([0.5, 0.5]))
+
+        # Point (1.4, 0.9) should be inside
+        assert hex_result.contains(np.array([1.4, 0.9]))
+
+        # Verify optimization respects constraints
+        lb_result, ub_result = hex_result.get_ranges(use_mcf=False)
+
+        # Upper bounds should be at most [1.5, 1.0] (with some tolerance for over-approximation)
+        # Due to bounding box over-approximation, these may be slightly larger
+        # but should be reasonably close
+        assert ub_result[0] <= 2.0  # Should be tightened from original 2.0
+        assert ub_result[1] <= 1.5  # Should be tightened from original 2.0
+
+    def test_hexatope_single_vs_multi_row(self):
+        """
+        Verify that multi-row intersection gives same result as sequential single-row
+
+        This test explicitly checks that the bug fix handles multiple rows correctly
+        by comparing:
+        1. Single intersection with multi-row H
+        2. Sequential intersections with individual rows
+
+        Both should produce equivalent results (modulo over-approximation)
+        """
+        lb = np.array([0.0, 0.0])
+        ub = np.array([2.0, 2.0])
+
+        # Multi-row intersection
+        hex1 = Hexatope.from_bounds(lb, ub)
+        H_multi = np.array([[1.0, 0.0], [0.0, 1.0]])
+        g_multi = np.array([[1.5], [1.0]])
+        result_multi = hex1.intersect_half_space(H_multi, g_multi)
+
+        # Sequential single-row intersections
+        hex2 = Hexatope.from_bounds(lb, ub)
+        H1 = np.array([[1.0, 0.0]])
+        g1 = np.array([[1.5]])
+        hex2 = hex2.intersect_half_space(H1, g1)
+
+        H2 = np.array([[0.0, 1.0]])
+        g2 = np.array([[1.0]])
+        result_seq = hex2.intersect_half_space(H2, g2)
+
+        # Both should contain the same interior point
+        test_point = np.array([0.7, 0.5])
+        assert result_multi.contains(test_point) == result_seq.contains(test_point)
+
+        # Both should give similar bounds (may differ due to over-approximation order)
+        lb_multi, ub_multi = result_multi.get_ranges(use_mcf=False)
+        lb_seq, ub_seq = result_seq.get_ranges(use_mcf=False)
+
+        # Should be similar (within reasonable tolerance for over-approximation)
+        # Main thing is that both are tightened from original [2, 2]
+        assert ub_multi[0] < 2.0 or np.isclose(ub_multi[0], 2.0, atol=0.1)
+        assert ub_seq[0] < 2.0 or np.isclose(ub_seq[0], 2.0, atol=0.1)
+
+    def test_hexatope_mcf_fastpath_activation(self):
+        """
+        Test that MCF fast-path is activated for DCS-expressible constraints
+
+        This tests the MCF optimization added in the soundness fixes.
+        A constraint like x1 - x2 ≤ 0.5 should trigger MCF fast-path.
+        """
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+        hex_box = Hexatope.from_bounds(lb, ub)
+
+        # DCS-expressible constraint: x1 - x2 ≤ 0.3
+        # This has exactly two nonzeros: +1 and -1
+        H = np.array([[1.0, -1.0]])  # x1 - x2 ≤ 0.3
+        g = np.array([[0.3]])
+
+        result = hex_box.intersect_half_space(H, g)
+
+        # The constraint x1 - x2 ≤ 0.3 should be enforced
+        # Test point (0.5, 0.5) has x1 - x2 = 0, should be inside
+        assert result.contains(np.array([0.5, 0.5]))
+
+        # Test point (0.8, 0.4) has x1 - x2 = 0.4 > 0.3
+        # Due to over-approximation this might still be inside, but optimization should respect it
+
+        lb_result, ub_result = result.get_ranges(use_mcf=False)
+
+        # The fact that we get a result without errors indicates the MCF path worked
+
 
