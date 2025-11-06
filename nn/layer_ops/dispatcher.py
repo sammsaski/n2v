@@ -8,6 +8,15 @@ and input set type, without requiring custom layer wrapper classes.
 import torch.nn as nn
 from typing import List, Union
 
+# Import set types
+from n2v.sets import Star, Zono, Box, Hexatope, Octatope
+from n2v.sets.image_star import ImageStar
+from n2v.sets.image_zono import ImageZono
+
+# Import layer-specific reach functions
+from . import linear_reach, relu_reach, conv2d_reach, flatten_reach
+from . import maxpool2d_reach, avgpool2d_reach
+
 
 def reach_layer(
     layer: nn.Module,
@@ -39,9 +48,6 @@ def reach_layer(
     Raises:
         NotImplementedError: If layer/set combination is not supported
     """
-    from n2v.sets import Star, Zono, Box, Hexatope, Octatope
-    from n2v.sets.image_star import ImageStar
-    from n2v.sets.image_zono import ImageZono
 
     if not input_sets:
         return []
@@ -69,8 +75,6 @@ def reach_layer(
 
 def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
     """Star set reachability through a layer."""
-    from . import linear_reach, relu_reach, conv2d_reach, flatten_reach
-    from . import maxpool2d_reach, avgpool2d_reach
 
     if isinstance(layer, nn.Linear):
         return linear_reach.linear_star(layer, input_sets)
@@ -128,8 +132,6 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
 
 def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
     """Zonotope reachability through a layer."""
-    from . import linear_reach, relu_reach, flatten_reach
-    from . import maxpool2d_reach, avgpool2d_reach
 
     if isinstance(layer, nn.Linear):
         return linear_reach.linear_zono(layer, input_sets)
@@ -163,7 +165,6 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
 
 def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
     """Box reachability through a layer."""
-    from . import linear_reach, relu_reach, flatten_reach
 
     if isinstance(layer, nn.Linear):
         return linear_reach.linear_box(layer, input_sets)
@@ -191,7 +192,6 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
 
 def _reach_layer_hexatope(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
     """Hexatope reachability through a layer."""
-    from . import linear_reach, relu_reach, flatten_reach
 
     if isinstance(layer, nn.Linear):
         return linear_reach.linear_hexatope(layer, input_sets)
@@ -223,7 +223,6 @@ def _reach_layer_hexatope(layer: nn.Module, input_sets: List, method: str, **kwa
 
 def _reach_layer_octatope(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:
     """Octatope reachability through a layer."""
-    from . import linear_reach, relu_reach, flatten_reach
 
     if isinstance(layer, nn.Linear):
         return linear_reach.linear_octatope(layer, input_sets)

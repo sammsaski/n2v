@@ -17,9 +17,25 @@ network verification", Formal Methods in System Design (2024) 64:178–199
 
 import numpy as np
 import networkx as nx
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, TYPE_CHECKING
 from dataclasses import dataclass
 import cvxpy as cp
+from concurrent.futures import ThreadPoolExecutor
+
+# TYPE_CHECKING imports for type hints (avoid circular import at runtime)
+if TYPE_CHECKING:
+    from n2v.sets.box import Box
+    from n2v.sets.star import Star
+
+# Optional differentiable solver import
+try:
+    from n2v.utils.lpsolver import solve_dcs_differentiable
+    HAS_DIFFERENTIABLE_SOLVER = True
+except ImportError:
+    HAS_DIFFERENTIABLE_SOLVER = False
+
+# NOTE: Runtime imports of n2v.sets.* modules are kept inline in methods
+# to avoid circular dependencies (hexatope <-> star <-> box)
 
 
 @dataclass
@@ -357,8 +373,6 @@ class Hexatope:
     def _get_ranges_parallel(self, use_mcf: bool = True,
                             n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
         """Compute ranges in parallel"""
-        from concurrent.futures import ThreadPoolExecutor
-
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
@@ -491,10 +505,12 @@ class Hexatope:
 
         if use_differentiable:
             # Use differentiable DCS solver
-            try:
-                from n2v.utils.lpsolver import solve_dcs_differentiable
-
-                optimal_value, info = solve_dcs_differentiable(
+            if not HAS_DIFFERENTIABLE_SOLVER:
+                print("Differentiable DCS solver not available, falling back to network_simplex")
+                use_differentiable = False
+            else:
+                try:
+                    optimal_value, info = solve_dcs_differentiable(
                     constraint_graph=G,
                     objective_coef=w,
                     constant_term=constant,
@@ -504,12 +520,12 @@ class Hexatope:
                     verbose=False
                 )
 
-                return optimal_value
+                    return optimal_value
 
-            except Exception as e:
-                # Fall back to NetworkX if differentiable solver fails
-                print(f"Differentiable DCS solver failed: {e}, falling back to network_simplex")
-                use_differentiable = False
+                except Exception as e:
+                    # Fall back to NetworkX if differentiable solver fails
+                    print(f"Differentiable DCS solver failed: {e}, falling back to network_simplex")
+                    use_differentiable = False
 
         if not use_differentiable:
             # Use traditional network simplex (NetworkX)
@@ -579,14 +595,15 @@ class Hexatope:
 
         # Use differentiable DCS solver if requested
         if use_differentiable:
-            try:
-                from n2v.utils.lpsolver import solve_dcs_differentiable
+            if not HAS_DIFFERENTIABLE_SOLVER:
+                print("Differentiable DCS solver not available, falling back to CVXPY")
+            else:
+                try:
+                    # Build constraint graph
+                    G = self.dcs.to_constraint_graph()
 
-                # Build constraint graph
-                G = self.dcs.to_constraint_graph()
-
-                # Solve using differentiable DCS solver
-                optimal_value, info = solve_dcs_differentiable(
+                    # Solve using differentiable DCS solver
+                    optimal_value, info = solve_dcs_differentiable(
                     constraint_graph=G,
                     objective_coef=w,
                     constant_term=constant,
@@ -596,11 +613,11 @@ class Hexatope:
                     verbose=False
                 )
 
-                return optimal_value
-            except Exception as e:
-                # Fall back to standard LP if differentiable solver fails
-                print(f"Differentiable DCS solver failed: {e}, falling back to CVXPY")
-                pass
+                    return optimal_value
+                except Exception as e:
+                    # Fall back to standard LP if differentiable solver fails
+                    print(f"Differentiable DCS solver failed: {e}, falling back to CVXPY")
+                    pass
 
         # Standard CVXPY solver
         x = cp.Variable(self.dcs.num_vars)

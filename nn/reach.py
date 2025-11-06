@@ -11,6 +11,20 @@ import torch.nn as nn
 import numpy as np
 from typing import List, Union, Optional
 
+# Import set types
+from n2v.sets import Star, Zono, Box, Hexatope, Octatope
+
+# Import layer ops
+from n2v.nn.layer_ops.dispatcher import reach_layer
+from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
+
+# Optional torch.fx import for ONNX support
+try:
+    import torch.fx as fx
+    HAS_TORCH_FX = True
+except ImportError:
+    HAS_TORCH_FX = False
+
 
 def reach_pytorch_model(
     model: nn.Module,
@@ -46,8 +60,6 @@ def reach_pytorch_model(
         TypeError: If input_set type is not supported
         ValueError: If method is not valid for the given set type
     """
-    from n2v.sets import Star, Zono, Box, Hexatope, Octatope
-
     # Validate method for set type
     if isinstance(input_set, Star):
         if method not in ('exact', 'approx'):
@@ -99,8 +111,6 @@ def _reach_sequential(
     Returns:
         List of output sets
     """
-    from n2v.nn.layer_ops.dispatcher import reach_layer
-
     current_sets = input_sets
     dis_opt = kwargs.get('dis_opt', None)
 
@@ -145,9 +155,6 @@ def _handle_graphmodule(
     Returns:
         List of output sets
     """
-    from n2v.nn.layer_ops.dispatcher import reach_layer
-    from n2v.sets import Star, Hexatope, Octatope
-
     # Get the set type from the first input
     set_type = type(input_sets[0])
 
@@ -217,8 +224,6 @@ def _handle_graphmodule(
 
 def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):
     """Handle ONNX binary math operations (Add, Sub, etc.)."""
-    from n2v.sets import Star, Hexatope, Octatope
-
     input_nodes = node.args
     if len(input_nodes) != 2:
         return None
@@ -271,7 +276,6 @@ def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):
 
     elif set_type in (Hexatope, Octatope):
         # Apply via dummy linear layer with identity + bias
-        from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
         linear_fn = linear_hexatope if set_type == Hexatope else linear_octatope
 
         output_sets = []
@@ -294,8 +298,6 @@ def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):
 
 def _handle_onnx_matmul(module, node, node_values, graph_module, set_type):
     """Handle ONNX MatMul operations."""
-    from n2v.sets import Star, Hexatope, Octatope
-
     input_nodes = node.args
     if len(input_nodes) != 2:
         return None
@@ -328,7 +330,6 @@ def _handle_onnx_matmul(module, node, node_values, graph_module, set_type):
         return output_sets
 
     elif set_type in (Hexatope, Octatope):
-        from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
         linear_fn = linear_hexatope if set_type == Hexatope else linear_octatope
 
         output_sets = []

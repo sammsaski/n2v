@@ -5,6 +5,7 @@ This module provides global settings for parallelization, LP solvers, and other 
 """
 
 import os
+import multiprocessing
 from typing import Optional
 
 
@@ -27,7 +28,6 @@ class Config:
     def _detect_optimal_settings(self):
         """Auto-detect optimal settings based on system."""
         try:
-            import multiprocessing
             cpu_count = multiprocessing.cpu_count()
             # Use half of available cores, min 2, max 8
             self._n_workers = max(2, min(cpu_count // 2, 8))

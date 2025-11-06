@@ -6,9 +6,13 @@ Translated from MATLAB NNV PosLin.m
 """
 
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from n2v.sets import Star, Zono, Hexatope, Octatope
+
+# TYPE_CHECKING import for Box (used in one function)
+if TYPE_CHECKING:
+    from n2v.sets import Box
 
 
 def relu_star_exact(
@@ -461,7 +465,6 @@ def relu_box(input_boxes: List) -> List:
         List of output Boxes
     """
     from n2v.sets import Box
-
     output_boxes = []
 
     for box in input_boxes:

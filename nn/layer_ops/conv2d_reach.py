@@ -10,8 +10,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import List
+from typing import List, TYPE_CHECKING
 from n2v.sets import Star, Zono, ImageStar, ImageZono, Hexatope, Octatope
+
+# TYPE_CHECKING import for Box
+if TYPE_CHECKING:
+    from n2v.sets import Box
 
 
 def conv2d_star(
@@ -273,7 +277,7 @@ def conv2d_box(layer: nn.Conv2d, input_boxes: List) -> List:
     Returns:
         List of output Boxes
     """
-    from ....sets import Box
+    from n2v.sets import Box
 
     output_boxes = []
 

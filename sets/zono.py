@@ -6,8 +6,17 @@ Translated from MATLAB NNV Zono.m
 """
 
 import numpy as np
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, TYPE_CHECKING
 from scipy.linalg import svd
+
+# TYPE_CHECKING imports for type hints (avoid circular import at runtime)
+if TYPE_CHECKING:
+    from n2v.sets.star import Star
+    from n2v.sets.box import Box
+    from n2v.sets.image_zono import ImageZono
+    from n2v.sets.image_star import ImageStar
+
+# NOTE: Runtime imports of n2v.sets.* modules are kept inline to avoid circular dependencies
 
 
 class Zono:

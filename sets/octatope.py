@@ -16,9 +16,26 @@ network verification", Formal Methods in System Design (2024) 64:178–199
 """
 
 import numpy as np
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, TYPE_CHECKING
 from dataclasses import dataclass
 import cvxpy as cp
+from concurrent.futures import ThreadPoolExecutor
+
+# TYPE_CHECKING imports for type hints (avoid circular import at runtime)
+if TYPE_CHECKING:
+    from n2v.sets.hexatope import DifferenceConstraintSystem, Hexatope
+    from n2v.sets.box import Box
+    from n2v.sets.star import Star
+
+# Optional differentiable solver import
+try:
+    from n2v.utils.lpsolver import solve_dcs_differentiable
+    HAS_DIFFERENTIABLE_SOLVER = True
+except ImportError:
+    HAS_DIFFERENTIABLE_SOLVER = False
+
+# NOTE: Runtime imports of n2v.sets.* modules are kept inline in methods
+# to avoid circular dependencies (octatope <-> hexatope <-> star <-> box)
 
 
 @dataclass
@@ -391,8 +408,6 @@ class Octatope:
     def _get_ranges_parallel(self, use_mcf: bool = True,
                             n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
         """Compute ranges in parallel"""
-        from concurrent.futures import ThreadPoolExecutor
-
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
@@ -569,40 +584,41 @@ class Octatope:
 
         # Use differentiable DCS solver if requested
         if use_differentiable:
-            try:
-                from n2v.utils.lpsolver import solve_dcs_differentiable
+            if not HAS_DIFFERENTIABLE_SOLVER:
+                print("Differentiable DCS solver not available, falling back to CVXPY")
+            else:
+                try:
+                    # Convert UTVPI to DCS
+                    dcs = self.utvpi.to_dcs()
 
-                # Convert UTVPI to DCS
-                dcs = self.utvpi.to_dcs()
+                    # Transform objective to DCS variable space
+                    # For each variable x_i, we have x+_i and x-_i where x_i = (1/2)(x+_i - x-_i)
+                    # So objective w^T * x becomes w^T * (1/2)(x+ - x-) = (1/2) * w^T * (x+ - x-)
+                    # This is (1/2) * sum_i w[i] * (x+_i - x-_i) = sum_i (w[i]/2)*x+_i - (w[i]/2)*x-_i
+                    w_dcs = np.zeros(2 * self.utvpi.num_vars)
+                    for i in range(self.utvpi.num_vars):
+                        w_dcs[2*i] = 0.5 * w[i]       # Coefficient for x+_i (scaled by 1/2)
+                        w_dcs[2*i + 1] = -0.5 * w[i]  # Coefficient for x-_i (scaled by 1/2)
 
-                # Transform objective to DCS variable space
-                # For each variable x_i, we have x+_i and x-_i where x_i = (1/2)(x+_i - x-_i)
-                # So objective w^T * x becomes w^T * (1/2)(x+ - x-) = (1/2) * w^T * (x+ - x-)
-                # This is (1/2) * sum_i w[i] * (x+_i - x-_i) = sum_i (w[i]/2)*x+_i - (w[i]/2)*x-_i
-                w_dcs = np.zeros(2 * self.utvpi.num_vars)
-                for i in range(self.utvpi.num_vars):
-                    w_dcs[2*i] = 0.5 * w[i]       # Coefficient for x+_i (scaled by 1/2)
-                    w_dcs[2*i + 1] = -0.5 * w[i]  # Coefficient for x-_i (scaled by 1/2)
+                    # Build constraint graph
+                    G = dcs.to_constraint_graph()
 
-                # Build constraint graph
-                G = dcs.to_constraint_graph()
+                    # Solve using differentiable DCS solver
+                    optimal_value, info = solve_dcs_differentiable(
+                        constraint_graph=G,
+                        objective_coef=w_dcs,
+                        constant_term=constant,
+                        maximize=maximize,
+                        num_epochs=50,
+                        batch_size=16,
+                        verbose=False
+                    )
 
-                # Solve using differentiable DCS solver
-                optimal_value, info = solve_dcs_differentiable(
-                    constraint_graph=G,
-                    objective_coef=w_dcs,
-                    constant_term=constant,
-                    maximize=maximize,
-                    num_epochs=50,
-                    batch_size=16,
-                    verbose=False
-                )
-
-                return optimal_value
-            except Exception as e:
-                # Fall back to standard LP if differentiable solver fails
-                print(f"Differentiable DCS solver failed: {e}, falling back to CVXPY")
-                pass
+                    return optimal_value
+                except Exception as e:
+                    # Fall back to standard LP if differentiable solver fails
+                    print(f"Differentiable DCS solver failed: {e}, falling back to CVXPY")
+                    pass
 
         # Standard CVXPY solver
         x = cp.Variable(self.utvpi.num_vars)

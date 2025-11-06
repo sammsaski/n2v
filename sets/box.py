@@ -6,7 +6,13 @@ Translated from MATLAB NNV Box.m
 """
 
 import numpy as np
-from typing import Optional, Tuple, List, Union
+from typing import Optional, Tuple, List, Union, TYPE_CHECKING
+
+# TYPE_CHECKING imports for type hints (avoid circular import at runtime)
+if TYPE_CHECKING:
+    from n2v.sets.zono import Zono
+
+# NOTE: Runtime import of n2v.sets.zono kept inline to avoid circular dependencies
 
 
 class Box:

@@ -9,8 +9,28 @@ Translated from MATLAB NNV Star.m
 """
 
 import numpy as np
-from typing import Optional, Tuple, List, Union
+from typing import Optional, Tuple, List, Union, TYPE_CHECKING
 import cvxpy as cp
+from scipy.linalg import block_diag
+from concurrent.futures import ThreadPoolExecutor
+
+# TYPE_CHECKING imports for type hints (avoid circular import at runtime)
+if TYPE_CHECKING:
+    from n2v.sets.box import Box
+    from n2v.sets.image_star import ImageStar
+
+# NOTE: Runtime imports of n2v.sets.box and n2v.sets.image_star are kept inline
+# to avoid circular dependencies
+
+# Import utility modules
+from n2v.utils.lpsolver import solve_lp, check_feasibility
+
+# Optional config import (may not be available in all contexts)
+try:
+    from n2v.config import config as global_config
+    HAS_CONFIG = True
+except ImportError:
+    HAS_CONFIG = False
 
 
 class Star:
@@ -155,7 +175,6 @@ class Star:
             Star object
         """
         from .box import Box
-
         box = Box(lb, ub)
         return box.to_star()
 
@@ -213,8 +232,6 @@ class Star:
         new_V = np.hstack([new_c, self.V[:, 1:], other.V[:, 1:]])
 
         # Combine constraints in block-diagonal form
-        from scipy.linalg import block_diag
-
         new_C = block_diag(self.C, other.C)
         new_d = np.vstack([self.d, other.d])
 
@@ -279,8 +296,6 @@ class Star:
         )
 
         # Combine constraints
-        from scipy.linalg import block_diag
-
         new_C = block_diag(self.C, other.C)
         new_d = np.vstack([self.d, other.d])
 
@@ -310,7 +325,6 @@ class Star:
             Box object
         """
         from .box import Box
-
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
@@ -379,10 +393,8 @@ class Star:
             >>> # Force sequential
             >>> lb, ub = star.get_ranges(parallel=False)
         """
-        # Import config here to avoid circular dependency
-        try:
-            from n2v.config import config as global_config
-        except ImportError:
+        # Use global config if available
+        if not HAS_CONFIG:
             # If config not available, use defaults
             use_parallel = parallel if parallel is not None else False
             n_workers = n_workers if n_workers is not None else 4
@@ -421,8 +433,6 @@ class Star:
         Returns:
             Tuple of (lb, ub) arrays
         """
-        from concurrent.futures import ThreadPoolExecutor
-
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
@@ -525,9 +535,6 @@ class Star:
         if self.nVar == 0:
             return 0.0
 
-        # Import locally to avoid circular dependency
-        from n2v.utils.lpsolver import solve_lp
-
         # Prepare constraints for solve_lp
         A = self.C if self.C.size > 0 else None
         b = self.d if self.C.size > 0 else None
@@ -558,9 +565,6 @@ class Star:
         Returns:
             True if empty, False otherwise
         """
-        # Import locally to avoid circular dependency
-        from n2v.utils.lpsolver import check_feasibility
-
         # Use centralized feasibility checker
         A = self.C if self.C.size > 0 else None
         b = self.d if self.C.size > 0 else None
@@ -626,7 +630,6 @@ class Star:
             ImageStar object
         """
         from .image_star import ImageStar
-
         if height * width * num_channels != self.dim:
             raise ValueError(
                 f"Image dimensions {height}x{width}x{num_channels} = "
@@ -656,8 +659,8 @@ class Star:
             lb, ub = self.estimate_ranges()
 
         # Sample from box and check constraints
-        samples = []
         from .box import Box
+        samples = []
         box = Box(lb, ub)
 
         candidates = box.sample(2 * N)  # Over-sample
