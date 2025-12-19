@@ -8,8 +8,8 @@ AvgPool is a linear operation, so it's exact for all set types (no approximation
 import numpy as np
 import torch
 import torch.nn as nn
-from n2v.sets import ImageStar
-from n2v.nn.layer_ops.avgpool2d_reach import avgpool2d_star
+from n2v.sets import ImageStar, Hexatope, Octatope
+from n2v.nn.layer_ops.avgpool2d_reach import avgpool2d_star, avgpool2d_hexatope, avgpool2d_octatope
 
 
 class TestAvgPool2DImageStarSoundness:
@@ -287,3 +287,85 @@ class TestAvgPool2DEdgeCases:
         assert np.allclose(lb_out[0, 1, 0], 5.5, atol=1e-6)
         assert np.allclose(lb_out[1, 0, 0], 11.5, atol=1e-6)
         assert np.allclose(lb_out[1, 1, 0], 13.5, atol=1e-6)
+
+
+class TestAvgPool2DHexatopeSoundness:
+    """Soundness tests for AvgPool2D with Hexatope sets."""
+
+    def test_simple_pooling(self):
+        """Test AvgPool2D with hexatope."""
+        layer = nn.AvgPool2d(kernel_size=2, stride=2)
+
+        lb = np.zeros((4, 1))
+        ub = np.ones((4, 1))
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        output_hexatopes = avgpool2d_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+        assert isinstance(output_hexatopes[0], Hexatope)
+
+    def test_bounds_preservation(self):
+        """Test that AvgPool2D preserves sound bounds."""
+        layer = nn.AvgPool2d(kernel_size=2, stride=2)
+
+        lb = np.array([[1.0], [2.0], [3.0], [4.0]])
+        ub = np.array([[2.0], [3.0], [4.0], [5.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        output_hexatopes = avgpool2d_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+
+    def test_negative_values(self):
+        """Test AvgPool2D with negative bounds."""
+        layer = nn.AvgPool2d(kernel_size=2, stride=2)
+
+        lb = np.array([[-5.0], [-4.0], [-3.0], [-2.0]])
+        ub = np.array([[-3.0], [-2.0], [-1.0], [0.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        output_hexatopes = avgpool2d_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+
+
+class TestAvgPool2DOctatopeSoundness:
+    """Soundness tests for AvgPool2D with Octatope sets."""
+
+    def test_simple_pooling(self):
+        """Test AvgPool2D with octatope."""
+        layer = nn.AvgPool2d(kernel_size=2, stride=2)
+
+        lb = np.zeros((4, 1))
+        ub = np.ones((4, 1))
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = avgpool2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        assert isinstance(output_octatopes[0], Octatope)
+
+    def test_bounds_preservation(self):
+        """Test that AvgPool2D preserves sound bounds."""
+        layer = nn.AvgPool2d(kernel_size=2, stride=2)
+
+        lb = np.array([[1.0], [2.0], [3.0], [4.0]])
+        ub = np.array([[2.0], [3.0], [4.0], [5.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = avgpool2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+
+    def test_negative_values(self):
+        """Test AvgPool2D with negative bounds."""
+        layer = nn.AvgPool2d(kernel_size=2, stride=2)
+
+        lb = np.array([[-5.0], [-4.0], [-3.0], [-2.0]])
+        ub = np.array([[-3.0], [-2.0], [-1.0], [0.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = avgpool2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1

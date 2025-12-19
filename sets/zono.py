@@ -6,8 +6,17 @@ Translated from MATLAB NNV Zono.m
 """
 
 import numpy as np
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, TYPE_CHECKING
 from scipy.linalg import svd
+
+# TYPE_CHECKING imports for type hints (avoid circular import at runtime)
+if TYPE_CHECKING:
+    from n2v.sets.star import Star
+    from n2v.sets.box import Box
+    from n2v.sets.image_zono import ImageZono
+    from n2v.sets.image_star import ImageStar
+
+# NOTE: Runtime imports of n2v.sets.* modules are kept inline to avoid circular dependencies
 
 
 class Zono:
@@ -477,3 +486,19 @@ class Zono:
         new_c = self.c.astype(dtype)
         new_V = self.V.astype(dtype)
         return Zono(new_c, new_V)
+
+    # ======================== Reachability Analysis ========================
+    # Note: Reachability analysis should be performed through NeuralNetwork.reach()
+    # instead of calling reach() on set objects directly. This maintains proper
+    # separation of concerns where sets represent geometric objects and reachability
+    # is a neural network operation.
+    #
+    # Example usage:
+    #     from n2v.nn import NeuralNetwork
+    #     from n2v.sets import Zono
+    #     import torch.nn as nn
+    #
+    #     model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
+    #     net = NeuralNetwork(model)
+    #     input_zono = Zono.from_bounds(lb, ub)
+    #     output_zonos = net.reach(input_zono, method='approx')

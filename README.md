@@ -145,7 +145,7 @@ input_star = Star.from_bounds(center - epsilon, center + epsilon)
 
 # Verify the network
 verifier = nnv.NeuralNetwork(model)
-output_stars = verifier.reach(input_star, method='exact-star')
+output_stars = verifier.reach(input_star, method='exact')
 
 print(f"Output: {len(output_stars)} reachable set(s)")
 
@@ -186,7 +186,7 @@ input_star = ImageStar.from_bounds(
 
 # Verify CNN
 verifier = nnv.NeuralNetwork(model)
-output_stars = verifier.reach(input_star, method='exact-star')
+output_stars = verifier.reach(input_star, method='exact')
 
 print(f"CNN output: {len(output_stars)} reachable sets")
 ```
@@ -296,43 +296,43 @@ bounds_lb, bounds_ub = zono.get_bounds()
 
 ### Exact Methods
 
-#### `'exact-star'`
+#### `'exact'`
 - **Sound and complete** (exact reachability)
 - Uses Star sets with ReLU splitting
 - Best for: Small-medium networks, safety-critical applications
 - Note: Can be slow due to exponential splitting
 
 ```python
-output = verifier.reach(input_star, method='exact-star')
+output = verifier.reach(input_star, method='exact')
 ```
 
 ### Approximate Methods
 
-#### `'approx-star'`
+#### `'approx'`
 - Over-approximate using relaxed Star sets
 - Faster than exact (no splitting)
 - Best for: Large networks, quick verification
 
 ```python
-output = verifier.reach(input_star, method='approx-star')
+output = verifier.reach(input_star, method='approx')
 ```
 
-#### `'approx-zono'`
+#### `'approx'`
 - Over-approximate using Zonotopes
 - Very fast, more conservative
 - Best for: Very large networks, initial screening
 
 ```python
-output = verifier.reach(input_star, method='approx-zono')
+output = verifier.reach(input_star, method='approx')
 ```
 
 ### Method Comparison
 
 | Method | Speed | Precision | Use Case |
 |--------|-------|-----------|----------|
-| `exact-star` | Slow | Exact | Safety-critical, small nets |
-| `approx-star` | Medium | Tight | Large networks |
-| `approx-zono` | Fast | Conservative | Very large nets, screening |
+| `exact` | Slow | Exact | Safety-critical, small nets |
+| `approx` | Medium | Tight | Large networks |
+| `approx` | Fast | Conservative | Very large nets, screening |
 
 ---
 
@@ -446,7 +446,7 @@ import n2v
 n2v.set_parallel(True, n_workers=4)
 
 # Now all verification uses parallel LP solving
-output = verifier.reach(input_star, method='approx-star')
+output = verifier.reach(input_star, method='approx')
 ```
 
 **Speedup**: 1.5-2x on multi-core systems (4+ cores)
@@ -500,13 +500,13 @@ Reduces ReLU splitting significantly.
 
 ```python
 # For small networks (< 1000 neurons)
-method = 'exact-star'
+method = 'exact'
 
 # For medium networks (1000-10000 neurons)
-method = 'approx-star'
+method = 'approx'
 
 # For large networks (> 10000 neurons)
-method = 'approx-zono'
+method = 'approx'
 ```
 
 ### 6. Monitor Star Count
@@ -667,12 +667,12 @@ Skipped tests are for features not yet implemented (e.g., `Box.contains()`, `Box
 verifier = nnv.NeuralNetwork(pytorch_model)
 
 # Reachability
-output_stars = verifier.reach(input_set, method='exact-star')
+output_stars = verifier.reach(input_set, method='exact')
 
 # With options
 output_stars = verifier.reach(
     input_set,
-    method='exact-star',
+    method='exact',
     lp_solver='default',
     dis_opt='display'  # Show progress
 )

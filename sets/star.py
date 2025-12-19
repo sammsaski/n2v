@@ -9,8 +9,28 @@ Translated from MATLAB NNV Star.m
 """
 
 import numpy as np
-from typing import Optional, Tuple, List, Union
+from typing import Optional, Tuple, List, Union, TYPE_CHECKING
 import cvxpy as cp
+from scipy.linalg import block_diag
+from concurrent.futures import ThreadPoolExecutor
+
+# TYPE_CHECKING imports for type hints (avoid circular import at runtime)
+if TYPE_CHECKING:
+    from n2v.sets.box import Box
+    from n2v.sets.image_star import ImageStar
+
+# NOTE: Runtime imports of n2v.sets.box and n2v.sets.image_star are kept inline
+# to avoid circular dependencies
+
+# Import utility modules
+from n2v.utils.lpsolver import solve_lp, check_feasibility
+
+# Optional config import (may not be available in all contexts)
+try:
+    from n2v.config import config as global_config
+    HAS_CONFIG = True
+except ImportError:
+    HAS_CONFIG = False
 
 
 class Star:
@@ -155,7 +175,6 @@ class Star:
             Star object
         """
         from .box import Box
-
         box = Box(lb, ub)
         return box.to_star()
 
@@ -213,8 +232,6 @@ class Star:
         new_V = np.hstack([new_c, self.V[:, 1:], other.V[:, 1:]])
 
         # Combine constraints in block-diagonal form
-        from scipy.linalg import block_diag
-
         new_C = block_diag(self.C, other.C)
         new_d = np.vstack([self.d, other.d])
 
@@ -279,8 +296,6 @@ class Star:
         )
 
         # Combine constraints
-        from scipy.linalg import block_diag
-
         new_C = block_diag(self.C, other.C)
         new_d = np.vstack([self.d, other.d])
 
@@ -310,7 +325,6 @@ class Star:
             Box object
         """
         from .box import Box
-
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
@@ -379,10 +393,8 @@ class Star:
             >>> # Force sequential
             >>> lb, ub = star.get_ranges(parallel=False)
         """
-        # Import config here to avoid circular dependency
-        try:
-            from n2v.config import config as global_config
-        except ImportError:
+        # Use global config if available
+        if not HAS_CONFIG:
             # If config not available, use defaults
             use_parallel = parallel if parallel is not None else False
             n_workers = n_workers if n_workers is not None else 4
@@ -421,8 +433,6 @@ class Star:
         Returns:
             Tuple of (lb, ub) arrays
         """
-        from concurrent.futures import ThreadPoolExecutor
-
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
@@ -525,38 +535,27 @@ class Star:
         if self.nVar == 0:
             return 0.0
 
-        # Define optimization variable
-        alpha = cp.Variable(self.nVar)
+        # Prepare constraints for solve_lp
+        A = self.C if self.C.size > 0 else None
+        b = self.d if self.C.size > 0 else None
+        lb = self.predicate_lb if self.predicate_lb is not None else None
+        ub = self.predicate_ub if self.predicate_ub is not None else None
 
-        # Objective
-        if minimize:
-            objective = cp.Minimize(f.T @ alpha)
+        # Call centralized LP solver
+        x_opt, fval, status, info = solve_lp(
+            f=f,
+            A=A,
+            b=b,
+            lb=lb,
+            ub=ub,
+            solver=lp_solver,
+            minimize=minimize
+        )
+
+        # Return objective value or None if infeasible
+        if status in ['optimal', 'optimal_inaccurate']:
+            return fval
         else:
-            objective = cp.Maximize(f.T @ alpha)
-
-        # Constraints
-        constraints = []
-        if self.C.size > 0:
-            constraints.append(self.C @ alpha <= self.d.flatten())
-
-        if self.predicate_lb is not None:
-            constraints.append(alpha >= self.predicate_lb.flatten())
-        if self.predicate_ub is not None:
-            constraints.append(alpha <= self.predicate_ub.flatten())
-
-        # Solve
-        prob = cp.Problem(objective, constraints)
-        try:
-            if lp_solver == 'default':
-                prob.solve()
-            else:
-                prob.solve(solver=lp_solver)
-
-            if prob.status in ['optimal', 'optimal_inaccurate']:
-                return prob.value
-            else:
-                return None
-        except:
             return None
 
     def is_empty_set(self, lp_solver: str = 'default') -> bool:
@@ -566,10 +565,13 @@ class Star:
         Returns:
             True if empty, False otherwise
         """
-        # Try to solve feasibility LP
-        f = np.zeros((self.nVar, 1))
-        result = self._solve_lp(f, minimize=True, lp_solver=lp_solver)
-        return result is None
+        # Use centralized feasibility checker
+        A = self.C if self.C.size > 0 else None
+        b = self.d if self.C.size > 0 else None
+        lb = self.predicate_lb if self.predicate_lb is not None else None
+        ub = self.predicate_ub if self.predicate_ub is not None else None
+
+        return not check_feasibility(A=A, b=b, lb=lb, ub=ub, solver=lp_solver)
 
     def contains(self, x: np.ndarray, lp_solver: str = 'default') -> bool:
         """
@@ -628,7 +630,6 @@ class Star:
             ImageStar object
         """
         from .image_star import ImageStar
-
         if height * width * num_channels != self.dim:
             raise ValueError(
                 f"Image dimensions {height}x{width}x{num_channels} = "
@@ -658,8 +659,8 @@ class Star:
             lb, ub = self.estimate_ranges()
 
         # Sample from box and check constraints
-        samples = []
         from .box import Box
+        samples = []
         box = Box(lb, ub)
 
         candidates = box.sample(2 * N)  # Over-sample
@@ -674,3 +675,19 @@ class Star:
             return np.hstack(samples)
         else:
             return np.array([]).reshape(self.dim, 0)
+
+    # ======================== Reachability Analysis ========================
+    # Note: Reachability analysis should be performed through NeuralNetwork.reach()
+    # instead of calling reach() on set objects directly. This maintains proper
+    # separation of concerns where sets represent geometric objects and reachability
+    # is a neural network operation.
+    #
+    # Example usage:
+    #     from n2v.nn import NeuralNetwork
+    #     from n2v.sets import Star
+    #     import torch.nn as nn
+    #
+    #     model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
+    #     net = NeuralNetwork(model)
+    #     input_star = Star.from_bounds(lb, ub)
+    #     output_stars = net.reach(input_star, method='exact')

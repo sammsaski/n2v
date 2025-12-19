@@ -1,5 +1,11 @@
 """
 Layer operation modules - reachability for specific layer types.
+
+Internal modules that implement reachability for individual layer types
+across different set representations (Star, Zono, Box, Hexatope, Octatope).
+
+These are typically accessed through the high-level NeuralNetwork.reach() API
+rather than directly.
 """
 
 from n2v.nn.layer_ops import linear_reach
@@ -8,7 +14,7 @@ from n2v.nn.layer_ops import flatten_reach
 from n2v.nn.layer_ops import conv2d_reach
 from n2v.nn.layer_ops import maxpool2d_reach
 from n2v.nn.layer_ops import avgpool2d_reach
-from n2v.nn.layer_ops.dispatcher import reach_layer_star, reach_layer_zono, reach_layer_box
+from n2v.nn.layer_ops.dispatcher import reach_layer
 
 __all__ = [
     "linear_reach",
@@ -17,7 +23,5 @@ __all__ = [
     "conv2d_reach",
     "maxpool2d_reach",
     "avgpool2d_reach",
-    "reach_layer_star",
-    "reach_layer_zono",
-    "reach_layer_box"
+    "reach_layer",
 ]

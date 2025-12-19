@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from typing import Optional, Union
 from pathlib import Path
+from collections import OrderedDict
 import onnx
 from onnx2torch import convert
 
@@ -108,8 +109,6 @@ def get_model_summary(model: nn.Module, input_shape: tuple) -> dict:
     Returns:
         Dictionary with model information
     """
-    from collections import OrderedDict
-
     summary = OrderedDict()
     hooks = []
 

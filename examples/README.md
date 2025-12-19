@@ -225,7 +225,7 @@ input_star = ImageStar.from_bounds(
 import n2v as nnv
 
 verifier = nnv.NeuralNetwork(model)
-output_stars = verifier.reach(input_star, method='exact-star')
+output_stars = verifier.reach(input_star, method='exact')
 
 print(f"Output: {len(output_stars)} reachable set(s)")
 ```
@@ -303,13 +303,13 @@ epsilon = 0.1   # May cause too much splitting
 
 ```python
 # For small networks:
-method = 'exact-star'
+method = 'exact'
 
 # For large networks:
-method = 'approx-star'  # Faster, still sound
+method = 'approx'  # Faster, still sound
 
 # For very large networks:
-method = 'approx-zono'  # Fastest, conservative
+method = 'approx'  # Fastest, conservative
 ```
 
 ### 4. Monitor Star Count

@@ -1,6 +1,6 @@
-# ACAS Xu Verification Example
+# ACAS Xu Verification Examples
 
-This directory contains an example of verifying ACAS Xu neural network properties using NNV-Python.
+This directory contains examples for verifying ACAS Xu neural network properties using NNV-Python with support for multiple set representations.
 
 ## Overview
 
@@ -10,42 +10,119 @@ ACAS Xu (Airborne Collision Avoidance System X for Unmanned Aircraft) is a safet
 
 - `onnx/` - ACAS Xu neural networks in ONNX format (45 networks)
 - `vnnlib/` - VNN-LIB property files (10 properties)
-- `verify_acasxu.py` - Main verification script with command-line interface
+- **`verify_acasxu.py`** - **NEW**: Generalized verification script supporting all set types (Box, Zono, Star, Hexatope, Octatope)
+- `verify_acasxu_star.py` - Original Star-specific verification script (backward compatibility)
+- `verify_acasxu_comp.py` - Comparison script for benchmarking
 
 ## Usage
 
-### Basic Usage
+### Quick Start - Generalized Script
+
+The new `verify_acasxu.py` supports all set types and methods:
 
 ```bash
-python verify_acasxu.py <network> <property> [options]
+# Default: Star sets with exact method
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib
+
+# Fast verification with Box sets
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --set box --method approx
+
+# Precise verification with Hexatope and differentiable solver
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --set hexatope --method exact-differentiable
+
+# Parallel processing with Star sets
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --set star --method exact --parallel --workers 4
 ```
+
+### Supported Set Types and Methods
+
+| Set Type | Supported Methods | Speed | Precision | Notes |
+|----------|------------------|-------|-----------|-------|
+| **box** | `approx` | ⚡⚡⚡ Fastest | ⭐ Basic | Interval arithmetic |
+| **zono** | `approx` | ⚡⚡ Fast | ⭐⭐ Good | Zonotope representation |
+| **star** | `exact`, `approx` | ⚡ Moderate | ⭐⭐⭐ High | Most flexible, parallel support |
+| **hexatope** | `exact`, `exact-differentiable`, `approx` | 🐌 Slow | ⭐⭐⭐⭐ Very High | DCS constraints |
+| **octatope** | `exact`, `exact-differentiable`, `approx` | 🐌 Slow | ⭐⭐⭐⭐ Very High | UTVPI constraints |
 
 ### Command-Line Arguments
 
-- **`network`** (required): Path to ONNX network file (relative to script directory or absolute)
-- **`property`** (required): Path to VNN-LIB property file (relative to script directory or absolute)
-- **`--method {exact,approx}`** (optional): Reachability method (default: `exact`)
-  - `exact`: Exact reachability analysis (slower, more precise)
-  - `approx`: Approximate reachability analysis (faster, over-approximation)
-- **`--timeout TIMEOUT`** (optional): Timeout in seconds (default: 300.0)
+#### Required Arguments
+- **`network`**: Path to ONNX network file
+- **`property`**: Path to VNN-LIB property file
 
-### Examples
+#### Optional Arguments
+- **`--set {box,zono,star,hexatope,octatope}`**: Set representation (default: `star`)
+- **`--method {exact,exact-differentiable,approx}`**: Reachability method (default: `exact`)
+  - `exact`: Exact reachability with splitting (uses CVXPY)
+  - `exact-differentiable`: Exact with differentiable LP solver (Hexatope/Octatope only)
+  - `approx`: Over-approximate reachability (faster, conservative)
+- **`--timeout TIMEOUT`**: Timeout in seconds (default: 300.0)
+- **`--parallel`**: Enable parallel processing (Star only)
+- **`--workers N`**: Number of parallel workers (default: auto-detect)
+
+### Examples by Set Type
 
 ```bash
-# Verify with exact reachability (default)
-python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib
+# Box sets - Fastest, least precise
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set box --method approx
 
-# Verify with approximate reachability (faster)
-python verify_acasxu.py onnx/ACASXU_run2a_1_5_batch_2000.onnx vnnlib/prop_3.vnnlib --method approx
+# Zonotope sets - Fast with good precision
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set zono --method approx
 
-# With custom timeout
-python verify_acasxu.py onnx/ACASXU_run2a_1_1_batch_2000.onnx vnnlib/prop_1.vnnlib --timeout 600
+# Star sets with exact method (default)
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set star --method exact
 
-# Using absolute paths
-python verify_acasxu.py /path/to/network.onnx /path/to/property.vnnlib
+# Star sets with approximate method (faster)
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set star --method approx
 
-# Show help
-python verify_acasxu.py --help
+# Hexatope with exact method and CVXPY
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set hexatope --method exact
+
+# Hexatope with differentiable LP solver (GPU-friendly)
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set hexatope --method exact-differentiable
+
+# Octatope with approximate method
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set octatope --method approx
+
+# Star sets with parallel processing
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set star --method exact --parallel --workers 4
+```
+
+### Comparison of Different Approaches
+
+```bash
+# Compare different set types with approximate methods
+for set_type in box zono star; do
+  echo "Testing with $set_type"
+  python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+    --set $set_type --method approx
+done
+
+# Compare exact methods
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set star --method exact
+
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set hexatope --method exact
+
+python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
+  --set hexatope --method exact-differentiable
+```
+
+### Legacy Script
+
+The original Star-specific script is still available:
+
+```bash
+python verify_acasxu_star.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --method exact --parallel
 ```
 
 ### Example Output
@@ -178,7 +255,7 @@ The verification returns one of three results:
 ACAS Xu properties test various safety conditions:
 
 - **Property 1-2**: If the intruder is distant and slower, COC advisory should not be issued
-- **Properties 3-4**: Test advisories for head-on scenarios (use approx-star first in MATLAB)
+- **Properties 3-4**: Test advisories for head-on scenarios (use approx first in MATLAB)
 - **Properties 5-10**: Various other safety-critical scenarios
 
 ### Property Format
@@ -206,13 +283,13 @@ Example (Property 3):
 
 ### Python vs MATLAB Comparison
 
-**Performance** (for ACAS Xu 1_4 + prop_3 with exact-star):
+**Performance** (for ACAS Xu 1_4 + prop_3 with exact):
 - **MATLAB**: ~60s (with multi-core)
 - **Python**: ~118s (single-core)
 
 **Method Selection** (from MATLAB `run_vnncomp_instance.m`):
-- For properties 3 and 4: Try `approx-star` first, fall back to `exact-star` if needed
-- For other properties: Use `exact-star` directly
+- For properties 3 and 4: Try `approx` (Star) first, fall back to `exact` (Star) if needed
+- For other properties: Use `exact` (Star) directly
 
 **Verification Logic**:
 Both implementations check intersection with unsafe regions:

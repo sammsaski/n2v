@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 import torch
 import torch.nn as nn
-from n2v.sets import Star, Zono, Box, ImageStar, ImageZono
+from n2v.sets import Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope
 
 
 # ============================================================================
@@ -43,6 +43,22 @@ def simple_box():
     lb = np.array([[0.0], [0.0], [0.0]])
     ub = np.array([[1.0], [1.0], [1.0]])
     return Box(lb, ub)
+
+
+@pytest.fixture
+def simple_hexatope():
+    """Create a simple 3D Hexatope."""
+    lb = np.array([[0.0], [0.0], [0.0]])
+    ub = np.array([[1.0], [1.0], [1.0]])
+    return Hexatope.from_bounds(lb, ub)
+
+
+@pytest.fixture
+def simple_octatope():
+    """Create a simple 3D Octatope."""
+    lb = np.array([[0.0], [0.0], [0.0]])
+    ub = np.array([[1.0], [1.0], [1.0]])
+    return Octatope.from_bounds(lb, ub)
 
 
 @pytest.fixture
@@ -167,7 +183,27 @@ def assert_image_star_valid(img_star):
     assert img_star.dim == img_star.height * img_star.width * img_star.num_channels
 
 
+def assert_hexatope_valid(hexatope):
+    """Assert that a Hexatope is valid."""
+    assert hexatope.center is not None
+    assert hexatope.generators is not None
+    assert hexatope.dcs is not None
+    assert hexatope.generators.shape[0] == hexatope.dim
+    assert hexatope.generators.shape[1] == hexatope.nVar
+
+
+def assert_octatope_valid(octatope):
+    """Assert that an Octatope is valid."""
+    assert octatope.center is not None
+    assert octatope.generators is not None
+    assert octatope.utvpi is not None
+    assert octatope.generators.shape[0] == octatope.dim
+    assert octatope.generators.shape[1] == octatope.nVar
+
+
 # Make helpers available
 pytest.assert_star_valid = assert_star_valid
 pytest.assert_zono_valid = assert_zono_valid
 pytest.assert_image_star_valid = assert_image_star_valid
+pytest.assert_hexatope_valid = assert_hexatope_valid
+pytest.assert_octatope_valid = assert_octatope_valid

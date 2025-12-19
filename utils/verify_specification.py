@@ -7,11 +7,14 @@ or unsafe region to prove).
 """
 
 import numpy as np
-from typing import Union, List
-from n2v.sets import Star, HalfSpace
+from typing import Union, List, TYPE_CHECKING, Any
+
+# Use TYPE_CHECKING to avoid circular import (Star -> lpsolver -> verify_specification -> Star)
+if TYPE_CHECKING:
+    from n2v.sets import Star, HalfSpace
 
 
-def verify_specification(reach_set: Union[List[Star], List], property: Union[dict, List[dict], HalfSpace, List[HalfSpace]]) -> int:
+def verify_specification(reach_set: Union[List['Star'], List], property: Union[dict, List[dict], 'HalfSpace', List['HalfSpace']]) -> int:
     """
     Verify a specification based on intersection between reach set and property halfspaces.
 
@@ -35,6 +38,9 @@ def verify_specification(reach_set: Union[List[Star], List], property: Union[dic
         - Single HalfSpace: ALL reach sets must NOT intersect (AND logic)
         - Multiple HalfSpaces: If ANY intersects with ANY reach set -> unknown/unsafe (OR logic)
     """
+    # Import at runtime to avoid circular dependency
+    from n2v.sets import Star, HalfSpace
+
     R = reach_set
     nr = len(R)  # number of output sets (for approx should be 1)
 

@@ -8,8 +8,8 @@ Conv2D is an affine transformation, so it should be exact for all set types.
 import numpy as np
 import torch
 import torch.nn as nn
-from n2v.sets import ImageStar, ImageZono
-from n2v.nn.layer_ops.conv2d_reach import conv2d_star, conv2d_zono
+from n2v.sets import ImageStar, ImageZono, Hexatope, Octatope
+from n2v.nn.layer_ops.conv2d_reach import conv2d_star, conv2d_zono, conv2d_hexatope, conv2d_octatope
 
 
 class TestConv2DImageStarSoundness:
@@ -333,3 +333,136 @@ class TestConv2DEdgeCases:
         lb_out, ub_out = out_star.estimate_ranges()
         assert np.allclose(lb_out, -5.0, atol=1e-6)
         assert np.allclose(ub_out, 10.0, atol=1e-6)
+
+
+class TestConv2DHexatopeSoundness:
+    """Soundness tests for Conv2D with Hexatope sets."""
+
+    def test_simple_identity(self):
+        """Test Conv2D with hexatope - identity case."""
+        # Identity 1x1 kernel
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=False)
+        layer.weight.data = torch.ones(1, 1, 1, 1)
+
+        # Create hexatope from flattened 2x2 image bounds
+        lb = np.zeros((4, 1))  # 2x2x1 = 4 dims
+        ub = np.ones((4, 1))
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply Conv2D - should use bounds approximation
+        output_hexatopes = conv2d_hexatope(layer, [input_hexatope])
+
+        # Verify output is a hexatope
+        assert len(output_hexatopes) == 1
+        assert isinstance(output_hexatopes[0], Hexatope)
+
+    def test_bounds_preservation(self):
+        """Test that Conv2D preserves sound bounds."""
+        # Simple scaling layer
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=False)
+        layer.weight.data = torch.tensor([[[[2.0]]]])
+
+        # Create hexatope
+        lb = np.array([[1.0], [1.0], [1.0], [1.0]])
+        ub = np.array([[2.0], [2.0], [2.0], [2.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply Conv2D
+        output_hexatopes = conv2d_hexatope(layer, [input_hexatope])
+
+        # Verify output exists
+        assert len(output_hexatopes) == 1
+
+    def test_with_bias(self):
+        """Test Conv2D with bias term."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=True)
+        layer.weight.data = torch.ones(1, 1, 1, 1)
+        layer.bias.data = torch.tensor([3.0])
+
+        # Create hexatope
+        lb = np.zeros((4, 1))
+        ub = np.ones((4, 1))
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply Conv2D
+        output_hexatopes = conv2d_hexatope(layer, [input_hexatope])
+
+        # Verify output
+        assert len(output_hexatopes) == 1
+        assert isinstance(output_hexatopes[0], Hexatope)
+
+    def test_negative_bounds(self):
+        """Test Conv2D with negative input bounds."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=False)
+        layer.weight.data = torch.ones(1, 1, 1, 1)
+
+        # Negative bounds
+        lb = np.array([[-2.0], [-2.0], [-2.0], [-2.0]])
+        ub = np.array([[-1.0], [-1.0], [-1.0], [-1.0]])
+        input_hexatope = Hexatope.from_bounds(lb, ub)
+
+        # Apply Conv2D
+        output_hexatopes = conv2d_hexatope(layer, [input_hexatope])
+
+        assert len(output_hexatopes) == 1
+
+
+class TestConv2DOctatopeSoundness:
+    """Soundness tests for Conv2D with Octatope sets."""
+
+    def test_simple_identity(self):
+        """Test Conv2D with octatope - identity case."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=False)
+        layer.weight.data = torch.ones(1, 1, 1, 1)
+
+        # Create octatope
+        lb = np.zeros((4, 1))
+        ub = np.ones((4, 1))
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        # Apply Conv2D
+        output_octatopes = conv2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        assert isinstance(output_octatopes[0], Octatope)
+
+    def test_bounds_preservation(self):
+        """Test that Conv2D preserves sound bounds."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=False)
+        layer.weight.data = torch.tensor([[[[2.0]]]])
+
+        lb = np.array([[1.0], [1.0], [1.0], [1.0]])
+        ub = np.array([[2.0], [2.0], [2.0], [2.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = conv2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+
+    def test_with_bias(self):
+        """Test Conv2D with bias term."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=True)
+        layer.weight.data = torch.ones(1, 1, 1, 1)
+        layer.bias.data = torch.tensor([3.0])
+
+        lb = np.zeros((4, 1))
+        ub = np.ones((4, 1))
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = conv2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1
+        assert isinstance(output_octatopes[0], Octatope)
+
+    def test_negative_bounds(self):
+        """Test Conv2D with negative input bounds."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=False)
+        layer.weight.data = torch.ones(1, 1, 1, 1)
+
+        lb = np.array([[-2.0], [-2.0], [-2.0], [-2.0]])
+        ub = np.array([[-1.0], [-1.0], [-1.0], [-1.0]])
+        input_octatope = Octatope.from_bounds(lb, ub)
+
+        output_octatopes = conv2d_octatope(layer, [input_octatope])
+
+        assert len(output_octatopes) == 1

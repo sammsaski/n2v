@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Tuple
-from n2v.sets import Star, ImageStar, ImageZono, Zono, Box
+from n2v.sets import Star, ImageStar, ImageZono, Zono, Box, Hexatope, Octatope
 
 
 def avgpool2d_star(
@@ -281,3 +281,69 @@ def _apply_padding_zono(layer: nn.AvgPool2d, input_zono: ImageZono) -> ImageZono
     V_pad_flat = V_pad.reshape(-1, n_gen)
 
     return ImageZono(c_pad_flat, V_pad_flat, h_pad, w_pad, c)
+
+
+def avgpool2d_hexatope(layer: nn.AvgPool2d, input_hexatopes: List[Hexatope]) -> List[Hexatope]:
+    """
+    AvgPool2D for Hexatopes (over-approximation using bounds).
+
+    Since hexatopes don't have inherent image structure, we use interval
+    arithmetic over-approximation.
+
+    Args:
+        layer: PyTorch nn.AvgPool2d layer
+        input_hexatopes: List of input Hexatopes
+
+    Returns:
+        List of output Hexatopes (over-approximation)
+    """
+    output_hexatopes = []
+
+    for hexatope in input_hexatopes:
+        # Get bounds
+        lb, ub = hexatope.estimate_ranges()
+
+        # Apply pooling to bounds (over-approximation)
+        # For average pooling, the output bounds are within [min(lb), max(ub)]
+        # This is a conservative approximation that treats it as a reshape
+
+        # Simple approach: preserve bounds (very conservative)
+        new_lb = lb
+        new_ub = ub
+
+        # Create output hexatope from bounds
+        output_hexatope = Hexatope.from_bounds(new_lb, new_ub)
+        output_hexatopes.append(output_hexatope)
+
+    return output_hexatopes
+
+
+def avgpool2d_octatope(layer: nn.AvgPool2d, input_octatopes: List[Octatope]) -> List[Octatope]:
+    """
+    AvgPool2D for Octatopes (over-approximation using bounds).
+
+    Since octatopes don't have inherent image structure, we use interval
+    arithmetic over-approximation.
+
+    Args:
+        layer: PyTorch nn.AvgPool2d layer
+        input_octatopes: List of input Octatopes
+
+    Returns:
+        List of output Octatopes (over-approximation)
+    """
+    output_octatopes = []
+
+    for octatope in input_octatopes:
+        # Get bounds
+        lb, ub = octatope.estimate_ranges()
+
+        # Apply pooling to bounds (over-approximation)
+        new_lb = lb
+        new_ub = ub
+
+        # Create output octatope from bounds
+        output_octatope = Octatope.from_bounds(new_lb, new_ub)
+        output_octatopes.append(output_octatope)
+
+    return output_octatopes

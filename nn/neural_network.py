@@ -101,60 +101,64 @@ class NeuralNetwork:
 
     def reach(
         self,
-        input_set: Union['Star', 'Zono', 'Box'],
-        method: str = 'approx-star',
-        num_cores: int = 1,
+        input_set: Union['Star', 'Zono', 'Box', 'Hexatope', 'Octatope'],
+        method: str = 'exact',
+        **kwargs
     ) -> List:
         """
         Perform reachability analysis.
 
+        This is the primary interface for reachability analysis. It automatically
+        dispatches to the appropriate reachability method based on the input set type.
+
         Args:
-            input_set: Input specification (Star, Zono, or Box)
-            method: Reachability method
-                - 'exact-star': Exact using Star sets
-                - 'approx-star': Over-approximate using Star sets
-                - 'approx-zono': Over-approximate using Zonotopes
-                - 'approx-box': Over-approximate using Boxes
-            num_cores: Number of CPU cores for parallel computation
+            input_set: Input specification (Star, Zono, Box, Hexatope, or Octatope)
+            method: Reachability method to use:
+                For Star:
+                    - 'exact': Exact reachability with splitting
+                    - 'approx': Over-approximate reachability with relaxation
+                For Box/Zono:
+                    - 'approx': Over-approximate reachability (only option)
+                For Hexatope/Octatope:
+                    - 'exact': Exact reachability using CVXPY
+                    - 'exact-differentiable': Exact reachability using differentiable LP solver
+                    - 'approx': Over-approximate reachability
+            **kwargs: Additional method-specific arguments:
+                For Star 'exact':
+                    - lp_solver: LP solver to use (default: 'default')
+                    - dis_opt: 'display' to show progress
+                    - parallel: Enable parallel Star processing
+                    - n_workers: Number of parallel workers
+                For Star 'approx':
+                    - relax_factor: Relaxation factor (0=exact, 1=max, default: 0.5)
+                    - relax_method: Relaxation strategy (default: 'standard')
+                    - lp_solver: LP solver to use
+                    - dis_opt: 'display' to show progress
+                For Hexatope/Octatope:
+                    - dis_opt: 'display' to show progress
+                For Zono/Box:
+                    - dis_opt: 'display' to show progress
 
         Returns:
             List of output sets (same type as input_set)
+
+        Example:
+            >>> from n2v.nn import NeuralNetwork
+            >>> from n2v.sets import Star
+            >>> import torch.nn as nn
+            >>> model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
+            >>> net = NeuralNetwork(model)
+            >>> input_star = Star.from_bounds(lb, ub)
+            >>> output_stars = net.reach(input_star, method='exact')
         """
-        from .reach import reach_pytorch_model
+        from n2v.nn.reach import reach_pytorch_model
 
         return reach_pytorch_model(
             self.model,
             input_set,
             method=method,
-            num_cores=num_cores,
+            **kwargs
         )
-
-    def verify_property(
-        self,
-        input_set: Union['Star', 'Zono', 'Box'],
-        property_fn,
-        method: str = 'exact-star',
-    ) -> bool:
-        """
-        Verify a safety property.
-
-        Args:
-            input_set: Input specification
-            property_fn: Function that takes output set and returns True if safe
-            method: Reachability method to use
-
-        Returns:
-            True if property holds, False if violated, None if unknown
-        """
-        # Compute reachable sets
-        output_sets = self.reach(input_set, method=method)
-
-        # Check property on all output sets
-        for output_set in output_sets:
-            if not property_fn(output_set):
-                return False
-
-        return True
 
     def __repr__(self) -> str:
         return f"NeuralNetwork(layers={len(self.layers)}, input_size={self.input_size})"

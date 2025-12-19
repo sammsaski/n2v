@@ -6,7 +6,13 @@ Translated from MATLAB NNV Box.m
 """
 
 import numpy as np
-from typing import Optional, Tuple, List, Union
+from typing import Optional, Tuple, List, Union, TYPE_CHECKING
+
+# TYPE_CHECKING imports for type hints (avoid circular import at runtime)
+if TYPE_CHECKING:
+    from n2v.sets.zono import Zono
+
+# NOTE: Runtime import of n2v.sets.zono kept inline to avoid circular dependencies
 
 
 class Box:
@@ -250,3 +256,19 @@ class Box:
         hull_ub = np.max(all_ub, axis=1, keepdims=True)
 
         return Box(hull_lb, hull_ub)
+
+    # ======================== Reachability Analysis ========================
+    # Note: Reachability analysis should be performed through NeuralNetwork.reach()
+    # instead of calling reach() on set objects directly. This maintains proper
+    # separation of concerns where sets represent geometric objects and reachability
+    # is a neural network operation.
+    #
+    # Example usage:
+    #     from n2v.nn import NeuralNetwork
+    #     from n2v.sets import Box
+    #     import torch.nn as nn
+    #
+    #     model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
+    #     net = NeuralNetwork(model)
+    #     input_box = Box(lb, ub)
+    #     output_boxes = net.reach(input_box, method='approx')

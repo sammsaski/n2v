@@ -4,7 +4,7 @@ Flatten layer reachability operations.
 
 import torch.nn as nn
 from typing import List
-from n2v.sets import Star, Zono, Box, ImageStar, ImageZono
+from n2v.sets import Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope
 
 
 def flatten_star(layer: nn.Flatten, input_stars: List[Star]) -> List[Star]:
@@ -71,3 +71,39 @@ def flatten_box(layer: nn.Flatten, input_boxes: List[Box]) -> List[Box]:
     """
     # Boxes don't have image structure, so no change
     return input_boxes
+
+
+def flatten_hexatope(layer: nn.Flatten, input_hexatopes: List[Hexatope]) -> List[Hexatope]:
+    """
+    Flatten for Hexatopes.
+
+    Since hexatopes are already vector-based (not image-based), flatten is essentially
+    a no-op. The hexatope structure is preserved.
+
+    Args:
+        layer: PyTorch nn.Flatten layer
+        input_hexatopes: List of input Hexatopes
+
+    Returns:
+        List of output Hexatopes (unchanged)
+    """
+    # Hexatopes don't have image structure, so no change needed
+    return input_hexatopes
+
+
+def flatten_octatope(layer: nn.Flatten, input_octatopes: List[Octatope]) -> List[Octatope]:
+    """
+    Flatten for Octatopes.
+
+    Since octatopes are already vector-based (not image-based), flatten is essentially
+    a no-op. The octatope structure is preserved.
+
+    Args:
+        layer: PyTorch nn.Flatten layer
+        input_octatopes: List of input Octatopes
+
+    Returns:
+        List of output Octatopes (unchanged)
+    """
+    # Octatopes don't have image structure, so no change needed
+    return input_octatopes

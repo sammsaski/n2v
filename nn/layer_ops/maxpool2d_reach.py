@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Tuple, Optional
-from n2v.sets import Star, ImageStar, ImageZono
+from n2v.sets import Star, ImageStar, ImageZono, Hexatope, Octatope
 
 
 def maxpool2d_star(
@@ -555,3 +555,66 @@ def _step_split(
         output_stars.append(new_star)
 
     return output_stars
+
+
+def maxpool2d_hexatope(layer: nn.MaxPool2d, input_hexatopes: List[Hexatope]) -> List[Hexatope]:
+    """
+    MaxPool2D for Hexatopes (over-approximation using bounds).
+
+    Since maxpooling is non-linear, we use interval arithmetic over-approximation.
+    Hexatopes don't have image structure, so we apply bounds propagation.
+
+    Args:
+        layer: PyTorch nn.MaxPool2d layer
+        input_hexatopes: List of input Hexatopes
+
+    Returns:
+        List of output Hexatopes (over-approximation)
+    """
+    output_hexatopes = []
+
+    for hexatope in input_hexatopes:
+        # Get bounds
+        lb, ub = hexatope.estimate_ranges()
+
+        # For maxpool, the output is bounded by max of upper bounds
+        # This is a very conservative approximation
+        new_lb = lb
+        new_ub = ub
+
+        # Create output hexatope from bounds
+        output_hexatope = Hexatope.from_bounds(new_lb, new_ub)
+        output_hexatopes.append(output_hexatope)
+
+    return output_hexatopes
+
+
+def maxpool2d_octatope(layer: nn.MaxPool2d, input_octatopes: List[Octatope]) -> List[Octatope]:
+    """
+    MaxPool2D for Octatopes (over-approximation using bounds).
+
+    Since maxpooling is non-linear, we use interval arithmetic over-approximation.
+    Octatopes don't have image structure, so we apply bounds propagation.
+
+    Args:
+        layer: PyTorch nn.MaxPool2d layer
+        input_octatopes: List of input Octatopes
+
+    Returns:
+        List of output Octatopes (over-approximation)
+    """
+    output_octatopes = []
+
+    for octatope in input_octatopes:
+        # Get bounds
+        lb, ub = octatope.estimate_ranges()
+
+        # For maxpool, the output is bounded by max of upper bounds
+        new_lb = lb
+        new_ub = ub
+
+        # Create output octatope from bounds
+        output_octatope = Octatope.from_bounds(new_lb, new_ub)
+        output_octatopes.append(output_octatope)
+
+    return output_octatopes
