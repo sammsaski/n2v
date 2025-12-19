@@ -1,0 +1,740 @@
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_1.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_1_1_batch_2000.onnx with prop_1.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_1.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [0.600000, 0.679858]
+     X_1: [-0.500000, 0.500000]
+     X_2: [-0.500000, 0.500000]
+     X_3: [0.450000, 0.500000]
+     X_4: [-0.500000, -0.450000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.08 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-1322.545841, 3684.269412]
+     Y_1: [-2228.697535, 4810.934914]
+     Y_2: [-1548.915869, 4889.950196]
+     Y_3: [-3720.210589, 5370.892307]
+     Y_4: [-2410.537553, 5350.623868]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.05 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.08s
+  Verification: 0.05s
+  Total: 0.13s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_1.vnnlib
+Result: UNKNOWN
+Time: 0.13s
+Method: approx
+Output stars: 1
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_2_3_batch_2000.onnx
+Property: prop_2.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_2_3_batch_2000.onnx with prop_2.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_2.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [0.600000, 0.679858]
+     X_1: [-0.500000, 0.500000]
+     X_2: [-0.500000, 0.500000]
+     X_3: [0.450000, 0.500000]
+     X_4: [-0.500000, -0.450000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.08 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-2415.503284, 7818.646440]
+     Y_1: [-1681.772925, 5132.886603]
+     Y_2: [-1916.919619, 4612.643107]
+     Y_3: [-1545.618522, 6286.230610]
+     Y_4: [-3022.396197, 4928.962392]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.06 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.08s
+  Verification: 0.06s
+  Total: 0.14s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_2_3_batch_2000.onnx
+Property: prop_2.vnnlib
+Result: UNKNOWN
+Time: 0.14s
+Method: approx
+Output stars: 1
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_3_4_batch_2000.onnx
+Property: prop_3.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_3_4_batch_2000.onnx with prop_3.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_3.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.303531, -0.298553]
+     X_1: [-0.009549, 0.009549]
+     X_2: [0.493380, 0.500000]
+     X_3: [0.300000, 0.500000]
+     X_4: [0.300000, 0.500000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.04 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-82.449775, 172.424248]
+     Y_1: [-39.679469, 93.864451]
+     Y_2: [-49.223627, 86.340046]
+     Y_3: [-48.310412, 123.171062]
+     Y_4: [-41.848638, 88.497639]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.05 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.04s
+  Verification: 0.05s
+  Total: 0.09s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_3_4_batch_2000.onnx
+Property: prop_3.vnnlib
+Result: UNKNOWN
+Time: 0.09s
+Method: approx
+Output stars: 1
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_2_5_batch_2000.onnx
+Property: prop_4.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_2_5_batch_2000.onnx with prop_4.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_4.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.303531, -0.298553]
+     X_1: [-0.009549, 0.009549]
+     X_2: [0.000000, 0.000000]
+     X_3: [0.318182, 0.500000]
+     X_4: [0.083333, 0.166667]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 4
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.03 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-24.043606, 78.646757]
+     Y_1: [-12.982509, 19.950806]
+     Y_2: [-7.927144, 21.583114]
+     Y_3: [-12.118566, 27.243805]
+     Y_4: [-9.298437, 21.912845]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.04 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.03s
+  Verification: 0.04s
+  Total: 0.07s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_2_5_batch_2000.onnx
+Property: prop_4.vnnlib
+Result: UNKNOWN
+Time: 0.07s
+Method: approx
+Output stars: 1
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_5.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_1_1_batch_2000.onnx with prop_5.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_5.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.324274, -0.321785]
+     X_1: [0.031831, 0.063662]
+     X_2: [-0.500000, -0.499204]
+     X_3: [-0.500000, -0.227273]
+     X_4: [-0.500000, -0.166667]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.05 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-218.518307, 606.717185]
+     Y_1: [-367.728618, 791.911848]
+     Y_2: [-255.374519, 806.260653]
+     Y_3: [-614.586357, 884.661457]
+     Y_4: [-397.378524, 883.252621]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.06 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.05s
+  Verification: 0.06s
+  Total: 0.11s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_5.vnnlib
+Result: UNKNOWN
+Time: 0.11s
+Method: approx
+Output stars: 1
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_6.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_1_1_batch_2000.onnx with prop_6.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_6.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [0.000000, 0.000000]
+     X_1: [0.000000, 0.000000]
+     X_2: [0.000000, 0.000000]
+     X_3: [0.000000, 0.000000]
+     X_4: [-0.500000, 0.000000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 1
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.04 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-41.891270, 115.870930]
+     Y_1: [-70.087317, 151.060230]
+     Y_2: [-49.013126, 154.379144]
+     Y_3: [-117.305593, 169.324141]
+     Y_4: [-76.639302, 169.289817]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.04 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.04s
+  Verification: 0.04s
+  Total: 0.08s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_6.vnnlib
+Result: UNKNOWN
+Time: 0.08s
+Method: approx
+Output stars: 1
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_1_9_batch_2000.onnx
+Property: prop_7.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_1_9_batch_2000.onnx with prop_7.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_7.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.328423, 0.679858]
+     X_1: [-0.500000, 0.500000]
+     X_2: [-0.500000, 0.500000]
+     X_3: [-0.500000, 0.500000]
+     X_4: [-0.500000, 0.500000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.13 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-526.779253, 519.883441]
+     Y_1: [-1054.371056, 1136.278649]
+     Y_2: [-1275.383916, 889.521406]
+     Y_3: [-1179.750205, 537.158401]
+     Y_4: [-1224.374828, 599.455940]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.07 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.13s
+  Verification: 0.07s
+  Total: 0.20s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_1_9_batch_2000.onnx
+Property: prop_7.vnnlib
+Result: UNKNOWN
+Time: 0.20s
+Method: approx
+Output stars: 1
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_2_9_batch_2000.onnx
+Property: prop_8.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_2_9_batch_2000.onnx with prop_8.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_8.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.328423, 0.679858]
+     X_1: [-0.500000, -0.375000]
+     X_2: [-0.015915, 0.015915]
+     X_3: [-0.045455, 0.500000]
+     X_4: [0.000000, 0.500000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.09 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-9539.255283, 16760.610905]
+     Y_1: [-1345.315055, 496.681639]
+     Y_2: [-440.137685, 1554.865087]
+     Y_3: [-601.511373, 2135.096116]
+     Y_4: [-295.903058, 1635.770365]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.08 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.09s
+  Verification: 0.08s
+  Total: 0.17s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_2_9_batch_2000.onnx
+Property: prop_8.vnnlib
+Result: UNKNOWN
+Time: 0.17s
+Method: approx
+Output stars: 1
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_3_3_batch_2000.onnx
+Property: prop_9.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_3_3_batch_2000.onnx with prop_9.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_9.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.295234, -0.212262]
+     X_1: [-0.063662, -0.022282]
+     X_2: [-0.500000, -0.498408]
+     X_3: [-0.500000, -0.454545]
+     X_4: [-0.500000, -0.375000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.05 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-272.409420, 532.960875]
+     Y_1: [-128.475144, 414.066499]
+     Y_2: [-252.804224, 399.842034]
+     Y_3: [-161.516323, 425.906354]
+     Y_4: [-185.517931, 424.469814]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.06 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.05s
+  Verification: 0.06s
+  Total: 0.11s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_3_3_batch_2000.onnx
+Property: prop_9.vnnlib
+Result: UNKNOWN
+Time: 0.11s
+Method: approx
+Output stars: 1
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_4_5_batch_2000.onnx
+Property: prop_10.vnnlib
+Method: approx
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_4_5_batch_2000.onnx with prop_10.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_10.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [0.268978, 0.679858]
+     X_1: [0.111408, 0.500000]
+     X_2: [-0.500000, -0.498408]
+     X_3: [0.227273, 0.500000]
+     X_4: [0.000000, 0.500000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: approx)...
+   ✓ Reachability completed in 0.05 seconds
+   Number of output stars: 1
+
+   Output bounds:
+     Y_0: [-1604.641998, 3447.140126]
+     Y_1: [-311.495029, 844.304101]
+     Y_2: [-261.756789, 882.459549]
+     Y_3: [-534.414484, 975.306926]
+     Y_4: [-282.473353, 1038.190880]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.07 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 0.05s
+  Verification: 0.07s
+  Total: 0.12s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_4_5_batch_2000.onnx
+Property: prop_10.vnnlib
+Result: UNKNOWN
+Time: 0.12s
+Method: approx
+Output stars: 1
+================================================================================

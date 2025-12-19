@@ -1,0 +1,453 @@
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_1.vnnlib
+Method: exact
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_1_1_batch_2000.onnx with prop_1.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_1.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [0.600000, 0.679858]
+     X_1: [-0.500000, 0.500000]
+     X_2: [-0.500000, 0.500000]
+     X_3: [0.450000, 0.500000]
+     X_4: [-0.500000, -0.450000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: exact)...
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_2_3_batch_2000.onnx
+Property: prop_2.vnnlib
+Method: exact
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_2_3_batch_2000.onnx with prop_2.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_2.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [0.600000, 0.679858]
+     X_1: [-0.500000, 0.500000]
+     X_2: [-0.500000, 0.500000]
+     X_3: [0.450000, 0.500000]
+     X_4: [-0.500000, -0.450000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: exact)...
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_3_4_batch_2000.onnx
+Property: prop_3.vnnlib
+Method: exact
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_3_4_batch_2000.onnx with prop_3.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_3.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.303531, -0.298553]
+     X_1: [-0.009549, 0.009549]
+     X_2: [0.493380, 0.500000]
+     X_3: [0.300000, 0.500000]
+     X_4: [0.300000, 0.500000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: exact)...
+   ✓ Reachability completed in 9.05 seconds
+   Number of output stars: 2100
+
+   Output bounds:
+     Y_0: [0.024493, 0.075249]
+     Y_1: [-0.023367, 0.127162]
+     Y_2: [-0.105461, 0.046538]
+     Y_3: [-0.048842, 0.143724]
+     Y_4: [-0.066245, 0.002421]
+
+5. Verifying specification...
+   ✓ Verification completed in 8.63 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNSAT
+  Status: ✅ Property holds (no intersection with unsafe region)
+
+Timing:
+  Reachability: 9.05s
+  Verification: 8.63s
+  Total: 17.75s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_3_4_batch_2000.onnx
+Property: prop_3.vnnlib
+Result: UNSAT
+Time: 17.75s
+Method: exact
+Output stars: 2100
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_2_5_batch_2000.onnx
+Property: prop_4.vnnlib
+Method: exact
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_2_5_batch_2000.onnx with prop_4.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_4.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.303531, -0.298553]
+     X_1: [-0.009549, 0.009549]
+     X_2: [0.000000, 0.000000]
+     X_3: [0.318182, 0.500000]
+     X_4: [0.083333, 0.166667]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 4
+
+4. Computing reachable set (method: exact)...
+   ✓ Reachability completed in 9.95 seconds
+   Number of output stars: 3419
+
+   Output bounds:
+     Y_0: [-0.261164, 0.200368]
+     Y_1: [-0.064246, 0.040308]
+     Y_2: [-0.180230, 0.170929]
+     Y_3: [-0.056250, 0.126467]
+     Y_4: [-0.282754, 0.202393]
+
+5. Verifying specification...
+   ✓ Verification completed in 13.81 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNSAT
+  Status: ✅ Property holds (no intersection with unsafe region)
+
+Timing:
+  Reachability: 9.95s
+  Verification: 13.81s
+  Total: 23.87s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_2_5_batch_2000.onnx
+Property: prop_4.vnnlib
+Result: UNSAT
+Time: 23.87s
+Method: exact
+Output stars: 3419
+================================================================================
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_5.vnnlib
+Method: exact
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_1_1_batch_2000.onnx with prop_5.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_5.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.324274, -0.321785]
+     X_1: [0.031831, 0.063662]
+     X_2: [-0.500000, -0.499204]
+     X_3: [-0.500000, -0.227273]
+     X_4: [-0.500000, -0.166667]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: exact)...
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_6.vnnlib
+Method: exact
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_1_1_batch_2000.onnx with prop_6.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_6.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [0.000000, 0.000000]
+     X_1: [0.000000, 0.000000]
+     X_2: [0.000000, 0.000000]
+     X_3: [0.000000, 0.000000]
+     X_4: [-0.500000, 0.000000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 1
+
+4. Computing reachable set (method: exact)...
+   ✓ Reachability completed in 3.33 seconds
+   Number of output stars: 57
+
+   Output bounds:
+     Y_0: [-0.067506, 0.009685]
+     Y_1: [-0.068270, 0.014664]
+     Y_2: [-0.074620, 0.037316]
+     Y_3: [-0.070726, 0.010162]
+     Y_4: [-0.053175, 0.003057]
+
+5. Verifying specification...
+   ✓ Verification completed in 0.01 seconds
+
+================================================================================
+VERIFICATION RESULT
+================================================================================
+  Result: UNKNOWN
+  Status: ⚠️  Cannot determine (possible intersection with unsafe region)
+
+Timing:
+  Reachability: 3.33s
+  Verification: 0.01s
+  Total: 3.33s
+================================================================================
+
+
+================================================================================
+SUMMARY
+================================================================================
+Network: ACASXU_run2a_1_1_batch_2000.onnx
+Property: prop_6.vnnlib
+Result: UNKNOWN
+Time: 3.33s
+Method: exact
+Output stars: 57
+================================================================================
+
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_2_9_batch_2000.onnx
+Property: prop_8.vnnlib
+Method: exact
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_2_9_batch_2000.onnx with prop_8.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_8.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.328423, 0.679858]
+     X_1: [-0.500000, -0.375000]
+     X_2: [-0.015915, 0.015915]
+     X_3: [-0.045455, 0.500000]
+     X_4: [0.000000, 0.500000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: exact)...
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_3_3_batch_2000.onnx
+Property: prop_9.vnnlib
+Method: exact
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_3_3_batch_2000.onnx with prop_9.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_9.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [-0.295234, -0.212262]
+     X_1: [-0.063662, -0.022282]
+     X_2: [-0.500000, -0.498408]
+     X_3: [-0.500000, -0.454545]
+     X_4: [-0.500000, -0.375000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: exact)...
+
+================================================================================
+ACAS Xu Verification
+================================================================================
+Network: ACASXU_run2a_4_5_batch_2000.onnx
+Property: prop_10.vnnlib
+Method: exact
+Parallel: enabled (workers: 112)
+================================================================================
+
+================================================================================
+Verifying: ACASXU_run2a_4_5_batch_2000.onnx with prop_10.vnnlib
+================================================================================
+
+⚡ Parallel processing enabled (workers: 112)
+   - LP-level parallelization: ON (within Stars)
+   - Star-level parallelization: ON (across Stars)
+
+1. Loading network...
+
+2. Loading property...
+   ✓ Property loaded: /home/sasakis/v/tools/n2v/examples/AcasXu/vnnlib/prop_10.vnnlib
+   Input dimension: 5
+   Input bounds:
+     X_0: [0.268978, 0.679858]
+     X_1: [0.111408, 0.500000]
+     X_2: [-0.500000, -0.498408]
+     X_3: [0.227273, 0.500000]
+     X_4: [0.000000, 0.500000]
+   Output properties: 1
+   Property type: Single halfspace
+
+3. Creating input set...
+   ✓ Input Star created:
+     Dimension: 5
+     Number of variables: 5
+
+4. Computing reachable set (method: exact)...
+/home/sasakis/miniconda3/envs/n2v/lib/python3.12/site-packages/cvxpy/problems/problem.py:1539: UserWarning: Solution may be inaccurate. Try another solver, adjusting the solver settings, or solve with verbose=True for more information.
+  warnings.warn(

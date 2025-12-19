@@ -27,6 +27,7 @@ import n2v
 from n2v.sets import Star, Zono, Box, Hexatope, Octatope
 from n2v.nn import NeuralNetwork
 from n2v.utils import load_vnnlib, verify_specification
+from n2v.utils.model_loader import load_onnx
 
 
 def create_input_set(set_type: str, lb: np.ndarray, ub: np.ndarray):
@@ -132,7 +133,6 @@ def verify_acasxu_property(network_file: str, property_file: str,
 
     # Load network
     print("\n1. Loading network...")
-    from n2v.utils.model_loader import load_onnx
     model = load_onnx(network_file)
     net = NeuralNetwork(model)
 

@@ -1,0 +1,11 @@
+ONNX file,VNNLIB property,method,result,time
+onnx/ACASXU_run2a_1_1_batch_2000.onnx,vnnlib/prop_1.vnnlib,exact,TIMEOUT,600.0
+onnx/ACASXU_run2a_2_3_batch_2000.onnx,vnnlib/prop_2.vnnlib,exact,TIMEOUT,600.0
+onnx/ACASXU_run2a_3_4_batch_2000.onnx,vnnlib/prop_3.vnnlib,exact,UNSAT,17.75
+onnx/ACASXU_run2a_2_5_batch_2000.onnx,vnnlib/prop_4.vnnlib,exact,UNSAT,23.87
+onnx/ACASXU_run2a_1_1_batch_2000.onnx,vnnlib/prop_5.vnnlib,exact,TIMEOUT,600.0
+onnx/ACASXU_run2a_1_1_batch_2000.onnx,vnnlib/prop_6.vnnlib,exact,UNKNOWN,3.33
+onnx/ACASXU_run2a_1_9_batch_2000.onnx,vnnlib/prop_7.vnnlib,exact,TIMEOUT,600.0
+onnx/ACASXU_run2a_2_9_batch_2000.onnx,vnnlib/prop_8.vnnlib,exact,TIMEOUT,600.0
+onnx/ACASXU_run2a_3_3_batch_2000.onnx,vnnlib/prop_9.vnnlib,exact,TIMEOUT,600.0
+onnx/ACASXU_run2a_4_5_batch_2000.onnx,vnnlib/prop_10.vnnlib,exact,TIMEOUT,600.0

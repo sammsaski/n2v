@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-ACAS Xu Verification Example
+ACAS Xu Verification Example (Legacy - Star Sets Only)
+
+⚠️ DEPRECATION NOTICE:
+This script is maintained for backward compatibility only. For new work,
+please use verify_acasxu.py which supports all set types (Box, Zono, Star,
+Hexatope, Octatope) and provides more flexibility.
 
 This script demonstrates verification of ACAS Xu neural network properties
-using the NNV-Python toolkit with VNN-LIB format properties.
+using the NNV-Python toolkit with VNN-LIB format properties (Star sets only).
 
 ACAS Xu is an airborne collision avoidance system that uses neural networks
 to recommend advisory actions.
@@ -22,10 +27,11 @@ import n2v
 from n2v.sets import Star
 from n2v.nn import NeuralNetwork
 from n2v.utils import load_vnnlib, verify_specification
+from n2v.utils.model_loader import load_onnx
 
 
 def verify_acasxu_property(network_file: str, property_file: str,
-                           reach_method: str = 'approx', timeout: float = 300.0,
+                           reach_method: str = 'approx',
                            use_parallel: bool = False, n_workers: int = None):
     """
     Verify an ACAS Xu property.
@@ -34,7 +40,6 @@ def verify_acasxu_property(network_file: str, property_file: str,
         network_file: Path to ONNX network file
         property_file: Path to VNN-LIB property file
         reach_method: Reachability method ('exact' or 'approx')
-        timeout: Timeout in seconds
         use_parallel: Enable parallel LP solving for better performance
         n_workers: Number of parallel workers (None = auto-detect)
 
@@ -63,7 +68,6 @@ def verify_acasxu_property(network_file: str, property_file: str,
 
     # Load network
     print("\n1. Loading network...")
-    from n2v.utils.model_loader import load_onnx
     model = load_onnx(network_file)
     net = NeuralNetwork(model)
 
@@ -193,7 +197,6 @@ def main():
 Examples:
   %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib
   %(prog)s onnx/ACASXU_run2a_1_5_batch_2000.onnx vnnlib/prop_3.vnnlib --method approx
-  %(prog)s path/to/network.onnx path/to/property.vnnlib --timeout 600
   %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --parallel --workers 4
         """
     )
@@ -203,8 +206,6 @@ Examples:
                         help='Path to VNN-LIB property file (relative to script dir or absolute)')
     parser.add_argument('--method', type=str, choices=['exact', 'approx'], default='exact',
                         help='Reachability method: exact or approx (default: exact)')
-    parser.add_argument('--timeout', type=float, default=300.0,
-                        help='Timeout in seconds (default: 300.0)')
     parser.add_argument('--parallel', action='store_true',
                         help='Enable parallel LP solving for better performance')
     parser.add_argument('--workers', type=int, default=None,
@@ -249,7 +250,6 @@ Examples:
             str(network_file),
             str(property_file),
             reach_method=args.method,
-            timeout=args.timeout,
             use_parallel=args.parallel,
             n_workers=args.workers
         )
