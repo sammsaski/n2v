@@ -674,7 +674,7 @@ output_stars = verifier.reach(
     input_set,
     method='exact',
     lp_solver='default',
-    dis_opt='display'  # Show progress
+    verbose='display'  # Show progress
 )
 ```
 
@@ -715,7 +715,7 @@ output = reach_layer_star(
     layer,          # PyTorch layer (nn.Linear, nn.ReLU, etc.)
     input_stars,    # List of input Stars
     method='exact', # 'exact' or 'approx'
-    **kwargs        # lp_solver, dis_opt, etc.
+    **kwargs        # lp_solver, verbose, etc.
 )
 ```
 

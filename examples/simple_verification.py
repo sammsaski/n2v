@@ -7,9 +7,6 @@ Demonstrates basic usage of NNV-Python for verifying a small feedforward network
 import torch
 import torch.nn as nn
 import numpy as np
-import sys
-sys.path.insert(0, '..')
-
 import n2v as nnv
 from n2v.sets import Star, Box
 

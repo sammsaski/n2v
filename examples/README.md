@@ -268,7 +268,7 @@ for i, layer in enumerate(layers):
     current_stars = reach_layer_star(
         layer, current_stars,
         method='exact',
-        dis_opt='display'  # Show ReLU/MaxPool splitting details
+        verbose='display'  # Show ReLU/MaxPool splitting details
     )
 
     print(f"  Output: {len(current_stars)} stars")

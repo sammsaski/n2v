@@ -7,15 +7,10 @@ reachability analysis. It compares performance against Star sets and helps
 identify performance bottlenecks.
 """
 
-import sys
 import time
 import numpy as np
 import torch
 import torch.nn as nn
-from pathlib import Path
-
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from n2v.sets import Star, Octatope
 from n2v.nn import NeuralNetwork

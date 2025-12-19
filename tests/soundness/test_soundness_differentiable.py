@@ -7,26 +7,18 @@ when used with neural network verification operations.
 
 import pytest
 import numpy as np
-import torch
-import torch.nn as nn
-import sys
-import os
-
-# Add parent directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
 
 # Check if PyTorch is available
 try:
     import torch
+    import torch.nn as nn
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
 
-from sets.hexatope import Hexatope
-from sets.octatope import Octatope
-from sets.box import Box
-from nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
-from nn.layer_ops.relu_reach import relu_hexatope, relu_octatope
+from n2v.sets import Hexatope, Octatope, Box
+from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
+from n2v.nn.layer_ops.relu_reach import relu_hexatope, relu_octatope
 
 
 def sample_from_set(abstract_set, n_samples=100):

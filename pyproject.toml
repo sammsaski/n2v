@@ -46,9 +46,9 @@ Homepage = "https://github.com/verivital/nnv"
 Documentation = "https://github.com/verivital/nnv"
 Repository = "https://github.com/verivital/nnv"
 
-[tool.setuptools]
-package-dir = {"n2v" = "."}
-packages = ["n2v", "n2v.sets", "n2v.nn", "n2v.nn.layer_ops", "n2v.nn.reach", "n2v.utils"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["n2v*"]
 
 [tool.black]
 line-length = 100

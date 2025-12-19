@@ -218,7 +218,7 @@ class TestDispatcherOptions:
         assert len(approx_result) <= len(exact_result)
 
     def test_display_option(self, capsys):
-        """Test dis_opt='display' produces output."""
+        """Test verbose='display' produces output."""
         layer = nn.ReLU()
 
         # Create a star that crosses zero to guarantee splitting (and thus output)
@@ -226,7 +226,7 @@ class TestDispatcherOptions:
         ub = np.array([[1.0], [1.0]])
         star_crossing_zero = Star.from_bounds(lb, ub)
 
-        reach_layer(layer, [star_crossing_zero], method='exact', dis_opt='display')
+        reach_layer(layer, [star_crossing_zero], method='exact', verbose='display')
 
         captured = capsys.readouterr()
         # Should print something about ReLU processing
