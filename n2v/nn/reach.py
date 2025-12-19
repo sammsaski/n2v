@@ -112,7 +112,7 @@ def _reach_sequential(
         List of output sets
     """
     current_sets = input_sets
-    verbose = kwargs.get('verbose', None)
+    verbose = kwargs.get('verbose', False)
 
     # Get all layers from the model
     layers = list(model.children())
@@ -122,13 +122,13 @@ def _reach_sequential(
 
     # Propagate through each layer
     for i, layer in enumerate(layers):
-        if verbose == 'display':
+        if verbose:
             set_type = type(current_sets[0]).__name__
             print(f'Layer {i+1}/{len(layers)}: {type(layer).__name__}')
 
         current_sets = reach_layer(layer, current_sets, method, **kwargs)
 
-        if verbose == 'display':
+        if verbose:
             print(f'  Output: {len(current_sets)} {set_type} sets')
 
     return current_sets
@@ -183,7 +183,7 @@ def _handle_graphmodule(
 
             module_type = type(module).__name__
 
-            if verbose == 'display':
+            if verbose:
                 print(f'  Processing: {node.target} ({module_type})')
 
             # Handle ONNX-specific operations

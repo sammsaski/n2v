@@ -71,7 +71,7 @@ These notebooks demonstrate:
 cd ../../
 
 # Install onnx2torch from submodule
-pip install -e utils/onnx2torch
+pip install -e third_party/onnx2torch
 
 # Install other dependencies
 pip install torch torchvision numpy scipy matplotlib

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 def relu_star_exact(
     input_stars: List[Star],
     lp_solver: str = 'default',
-    verbose: Optional[str] = None,
+    verbose: bool = False,
     parallel: bool = None,
     n_workers: int = None
 ) -> List[Star]:
@@ -53,7 +53,7 @@ def relu_star_exact(
 def _relu_single_star_exact(
     I: Star,
     lp_solver: str = 'default',
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[Star]:
     """
     Exact ReLU reachability for a single Star set.
@@ -103,7 +103,7 @@ def _relu_single_star_exact(
 
     # Recursively split each uncertain neuron
     for i, neuron_idx in enumerate(split_map):
-        if verbose == 'display':
+        if verbose:
             print(f'Exact ReLU_{neuron_idx} ({i+1}/{len(split_map)})')
 
         new_stars = []
@@ -1017,7 +1017,7 @@ def _get_star_workers(n_stars: int, n_workers: int = None) -> int:
 def _relu_star_exact_parallel(
     input_stars: List[Star],
     lp_solver: str = 'default',
-    verbose: Optional[str] = None,
+    verbose: bool = False,
     n_workers: int = None
 ) -> List[Star]:
     """
@@ -1047,7 +1047,7 @@ def _relu_star_exact_parallel(
     # Parallel processing
     output_stars = []
 
-    if verbose == 'display':
+    if verbose:
         print(f'  ⚡ Processing {len(input_stars)} Stars in parallel ({workers} workers)')
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -1063,7 +1063,7 @@ def _relu_star_exact_parallel(
                 result = future.result()
                 output_stars.extend(result)
             except Exception as e:
-                if verbose == 'display':
+                if verbose:
                     print(f'  Error processing Star: {e}')
                 # Continue with other Stars
 
@@ -1119,7 +1119,7 @@ def relu_hexatope(input_hexatopes: List[Hexatope]) -> List[Hexatope]:
 
 def relu_hexatope_approx(
     input_hexatopes: List[Hexatope],
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[Hexatope]:
     """
     Approximate reachability for ReLU using Hexatope sets.
@@ -1186,7 +1186,7 @@ def relu_octatope(input_octatopes: List[Octatope]) -> List[Octatope]:
 
 def relu_octatope_approx(
     input_octatopes: List[Octatope],
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[Octatope]:
     """
     Approximate reachability for ReLU using Octatope sets.
@@ -1206,7 +1206,7 @@ def relu_octatope_approx(
 
 def relu_hexatope_exact(
     input_hexatopes: List[Hexatope],
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[Hexatope]:
     """
     Exact reachability for ReLU using Hexatope sets with splitting.
@@ -1229,7 +1229,7 @@ def relu_hexatope_exact(
 
 def _relu_single_hexatope_exact(
     I: Hexatope,
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[Hexatope]:
     """
     Exact ReLU reachability for a single Hexatope set.
@@ -1273,7 +1273,7 @@ def _relu_single_hexatope_exact(
 
     # Recursively split each uncertain neuron
     for i, neuron_idx in enumerate(split_map):
-        if verbose == 'display':
+        if verbose:
             print(f'Exact ReLU_{neuron_idx} ({i+1}/{len(split_map)})')
 
         new_hexatopes = []
@@ -1346,7 +1346,7 @@ def _step_relu_hexatope(I: Hexatope, index: int) -> List[Hexatope]:
 
 def relu_octatope_exact(
     input_octatopes: List[Octatope],
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[Octatope]:
     """
     Exact reachability for ReLU using Octatope sets with splitting.
@@ -1369,7 +1369,7 @@ def relu_octatope_exact(
 
 def _relu_single_octatope_exact(
     I: Octatope,
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[Octatope]:
     """
     Exact ReLU reachability for a single Octatope set.
@@ -1413,7 +1413,7 @@ def _relu_single_octatope_exact(
 
     # Recursively split each uncertain neuron
     for i, neuron_idx in enumerate(split_map):
-        if verbose == 'display':
+        if verbose:
             print(f'Exact ReLU_{neuron_idx} ({i+1}/{len(split_map)})')
 
         new_octatopes = []

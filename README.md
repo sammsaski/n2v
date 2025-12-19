@@ -94,7 +94,7 @@ cd n2v
 pip install torch numpy scipy cvxpy
 
 # Install onnx2torch from the submodule (for ONNX model support)
-pip install -e utils/onnx2torch
+pip install -e third_party/onnx2torch
 
 # Install n2v in editable mode
 pip install -e .
@@ -104,7 +104,7 @@ pip install -e .
 
 ```bash
 pip install -r requirements.txt
-pip install -e utils/onnx2torch
+pip install -e third_party/onnx2torch
 pip install -e .
 ```
 
@@ -115,7 +115,7 @@ pip install -e .
 - NumPy >= 1.20.0
 - SciPy >= 1.7.0
 - CVXPY >= 1.2.0
-- onnx2torch (installed from submodule at `utils/onnx2torch`)
+- onnx2torch (installed from submodule at `third_party/onnx2torch`)
 
 ---
 
@@ -674,7 +674,7 @@ output_stars = verifier.reach(
     input_set,
     method='exact',
     lp_solver='default',
-    verbose='display'  # Show progress
+    verbose=True  # Show progress
 )
 ```
 

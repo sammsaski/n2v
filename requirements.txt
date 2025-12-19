@@ -19,7 +19,7 @@ ipykernel>=6.0.0
 onnx>=1.12.0
 onnxruntime>=1.12.0
 # onnx2torch is installed from git submodule (see installation instructions)
-# To install: pip install -e utils/onnx2torch
+# To install: pip install -e third_party/onnx2torch
 
 # Optional: For nice tables in notebooks
 pandas>=1.3.0

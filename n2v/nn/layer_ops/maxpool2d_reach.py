@@ -17,7 +17,7 @@ def maxpool2d_star(
     input_stars: List[Star],
     method: str = 'exact',
     lp_solver: str = 'default',
-    verbose: Optional[str] = None,
+    verbose: bool = False,
     **kwargs
 ) -> List[Star]:
     """
@@ -44,7 +44,7 @@ def _maxpool2d_star_exact_single(
     layer: nn.MaxPool2d,
     input_star: ImageStar,
     lp_solver: str = 'default',
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[ImageStar]:
     """
     Exact MaxPool2D reachability for a single ImageStar.
@@ -116,7 +116,7 @@ def _maxpool2d_star_exact_single(
     )]
 
     # Report splits
-    if verbose == 'display' and len(split_positions) > 0:
+    if verbose and len(split_positions) > 0:
         print(f'There are splits at {len(split_positions)} local regions')
 
     # Perform splitting for uncertain positions
@@ -132,7 +132,7 @@ def _maxpool2d_star_exact_single(
             )
             new_stars.extend(split_stars)
 
-        if verbose == 'display':
+        if verbose:
             print(f'Split {len(output_stars)} images into {len(new_stars)} images')
 
         output_stars = new_stars
@@ -144,7 +144,7 @@ def _maxpool2d_star_exact_multiple(
     layer: nn.MaxPool2d,
     input_stars: List[ImageStar],
     lp_solver: str = 'default',
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[ImageStar]:
     """
     Exact MaxPool2D for multiple input stars.
@@ -159,7 +159,7 @@ def _maxpool2d_star_approx_single(
     layer: nn.MaxPool2d,
     input_star: ImageStar,
     lp_solver: str = 'default',
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> ImageStar:
     """
     Approximate MaxPool2D reachability (over-approximation).
@@ -207,7 +207,7 @@ def _maxpool2d_star_approx_single(
                 if len(max_idx) > 1:
                     new_pred_count += 1
 
-    if verbose == 'display' and new_pred_count > 0:
+    if verbose and new_pred_count > 0:
         print(f'{new_pred_count} new variables are introduced')
 
     # Build new basis matrix with additional predicates
@@ -285,7 +285,7 @@ def _maxpool2d_star_approx_multiple(
     layer: nn.MaxPool2d,
     input_stars: List[ImageStar],
     lp_solver: str = 'default',
-    verbose: Optional[str] = None
+    verbose: bool = False
 ) -> List[ImageStar]:
     """
     Approximate MaxPool2D for multiple input stars.

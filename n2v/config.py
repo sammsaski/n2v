@@ -4,8 +4,6 @@ Global configuration for N2V (Neural Network Verification).
 This module provides global settings for parallelization, LP solvers, and other options.
 """
 
-import os
-import multiprocessing
 from typing import Optional
 
 
@@ -21,18 +19,6 @@ class Config:
 
         # LP solver settings
         self._default_lp_solver = 'default'
-
-        # Try to auto-detect optimal settings
-        self._detect_optimal_settings()
-
-    def _detect_optimal_settings(self):
-        """Auto-detect optimal settings based on system."""
-        try:
-            cpu_count = multiprocessing.cpu_count()
-            # Use half of available cores, min 2, max 8
-            self._n_workers = max(2, min(cpu_count // 2, 8))
-        except:
-            self._n_workers = 4
 
     @property
     def parallel_lp(self) -> bool:
@@ -135,10 +121,10 @@ class Config:
     def reset(self):
         """Reset configuration to defaults."""
         self._parallel_lp = False
+        self._n_workers = 4
         self._auto_parallel = True
         self._parallel_threshold = 10
         self._default_lp_solver = 'default'
-        self._detect_optimal_settings()
 
     def __repr__(self):
         return (f"Config(parallel_lp={self.parallel_lp}, "

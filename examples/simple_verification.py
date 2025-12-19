@@ -120,27 +120,32 @@ def example_property_verification():
     print(f"Input specification: {input_box}")
 
     # Define safety property: output should satisfy y1 <= 2.0
-    def safety_property(output_set):
-        """Returns True if all outputs satisfy y1 <= 2.0"""
-        if isinstance(output_set, Box):
-            return output_set.ub[0, 0] <= 2.0
-        elif hasattr(output_set, 'get_box'):
-            box = output_set.get_box()
-            return box.ub[0, 0] <= 2.0
-        else:
-            return False
+    safety_bound = 2.0
+    print(f"\nSafety property: output dimension 1 <= {safety_bound}")
 
-    print("\nSafety property: output dimension 1 <= 2.0")
-
-    # Verify property
+    # Perform reachability analysis
     nn_verifier = nnv.NeuralNetwork(model)
 
-    print("\nVerifying property...")
-    is_safe = nn_verifier.verify_property(
-        input_box,
-        safety_property,
-        method='approx'
-    )
+    print("\nPerforming reachability analysis...")
+    output_sets = nn_verifier.reach(input_box, method='approx')
+
+    # Check safety property on all output sets
+    print("Checking safety property on output sets...")
+    is_safe = True
+    for i, output_set in enumerate(output_sets):
+        if isinstance(output_set, Box):
+            max_y1 = output_set.ub[0, 0]
+        elif hasattr(output_set, 'get_box'):
+            box = output_set.get_box()
+            max_y1 = box.ub[0, 0]
+        else:
+            print(f"  Output set {i+1}: Cannot check property (unknown type)")
+            is_safe = False
+            continue
+
+        print(f"  Output set {i+1}: max(y1) = {max_y1:.4f}")
+        if max_y1 > safety_bound:
+            is_safe = False
 
     print(f"\nVerification result: {'SAFE' if is_safe else 'UNSAFE (or UNKNOWN)'}")
 

@@ -81,7 +81,7 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
 
     elif isinstance(layer, nn.ReLU):
         lp_solver = kwargs.get('lp_solver', 'default')
-        verbose = kwargs.get('verbose', None)
+        verbose = kwargs.get('verbose', False)
         parallel = kwargs.get('parallel', None)
         n_workers = kwargs.get('n_workers', None)
 
@@ -102,7 +102,7 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
 
     elif isinstance(layer, nn.MaxPool2d):
         lp_solver = kwargs.get('lp_solver', 'default')
-        verbose = kwargs.get('verbose', None)
+        verbose = kwargs.get('verbose', False)
         return maxpool2d_reach.maxpool2d_star(
             layer, input_sets, method=method, lp_solver=lp_solver,
             verbose=verbose, **kwargs
@@ -197,7 +197,7 @@ def _reach_layer_hexatope(layer: nn.Module, input_sets: List, method: str, **kwa
         return linear_reach.linear_hexatope(layer, input_sets)
 
     elif isinstance(layer, nn.ReLU):
-        verbose = kwargs.get('verbose', None)
+        verbose = kwargs.get('verbose', False)
         if method == 'exact':
             return relu_reach.relu_hexatope_exact(input_sets, verbose=verbose)
         else:  # approx
@@ -228,7 +228,7 @@ def _reach_layer_octatope(layer: nn.Module, input_sets: List, method: str, **kwa
         return linear_reach.linear_octatope(layer, input_sets)
 
     elif isinstance(layer, nn.ReLU):
-        verbose = kwargs.get('verbose', None)
+        verbose = kwargs.get('verbose', False)
         if method == 'exact':
             return relu_reach.relu_octatope_exact(input_sets, verbose=verbose)
         else:  # approx

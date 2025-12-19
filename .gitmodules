@@ -1,3 +1,3 @@
-[submodule "utils/onnx2torch"]
-	path = utils/onnx2torch
+[submodule "third_party/onnx2torch"]
+	path = third_party/onnx2torch
 	url = https://github.com/sammsaski/onnx2torch.git

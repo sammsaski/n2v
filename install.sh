@@ -15,7 +15,7 @@ if [ ! -f "pyproject.toml" ]; then
 fi
 
 # Check if git submodules are initialized
-if [ ! -f "utils/onnx2torch/pyproject.toml" ]; then
+if [ ! -f "third_party/onnx2torch/pyproject.toml" ]; then
     echo "Initializing git submodules..."
     git submodule update --init --recursive
     echo "✓ Submodules initialized"
@@ -24,7 +24,7 @@ fi
 
 # Install onnx2torch from submodule
 echo "Installing onnx2torch from submodule..."
-pip install -e utils/onnx2torch
+pip install -e third_party/onnx2torch
 echo "✓ onnx2torch installed"
 echo ""
 
