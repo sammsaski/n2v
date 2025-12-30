@@ -8,7 +8,7 @@ The test suite is organized into two categories:
 
 ### 1. Unit Tests (`unit/`)
 
-**~130 tests** (124 passing, 5 skipped) that verify correct implementation and edge case handling.
+**~550 tests** that verify correct implementation and edge case handling.
 
 These tests check that:
 - Code compiles and runs without errors
@@ -16,16 +16,14 @@ These tests check that:
 - API contracts are maintained
 - Integration between components works as expected
 
-**Files:**
-- `test_sets.py` - Tests for Star, Zonotope, and Box set representations
-- `test_image_sets.py` - Tests for ImageStar and ImageZono
-- `test_layer_ops.py` - Tests for individual layer operations (Linear, ReLU, Conv2D, MaxPool2D, AvgPool2D, Flatten)
-- `test_dispatcher.py` - Tests for layer operation dispatcher
-- `test_load_vnnlib.py` - Tests for VNN-LIB format parsing
-- `test_verify_specification.py` - Tests for property verification (robustness, multi-class)
-- `test_integration.py` - Integration tests for complete workflows
+**Subdirectories:**
+- `sets/` - Tests for Star, Zono, Box, ImageStar, Hexatope, Octatope
+- `layer_ops/` - Tests for layer operations (Linear, ReLU, Conv2D, MaxPool2D, AvgPool2D, Flatten)
+- `core/` - Tests for dispatcher and parallel processing
+- `utils/` - Tests for VNN-LIB parsing and differentiable solvers
+- `integration/` - Integration tests for complete workflows
 
-**Skipped tests** (5 total): Tests for features not yet implemented:
+**Skipped tests** (~14 total): Tests for features not yet implemented:
 - `Box.contains()` - Point containment check for Box sets
 - `Box.intersect()` - Box-box intersection
 - `Box.union()` - Box-box union
@@ -35,7 +33,7 @@ These can be implemented in the future as needed.
 
 ### 2. Soundness Tests (`soundness/`)
 
-**79 tests** (all passing) that verify mathematical correctness and soundness properties.
+**~100 tests** (all passing) that verify mathematical correctness and soundness properties.
 
 These tests check that:
 - Operations produce mathematically correct results
@@ -44,12 +42,15 @@ These tests check that:
 - Ground truth matches expected values for simple cases
 
 **Files:**
-- `test_soundness_linear.py` (19 tests) - Linear/fully-connected layers
-- `test_soundness_relu.py` (17 tests) - ReLU activation (exact & approximate)
-- `test_soundness_conv2d.py` (13 tests) - 2D convolution layers
-- `test_soundness_maxpool2d.py` (8 tests) - Max pooling (exact & approximate)
-- `test_soundness_avgpool2d.py` (11 tests) - Average pooling
-- `test_soundness_flatten.py` (11 tests) - Flatten operations
+- `test_soundness_linear.py` - Linear/fully-connected layers
+- `test_soundness_relu.py` - ReLU activation (exact & approximate)
+- `test_soundness_conv2d.py` - 2D convolution layers
+- `test_soundness_maxpool2d.py` - Max pooling (exact & approximate)
+- `test_soundness_avgpool2d.py` - Average pooling
+- `test_soundness_flatten.py` - Flatten operations
+- `test_soundness_parallel.py` - Parallel LP solving
+- `test_soundness_to_star.py` - Conversion to Star sets
+- `test_soundness_differentiable.py` - Differentiable verification
 
 See [soundness/README.md](soundness/README.md) for detailed methodology.
 
@@ -58,54 +59,54 @@ See [soundness/README.md](soundness/README.md) for detailed methodology.
 ### Quick Start
 
 ```bash
-# Run all tests (unit + soundness, ~203 passing)
-pytest n2v/tests/
+# Run all tests (unit + soundness, ~650 passing)
+pytest tests/
 
 # Run with verbose output
-pytest n2v/tests/ -v
+pytest tests/ -v
 
 # Run with quiet output (summary only)
-pytest n2v/tests/ -q
+pytest tests/ -q
 ```
 
 ### Test Categories
 
 ```bash
-# Run only unit tests (~130 tests)
-pytest n2v/tests/unit/
+# Run only unit tests (~550 tests)
+pytest tests/unit/
 
-# Run only soundness tests (79 tests)
-pytest n2v/tests/soundness/
+# Run only soundness tests (~100 tests)
+pytest tests/soundness/
 ```
 
 ### Specific Test Files
 
 ```bash
 # Run specific test file
-pytest n2v/tests/unit/test_sets.py
-pytest n2v/tests/soundness/test_soundness_relu.py -v
+pytest tests/unit/sets/test_star.py -v
+pytest tests/soundness/test_soundness_relu.py -v
 
 # Run specific test class
-pytest n2v/tests/unit/test_sets.py::TestStar -v
+pytest tests/unit/sets/test_star.py::TestStar -v
 
 # Run specific test method
-pytest n2v/tests/unit/test_sets.py::TestStar::test_from_bounds -v
+pytest tests/unit/sets/test_star.py::TestStar::test_from_bounds -v
 ```
 
 ### Advanced Options
 
 ```bash
 # Stop on first failure
-pytest n2v/tests/ -x
+pytest tests/ -x
 
 # Show local variables on failure
-pytest n2v/tests/ -l
+pytest tests/ -l
 
 # Run tests in parallel (requires pytest-xdist)
-pytest n2v/tests/ -n auto
+pytest tests/ -n auto
 
 # Generate coverage report
-pytest n2v/tests/ --cov=n2v --cov-report=html
+pytest tests/ --cov=n2v --cov-report=html
 ```
 
 ## Test Philosophy
@@ -230,7 +231,7 @@ When adding new features:
 
 4. **Ensure all tests pass** before submitting
    ```bash
-   pytest n2v/tests/
+   pytest tests/
    ```
 
 For more details on soundness testing methodology, see [soundness/README.md](soundness/README.md).

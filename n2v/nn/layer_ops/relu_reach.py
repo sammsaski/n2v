@@ -9,10 +9,30 @@ import numpy as np
 from typing import List, Optional, TYPE_CHECKING
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from n2v.sets import Star, Zono, Hexatope, Octatope
+from n2v.sets.image_star import ImageStar
 
 # TYPE_CHECKING import for Box (used in one function)
 if TYPE_CHECKING:
     from n2v.sets import Box
+
+
+def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
+    """
+    If original was an ImageStar, convert the new_star back to ImageStar
+    with the same spatial dimensions.
+    """
+    if isinstance(original, ImageStar):
+        return ImageStar(
+            new_star.V,
+            new_star.C,
+            new_star.d,
+            new_star.predicate_lb,
+            new_star.predicate_ub,
+            original.height,
+            original.width,
+            original.num_channels
+        )
+    return new_star
 
 
 def relu_star_exact(
@@ -46,6 +66,8 @@ def relu_star_exact(
         for star in input_stars:
             # Process each star through exact ReLU
             result = _relu_single_star_exact(star, lp_solver, verbose)
+            # Preserve ImageStar type for each output star
+            result = [_preserve_imagestar_type(star, s) for s in result]
             output_stars.extend(result)
         return output_stars
 
@@ -222,6 +244,8 @@ def relu_star_approx(
             result = _relu_single_star_approx(star, lp_solver)
 
         if result is not None:
+            # Preserve ImageStar type if input was ImageStar
+            result = _preserve_imagestar_type(star, result)
             output_stars.append(result)
 
     return output_stars

@@ -70,9 +70,18 @@ def _avgpool2d_single_imagestar(layer: nn.AvgPool2d, input_star: ImageStar) -> I
     h_in, w_in, c_in = pad_star.height, pad_star.width, pad_star.num_channels
     n_pred = pad_star.nVar
 
-    # Get kernel size and stride
-    kernel_size = layer.kernel_size if isinstance(layer.kernel_size, tuple) else (layer.kernel_size, layer.kernel_size)
-    stride = layer.stride if isinstance(layer.stride, tuple) else (layer.stride, layer.stride)
+    # Get kernel size and stride (can be int, tuple, or list from onnx2torch)
+    kernel_size = layer.kernel_size
+    if isinstance(kernel_size, int):
+        kernel_size = (kernel_size, kernel_size)
+    elif isinstance(kernel_size, list):
+        kernel_size = tuple(kernel_size)
+
+    stride = layer.stride
+    if isinstance(stride, int):
+        stride = (stride, stride)
+    elif isinstance(stride, list):
+        stride = tuple(stride)
 
     # Calculate output dimensions
     h_out = (h_in - kernel_size[0]) // stride[0] + 1
@@ -215,7 +224,12 @@ def avgpool2d_box(layer: nn.AvgPool2d, input_boxes: List[Box]) -> List[Box]:
 
 def _apply_padding(layer: nn.AvgPool2d, input_star: ImageStar) -> ImageStar:
     """Apply zero padding to ImageStar if needed."""
-    padding = layer.padding if isinstance(layer.padding, tuple) else (layer.padding, layer.padding)
+    # Handle padding which can be int, tuple, or list
+    padding = layer.padding
+    if isinstance(padding, int):
+        padding = (padding, padding)
+    elif isinstance(padding, (list, tuple)):
+        padding = tuple(padding)  # Convert list to tuple for consistency
 
     if padding == (0, 0):
         return input_star

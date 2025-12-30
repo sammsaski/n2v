@@ -360,6 +360,18 @@ class Zono:
         box = self.get_box()
         return box.lb, box.ub
 
+    def estimate_ranges(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Estimate lower and upper bounds for all dimensions.
+
+        For zonotopes, this is exact (not an estimate) since bounds
+        can be computed analytically from the generators.
+
+        Returns:
+            Tuple of (lb, ub) arrays
+        """
+        return self.get_bounds()
+
     def get_range(self, index: int) -> Tuple[float, float]:
         """
         Get range at specific dimension.

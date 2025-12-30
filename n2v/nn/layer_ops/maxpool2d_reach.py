@@ -68,8 +68,19 @@ def _maxpool2d_star_exact_single(
 
     # Get output dimensions
     h_in, w_in, c_in = pad_star.height, pad_star.width, pad_star.num_channels
-    kernel_size = layer.kernel_size if isinstance(layer.kernel_size, tuple) else (layer.kernel_size, layer.kernel_size)
-    stride = layer.stride if isinstance(layer.stride, tuple) else (layer.stride, layer.stride)
+
+    # Get kernel size and stride (can be int, tuple, or list from onnx2torch)
+    kernel_size = layer.kernel_size
+    if isinstance(kernel_size, int):
+        kernel_size = (kernel_size, kernel_size)
+    elif isinstance(kernel_size, list):
+        kernel_size = tuple(kernel_size)
+
+    stride = layer.stride
+    if isinstance(stride, int):
+        stride = (stride, stride)
+    elif isinstance(stride, list):
+        stride = tuple(stride)
 
     h_out = (h_in - kernel_size[0]) // stride[0] + 1
     w_out = (w_in - kernel_size[1]) // stride[1] + 1
@@ -181,8 +192,19 @@ def _maxpool2d_star_approx_single(
 
     # Get dimensions
     h_in, w_in, c_in = pad_star.height, pad_star.width, pad_star.num_channels
-    kernel_size = layer.kernel_size if isinstance(layer.kernel_size, tuple) else (layer.kernel_size, layer.kernel_size)
-    stride = layer.stride if isinstance(layer.stride, tuple) else (layer.stride, layer.stride)
+
+    # Get kernel size and stride (can be int, tuple, or list from onnx2torch)
+    kernel_size = layer.kernel_size
+    if isinstance(kernel_size, int):
+        kernel_size = (kernel_size, kernel_size)
+    elif isinstance(kernel_size, list):
+        kernel_size = tuple(kernel_size)
+
+    stride = layer.stride
+    if isinstance(stride, int):
+        stride = (stride, stride)
+    elif isinstance(stride, list):
+        stride = tuple(stride)
 
     h_out = (h_in - kernel_size[0]) // stride[0] + 1
     w_out = (w_in - kernel_size[1]) // stride[1] + 1
@@ -236,23 +258,30 @@ def _maxpool2d_star_approx_single(
                 else:
                     # Multiple maxes - introduce new predicate variable y
                     # Constraints: y <= ub(local region), xi - y <= 0 for all i in region
-                    V_out[i, j, k, 0] = 0  # center
-                    V_out[i, j, k, n_pred_orig + 1 + new_pred_idx] = 1  # new predicate
 
-                    # Get local bounds
+                    # Get local bounds first
                     lb, ub = _get_local_bounds(
                         pad_star, start_h, start_w, kernel_size, k, lp_solver
                     )
-                    new_pred_lb[new_pred_idx] = lb
-                    new_pred_ub[new_pred_idx] = ub
 
-                    # Constraint: y <= ub
+                    # Use midpoint as center for the new variable
+                    V_out[i, j, k, 0] = (lb + ub) / 2
+                    V_out[i, j, k, n_pred_orig + 1 + new_pred_idx] = 1  # new predicate
+
+                    # Predicate bounds are relative to center, so adjust to [-half_range, half_range]
+                    half_range = (ub - lb) / 2
+                    new_pred_lb[new_pred_idx] = -half_range
+                    new_pred_ub[new_pred_idx] = half_range
+
+                    # Constraint: y <= half_range (since output = center + y, this ensures output <= ub)
                     C_row = np.zeros((1, n_pred_new))
                     C_row[0, n_pred_orig + new_pred_idx] = 1
                     new_C[new_pred_idx * (pool_size + 1), :] = C_row
-                    new_d[new_pred_idx * (pool_size + 1)] = ub
+                    new_d[new_pred_idx * (pool_size + 1)] = half_range
 
-                    # Constraints: xi - y <= 0 for each pixel in pooling window
+                    # Constraints: xi - (center + y) <= 0 for each pixel in pooling window
+                    # Rearranged: xi - y <= center (where center = (lb+ub)/2)
+                    center = (lb + ub) / 2
                     for idx, (ph, pw) in enumerate(_get_local_points(start_h, start_w, kernel_size)):
                         C_row = np.zeros((1, n_pred_new))
                         # xi coefficient (from V)
@@ -260,7 +289,8 @@ def _maxpool2d_star_approx_single(
                         # -y coefficient
                         C_row[0, n_pred_orig + new_pred_idx] = -1
                         new_C[new_pred_idx * (pool_size + 1) + 1 + idx, :] = C_row
-                        new_d[new_pred_idx * (pool_size + 1) + 1 + idx] = -V_in[ph, pw, k, 0]
+                        # d value: center - xi_center (where xi = xi_center + V_in * alpha)
+                        new_d[new_pred_idx * (pool_size + 1) + 1 + idx] = center - V_in[ph, pw, k, 0]
 
                     new_pred_idx += 1
 
@@ -339,7 +369,12 @@ def maxpool2d_zono(layer: nn.MaxPool2d, input_zonos: List[ImageZono]) -> List[Im
 
 def _apply_padding(layer: nn.MaxPool2d, input_star: ImageStar) -> ImageStar:
     """Apply zero padding to ImageStar if needed."""
-    padding = layer.padding if isinstance(layer.padding, tuple) else (layer.padding, layer.padding)
+    # Handle padding which can be int, tuple, or list
+    padding = layer.padding
+    if isinstance(padding, int):
+        padding = (padding, padding)
+    elif isinstance(padding, (list, tuple)):
+        padding = tuple(padding)  # Convert list to tuple for consistency
 
     if padding == (0, 0):
         return input_star

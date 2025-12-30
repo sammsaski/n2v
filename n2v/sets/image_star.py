@@ -108,12 +108,29 @@ class ImageStar(Star):
         """
         Flatten ImageStar to regular Star (for fully-connected layers).
 
+        This method reorders the V matrix from HWC (height, width, channels) order
+        to CHW (channels, height, width) order to match PyTorch's Flatten behavior.
+
         Returns:
-            Star object with flattened representation
+            Star object with flattened representation matching PyTorch's flatten order
         """
-        # V is already in flattened form (dim, nVar+1)
+        # V is stored in HWC order: shape (H*W*C, nVar+1)
+        # PyTorch Flatten expects CHW order
+        # We need to permute from HWC to CHW
+
+        n_cols = self.V.shape[1]  # nVar + 1
+
+        # Reshape V to (H, W, C, nVar+1)
+        V_hwc = self.V.reshape(self.height, self.width, self.num_channels, n_cols)
+
+        # Permute to (C, H, W, nVar+1) - move channels first
+        V_chw = np.transpose(V_hwc, (2, 0, 1, 3))
+
+        # Flatten back to (C*H*W, nVar+1)
+        V_flat = V_chw.reshape(-1, n_cols)
+
         return Star(
-            self.V,
+            V_flat,
             self.C,
             self.d,
             self.predicate_lb,

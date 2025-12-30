@@ -536,47 +536,43 @@ for layer in layers:
 
 ### Running Tests
 
-NNV-Python includes comprehensive unit and soundness tests (200+ total tests) using pytest.
+NNV-Python includes comprehensive unit and soundness tests (650+ total tests) using pytest.
 
 ```bash
 # Run all tests (unit + soundness)
-pytest n2v/tests/
+pytest tests/
 
 # Run with verbose output
-pytest n2v/tests/ -v
+pytest tests/ -v
 
 # Run only unit tests
-pytest n2v/tests/unit/
+pytest tests/unit/
 
 # Run only soundness tests
-pytest n2v/tests/soundness/
+pytest tests/soundness/
 
 # Run specific test file
-pytest n2v/tests/unit/test_sets.py
-pytest n2v/tests/soundness/test_soundness_relu.py -v
+pytest tests/unit/sets/test_star.py -v
+pytest tests/soundness/test_soundness_relu.py -v
 
 # Run specific test
-pytest n2v/tests/unit/test_sets.py::TestStar::test_from_bounds -v
+pytest tests/unit/sets/test_star.py::TestStar::test_from_bounds -v
 ```
 
 ### Test Structure
 
 ```
-n2v/tests/
+tests/
 ├── conftest.py              # Shared fixtures and helpers
 │
-├── unit/                    # Unit tests (~130 tests)
-│   ├── conftest.py          # Unit test fixtures
-│   ├── test_sets.py         # Star, Zono, Box tests
-│   ├── test_image_sets.py   # ImageStar, ImageZono tests
-│   ├── test_layer_ops.py    # Layer operation tests
-│   ├── test_dispatcher.py   # Layer dispatcher tests
-│   ├── test_load_vnnlib.py  # VNN-LIB format parsing tests
-│   ├── test_verify_specification.py  # Property verification tests
-│   └── test_integration.py  # Full network verification tests
+├── unit/                    # Unit tests (~550 tests)
+│   ├── sets/                # Set representation tests (Star, Zono, Box, etc.)
+│   ├── layer_ops/           # Layer operation tests (linear, relu, conv2d, etc.)
+│   ├── core/                # Core functionality tests (dispatcher, parallel)
+│   ├── utils/               # Utility tests (VNN-LIB parsing, solvers)
+│   └── integration/         # End-to-end verification tests
 │
-└── soundness/               # Soundness tests (~80 tests)
-    ├── README.md            # Soundness testing methodology
+└── soundness/               # Soundness tests (~100 tests)
     ├── test_soundness_linear.py     # Linear layer soundness
     ├── test_soundness_relu.py       # ReLU activation soundness
     ├── test_soundness_conv2d.py     # Conv2D soundness
@@ -641,7 +637,7 @@ pip install pytest pytest-cov
 
 ```bash
 # Generate HTML coverage report
-pytest --cov=n2v --cov-report=html n2v/tests/
+pytest --cov=n2v --cov-report=html tests/
 
 # View in browser
 open htmlcov/index.html
@@ -649,9 +645,9 @@ open htmlcov/index.html
 
 ### Current Test Status
 
-- **Unit Tests**: 124 passing, 5 skipped (unimplemented features)
-- **Soundness Tests**: 79 passing
-- **Total**: 203 passing tests
+- **Total**: 657 passing, 14 skipped
+- Unit tests cover sets, layer operations, dispatcher, VNN-LIB parsing, and integration
+- Soundness tests verify mathematical correctness of all layer implementations
 
 Skipped tests are for features not yet implemented (e.g., `Box.contains()`, `Box.intersect()`, `Box.union()`, `Zono.reduce_order()`). These can be implemented in the future as needed.
 
@@ -826,7 +822,7 @@ MIT License - See LICENSE file for details
 ## Contact & Support
 
 - **Issues**: [GitHub Issues](https://github.com/verivital/nnv/issues)
-- **Email**: diego.manzanas.lopez@vanderbilt.edu
+- **Email**: samuel.sasaki@vanderbilt.edu
 - **Documentation**: This README and [CHANGELOG.md](CHANGELOG.md)
 
 ---

@@ -212,6 +212,29 @@ class Box:
         """Get lower and upper bounds."""
         return self.lb, self.ub
 
+    def estimate_ranges(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Estimate lower and upper bounds for all dimensions.
+
+        For boxes, this is exact since the bounds are stored directly.
+
+        Returns:
+            Tuple of (lb, ub) arrays
+        """
+        return self.lb, self.ub
+
+    def get_ranges(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Get exact lower and upper bounds for all dimensions.
+
+        For boxes, this is identical to estimate_ranges() since bounds are stored directly.
+        This method exists for API consistency with Star and other set types.
+
+        Returns:
+            Tuple of (lb, ub) arrays
+        """
+        return self.lb, self.ub
+
     def get_vertices(self) -> np.ndarray:
         """
         Get all vertices of the box.

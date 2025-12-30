@@ -49,6 +49,21 @@ class TestBox:
         np.testing.assert_array_equal(lb, simple_box.lb)
         np.testing.assert_array_equal(ub, simple_box.ub)
 
+    def test_get_ranges(self, simple_box):
+        """Test get_ranges() for API consistency with Star."""
+        lb, ub = simple_box.get_ranges()
+
+        np.testing.assert_array_equal(lb, simple_box.lb)
+        np.testing.assert_array_equal(ub, simple_box.ub)
+
+    def test_get_ranges_matches_estimate_ranges(self, simple_box):
+        """Test that get_ranges() and estimate_ranges() return same values for Box."""
+        lb_get, ub_get = simple_box.get_ranges()
+        lb_est, ub_est = simple_box.estimate_ranges()
+
+        np.testing.assert_array_equal(lb_get, lb_est)
+        np.testing.assert_array_equal(ub_get, ub_est)
+
     @pytest.mark.skip(reason="Box.contains() not implemented yet")
     def test_contains_point(self, simple_box):
         """Test point containment."""
