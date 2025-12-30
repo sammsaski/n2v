@@ -379,9 +379,11 @@ if len(current_stars) > 1000:
 ### 4. Use Layer-by-Layer Analysis
 
 ```python
+from n2v.nn.layer_ops.dispatcher import reach_layer
+
 # Track splitting to identify bottlenecks
 for layer in model:
-    current_stars = reach_layer_star(layer, current_stars)
+    current_stars = reach_layer(layer, current_stars)
     print(f"{layer}: {len(current_stars)} stars")
 ```
 

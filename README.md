@@ -386,7 +386,7 @@ For ImageStar through CNN:
 ### Layer-by-Layer Analysis
 
 ```python
-from n2v.nn.layers.layer_reach import reach_layer_star
+from n2v.nn.layer_ops.dispatcher import reach_layer
 
 layers = list(model.children())
 current_stars = [input_star]
@@ -395,7 +395,7 @@ for i, layer in enumerate(layers):
     print(f"Layer {i}: {type(layer).__name__}")
     print(f"  Input: {len(current_stars)} stars")
 
-    current_stars = reach_layer_star(
+    current_stars = reach_layer(
         layer, current_stars,
         method='exact',
         lp_solver='default'
@@ -513,7 +513,7 @@ method = 'approx'
 
 ```python
 for layer in layers:
-    current_stars = reach_layer_star(layer, current_stars)
+    current_stars = reach_layer(layer, current_stars)
     if len(current_stars) > 1000:
         print(f"Warning: {len(current_stars)} stars - consider approximate method")
 ```
@@ -704,12 +704,12 @@ shape = img_star.get_image_shape()  # (h, w, c)
 ### Layer Operations
 
 ```python
-from n2v.nn.layers.layer_reach import reach_layer_star
+from n2v.nn.layer_ops.dispatcher import reach_layer
 
-# Dispatch to appropriate layer operation
-output = reach_layer_star(
+# Dispatch to appropriate layer operation (auto-detects set type)
+output = reach_layer(
     layer,          # PyTorch layer (nn.Linear, nn.ReLU, etc.)
-    input_stars,    # List of input Stars
+    input_sets,     # List of input sets (Star, Zono, Box, etc.)
     method='exact', # 'exact' or 'approx'
     **kwargs        # lp_solver, verbose, etc.
 )
@@ -783,22 +783,23 @@ n2v/
 ├── sets/              # Set representations (Star, Zono, Box, etc.)
 ├── nn/                # Neural network wrapper and layer operations
 │   ├── neural_network.py
-│   └── layers/
-│       ├── layer_reach.py      # Layer dispatcher
-│       └── operations/         # Layer-specific operations
-│           ├── linear_reach.py
-│           ├── relu_reach.py
-│           ├── conv2d_reach.py
-│           ├── avgpool2d_reach.py
-│           └── maxpool2d_reach.py
+│   ├── reach.py              # Top-level reachability orchestration
+│   └── layer_ops/            # Layer-specific operations
+│       ├── dispatcher.py     # Routes by layer type and set type
+│       ├── linear_reach.py
+│       ├── relu_reach.py
+│       ├── conv2d_reach.py
+│       ├── avgpool2d_reach.py
+│       ├── maxpool2d_reach.py
+│       └── flatten_reach.py
 ├── utils/             # Utilities (LP solver, etc.)
 └── examples/          # Example scripts
 ```
 
 ### Adding New Layers
 
-1. Create operation file in `nn/layers/operations/`
-2. Add case to `layer_reach.py` dispatcher
+1. Create operation file in `nn/layer_ops/<layer>_reach.py`
+2. Add dispatch case in `layer_ops/dispatcher.py`
 3. Implement for Star, Zono, Box (as applicable)
 
 See [CHANGELOG.md](CHANGELOG.md) for development history.

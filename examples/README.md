@@ -256,7 +256,7 @@ print(f"Model is robust: {robust}")
 For debugging or understanding verification:
 
 ```python
-from n2v.nn.layers.layer_reach import reach_layer_star
+from n2v.nn.layer_ops.dispatcher import reach_layer
 
 layers = list(model.children())
 current_stars = [input_star]
@@ -265,7 +265,7 @@ for i, layer in enumerate(layers):
     print(f"\nLayer {i}: {type(layer).__name__}")
     print(f"  Input: {len(current_stars)} stars")
 
-    current_stars = reach_layer_star(
+    current_stars = reach_layer(
         layer, current_stars,
         method='exact',
         verbose=True  # Show ReLU/MaxPool splitting details
