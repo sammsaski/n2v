@@ -318,13 +318,14 @@ def _relu_single_star_approx(
     # Step 2: Find neurons crossing zero (lb < 0 and ub > 0) - apply triangle approximation
     crossing_map = np.where((lb < 0) & (ub > 0))[0]
 
-    # Process each crossing neuron by adding constraints (no splitting!)
-    for idx in crossing_map:
-        current_star = _step_relu_approx(current_star, idx, lb[idx], ub[idx])
-        if current_star is None:
-            return None
+    if len(crossing_map) == 0:
+        return current_star
 
-    return current_star
+    # Apply triangle approximation to all crossing neurons at once (batch processing)
+    # This is much faster than processing one neuron at a time
+    return _apply_triangle_approx_multi(
+        current_star, crossing_map, lb[crossing_map], ub[crossing_map]
+    )
 
 
 def _step_relu_approx(
