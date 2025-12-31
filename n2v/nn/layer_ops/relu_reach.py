@@ -3,6 +3,10 @@ ReLU activation reachability operations.
 
 Exact and approximate reachability for ReLU (Positive Linear) activation.
 Translated from MATLAB NNV PosLin.m
+
+Note: ReLU is element-wise, so it operates on 2D Star representation.
+ImageStar inputs are converted to Star (via to_star()), processed through ReLU,
+and converted back to ImageStar (via _preserve_imagestar_type()).
 """
 
 import numpy as np
@@ -20,18 +24,16 @@ def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
     """
     If original was an ImageStar, convert the new_star back to ImageStar
     with the same spatial dimensions.
+
+    Args:
+        original: Original input Star or ImageStar (used for dimension info)
+        new_star: Output Star from ReLU processing (2D V)
+
+    Returns:
+        ImageStar if original was ImageStar, otherwise returns new_star unchanged
     """
     if isinstance(original, ImageStar):
-        return ImageStar(
-            new_star.V,
-            new_star.C,
-            new_star.d,
-            new_star.predicate_lb,
-            new_star.predicate_ub,
-            original.height,
-            original.width,
-            original.num_channels
-        )
+        return new_star.to_image_star(original.height, original.width, original.num_channels)
     return new_star
 
 
@@ -64,8 +66,10 @@ def relu_star_exact(
         # Sequential processing
         output_stars = []
         for star in input_stars:
+            # Convert ImageStar to Star for 2D ReLU processing
+            star_2d = star.to_star() if isinstance(star, ImageStar) else star
             # Process each star through exact ReLU
-            result = _relu_single_star_exact(star, lp_solver, verbose)
+            result = _relu_single_star_exact(star_2d, lp_solver, verbose)
             # Preserve ImageStar type for each output star
             result = [_preserve_imagestar_type(star, s) for s in result]
             output_stars.extend(result)
@@ -233,15 +237,18 @@ def relu_star_approx(
     output_stars = []
 
     for star in input_stars:
+        # Convert ImageStar to Star for 2D ReLU processing
+        star_2d = star.to_star() if isinstance(star, ImageStar) else star
+
         # Process each star through approximate ReLU with specified method
         if relax_method == 'range':
-            result = _relu_single_star_relax_range(star, relax_factor, lp_solver)
+            result = _relu_single_star_relax_range(star_2d, relax_factor, lp_solver)
         elif relax_method == 'area':
-            result = _relu_single_star_relax_area(star, relax_factor, lp_solver)
+            result = _relu_single_star_relax_area(star_2d, relax_factor, lp_solver)
         elif relax_method == 'bound':
-            result = _relu_single_star_relax_bound(star, relax_factor, lp_solver)
+            result = _relu_single_star_relax_bound(star_2d, relax_factor, lp_solver)
         else:  # 'standard'
-            result = _relu_single_star_approx(star, lp_solver)
+            result = _relu_single_star_approx(star_2d, lp_solver)
 
         if result is not None:
             # Preserve ImageStar type if input was ImageStar
@@ -1064,27 +1071,36 @@ def _relu_star_exact_parallel(
         # Fall back to sequential
         output_stars = []
         for star in input_stars:
-            result = _relu_single_star_exact(star, lp_solver, verbose)
+            # Convert ImageStar to Star for 2D ReLU processing
+            star_2d = star.to_star() if isinstance(star, ImageStar) else star
+            result = _relu_single_star_exact(star_2d, lp_solver, verbose)
+            # Preserve ImageStar type for each output star
+            result = [_preserve_imagestar_type(star, s) for s in result]
             output_stars.extend(result)
         return output_stars
 
     # Parallel processing
+    # Convert ImageStars to Stars first (conversion is fast, not worth parallelizing)
+    stars_2d = [s.to_star() if isinstance(s, ImageStar) else s for s in input_stars]
     output_stars = []
 
     if verbose:
         print(f'  ⚡ Processing {len(input_stars)} Stars in parallel ({workers} workers)')
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
-        # Submit all Stars for processing
-        future_to_idx = {
-            executor.submit(_relu_single_star_exact, star, lp_solver, None): idx
-            for idx, star in enumerate(input_stars)
+        # Submit all Stars for processing, track original star for type preservation
+        future_to_orig = {
+            executor.submit(_relu_single_star_exact, star_2d, lp_solver, None): orig_star
+            for star_2d, orig_star in zip(stars_2d, input_stars)
         }
 
         # Collect results as they complete
-        for future in as_completed(future_to_idx):
+        for future in as_completed(future_to_orig):
+            orig_star = future_to_orig[future]
             try:
                 result = future.result()
+                # Preserve ImageStar type for each output star
+                result = [_preserve_imagestar_type(orig_star, s) for s in result]
                 output_stars.extend(result)
             except Exception as e:
                 if verbose:

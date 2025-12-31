@@ -176,10 +176,19 @@ def assert_zono_valid(zono):
 
 def assert_image_star_valid(img_star):
     """Assert that an ImageStar is valid."""
-    assert_star_valid(img_star)
+    # ImageStar has 4D V: (H, W, C, nVar+1), so we check differently than Star
+    assert img_star.V is not None
+    assert img_star.C is not None
+    assert img_star.d is not None
+    assert img_star.V.ndim == 4, f"ImageStar V should be 4D, got {img_star.V.ndim}D"
+    assert img_star.V.shape[3] == img_star.nVar + 1
+    assert img_star.C.shape[1] == img_star.nVar
     assert img_star.height > 0
     assert img_star.width > 0
     assert img_star.num_channels > 0
+    assert img_star.V.shape[0] == img_star.height
+    assert img_star.V.shape[1] == img_star.width
+    assert img_star.V.shape[2] == img_star.num_channels
     assert img_star.dim == img_star.height * img_star.width * img_star.num_channels
 
 

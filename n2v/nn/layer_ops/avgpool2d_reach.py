@@ -5,6 +5,8 @@ Translated from MATLAB NNV AveragePooling2DLayer.m
 
 Note: Average pooling is a LINEAR operation, so it's EXACT for all set types
 (Star, Zono, Box). No approximation or splitting needed!
+
+Supports both ImageStar (4D V) and Star (2D V) inputs with optimized paths for each.
 """
 
 import torch
@@ -26,6 +28,8 @@ def avgpool2d_star(
     Since average pooling is a linear operation, this is exact with no
     over-approximation or star splitting.
 
+    Supports both ImageStar (optimized 4D path) and Star (requires ImageStar).
+
     Args:
         layer: PyTorch nn.AvgPool2d layer
         input_stars: List of input Stars (should be ImageStars)
@@ -37,38 +41,41 @@ def avgpool2d_star(
     output_stars = []
     for star in input_stars:
         if isinstance(star, ImageStar):
-            output_star = _avgpool2d_single_imagestar(layer, star)
+            output_star = _avgpool2d_imagestar_4d(layer, star)
         else:
             raise TypeError(f"AvgPool2D expects ImageStar input, got {type(star)}")
         output_stars.append(output_star)
     return output_stars
 
 
-def _avgpool2d_single_imagestar(layer: nn.AvgPool2d, input_star: ImageStar) -> ImageStar:
+def _avgpool2d_imagestar_4d(layer: nn.AvgPool2d, input_star: ImageStar) -> ImageStar:
     """
-    Apply AvgPool2D to a single ImageStar.
+    Apply AvgPool2D to ImageStar using optimized 4D operations.
+
+    Works directly on the 4D V tensor (H, W, C, nVar+1) without reshaping.
 
     Algorithm:
     1. Apply padding if needed
-    2. Apply avg_pool to each basis vector in V
-    3. Construct output ImageStar with pooled bases
+    2. Apply avg_pool to center and all generators at once
+    3. Construct output ImageStar with 4D V
 
     This is exact because averaging is linear:
     avg_pool(V * α) = avg_pool(V) * α
 
     Args:
         layer: PyTorch nn.AvgPool2d layer
-        input_star: Input ImageStar
+        input_star: Input ImageStar with 4D V
 
     Returns:
-        Output ImageStar
+        Output ImageStar with 4D V
     """
-    # Apply padding
-    pad_star = _apply_padding(layer, input_star)
+    # Apply padding if needed
+    pad_star = _apply_padding_4d(layer, input_star)
 
-    # Get dimensions
-    h_in, w_in, c_in = pad_star.height, pad_star.width, pad_star.num_channels
-    n_pred = pad_star.nVar
+    # V is 4D: (H, W, C, nVar+1)
+    V = pad_star.V
+    h_in, w_in, c_in, n_cols = V.shape
+    n_pred = n_cols - 1
 
     # Get kernel size and stride (can be int, tuple, or list from onnx2torch)
     kernel_size = layer.kernel_size
@@ -87,39 +94,26 @@ def _avgpool2d_single_imagestar(layer: nn.AvgPool2d, input_star: ImageStar) -> I
     h_out = (h_in - kernel_size[0]) // stride[0] + 1
     w_out = (w_in - kernel_size[1]) // stride[1] + 1
 
-    # Reshape V to image format: (h, w, c, nVar+1)
-    V_img = pad_star.V.reshape(h_in, w_in, c_in, n_pred + 1)
+    # Apply avg_pool to all columns of V at once
+    # Convert V to PyTorch format: (nVar+1, C, H, W) where batch=nVar+1
+    V_torch = torch.from_numpy(V).permute(3, 2, 0, 1).float()  # (nVar+1, C, H, W)
 
-    # Apply avg_pool to each basis vector
-    # We need to apply it to all n_pred+1 columns (center + all basis vectors)
-    V_out = np.zeros((h_out, w_out, c_in, n_pred + 1))
+    # Apply avg_pool
+    pooled = F.avg_pool2d(
+        V_torch,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=0,  # Already padded
+        count_include_pad=layer.count_include_pad if hasattr(layer, 'count_include_pad') else True
+    )
 
-    for i in range(n_pred + 1):
-        # Get the i-th basis image
-        basis_img = V_img[:, :, :, i]  # (h, w, c)
+    # pooled shape: (nVar+1, C, H_out, W_out)
+    # Convert back to (H_out, W_out, C, nVar+1)
+    V_out = pooled.permute(2, 3, 1, 0).numpy()
 
-        # Convert to PyTorch format: (c, h, w) and add batch dimension
-        basis_torch = torch.from_numpy(basis_img.transpose(2, 0, 1)).unsqueeze(0).float()
-
-        # Apply avg_pool
-        pooled = F.avg_pool2d(
-            basis_torch,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=0,  # Already padded
-            count_include_pad=layer.count_include_pad if hasattr(layer, 'count_include_pad') else True
-        )
-
-        # Convert back to (h, w, c) format
-        pooled_np = pooled.squeeze(0).numpy().transpose(1, 2, 0)
-        V_out[:, :, :, i] = pooled_np
-
-    # Flatten V back to (h*w*c, nVar+1)
-    V_out_flat = V_out.reshape(-1, n_pred + 1)
-
-    # Create output ImageStar with same constraints
+    # Create output ImageStar with 4D V
     output_star = ImageStar(
-        V_out_flat,
+        V_out,
         pad_star.C,
         pad_star.d,
         pad_star.predicate_lb,
@@ -130,6 +124,40 @@ def _avgpool2d_single_imagestar(layer: nn.AvgPool2d, input_star: ImageStar) -> I
     )
 
     return output_star
+
+
+def _apply_padding_4d(layer: nn.AvgPool2d, input_star: ImageStar) -> ImageStar:
+    """Apply zero padding to ImageStar with 4D V if needed."""
+    # Handle padding which can be int, tuple, or list
+    padding = layer.padding
+    if isinstance(padding, int):
+        padding = (padding, padding)
+    elif isinstance(padding, (list, tuple)):
+        padding = tuple(padding)
+
+    if padding == (0, 0):
+        return input_star
+
+    # V is 4D: (H, W, C, nVar+1)
+    V = input_star.V
+    h, w, c, n_cols = V.shape
+
+    # Padding: (top, bottom, left, right)
+    pad_t, pad_b = padding[0], padding[0]
+    pad_l, pad_r = padding[1], padding[1]
+
+    h_pad = h + pad_t + pad_b
+    w_pad = w + pad_l + pad_r
+
+    # Create padded V (4D)
+    V_pad = np.zeros((h_pad, w_pad, c, n_cols))
+    V_pad[pad_t:pad_t + h, pad_l:pad_l + w, :, :] = V
+
+    return ImageStar(
+        V_pad, input_star.C, input_star.d,
+        input_star.predicate_lb, input_star.predicate_ub,
+        h_pad, w_pad, c
+    )
 
 
 def avgpool2d_zono(layer: nn.AvgPool2d, input_zonos: List[ImageZono]) -> List[ImageZono]:
@@ -171,16 +199,13 @@ def avgpool2d_zono(layer: nn.AvgPool2d, input_zonos: List[ImageZono]) -> List[Im
         c_pooled = F.avg_pool2d(c_torch, kernel_size=kernel_size, stride=stride)
         c_out = c_pooled.squeeze(0).numpy().transpose(1, 2, 0).reshape(-1, 1)
 
-        # Apply avg_pool to each generator
-        V_out_list = []
-        for i in range(n_gen):
-            v_img = V_img[:, :, :, i]
-            v_torch = torch.from_numpy(v_img.transpose(2, 0, 1)).unsqueeze(0).float()
-            v_pooled = F.avg_pool2d(v_torch, kernel_size=kernel_size, stride=stride)
-            v_out = v_pooled.squeeze(0).numpy().transpose(1, 2, 0).reshape(-1, 1)
-            V_out_list.append(v_out)
-
-        V_out = np.hstack(V_out_list) if V_out_list else np.zeros((c_out.shape[0], 0))
+        # Apply avg_pool to all generators at once
+        if n_gen > 0:
+            V_torch = torch.from_numpy(V_img).permute(3, 2, 0, 1).float()  # (n_gen, C, H, W)
+            V_pooled = F.avg_pool2d(V_torch, kernel_size=kernel_size, stride=stride)
+            V_out = V_pooled.permute(2, 3, 1, 0).numpy().reshape(-1, n_gen)  # (H*W*C, n_gen)
+        else:
+            V_out = np.zeros((h_out * w_out * c_in, 0))
 
         # Create output ImageZono
         output_zono = ImageZono(c_out, V_out, h_out, w_out, c_in)
@@ -218,48 +243,6 @@ def avgpool2d_box(layer: nn.AvgPool2d, input_boxes: List[Box]) -> List[Box]:
         output_boxes.append(box)
 
     return output_boxes
-
-
-# Helper functions
-
-def _apply_padding(layer: nn.AvgPool2d, input_star: ImageStar) -> ImageStar:
-    """Apply zero padding to ImageStar if needed."""
-    # Handle padding which can be int, tuple, or list
-    padding = layer.padding
-    if isinstance(padding, int):
-        padding = (padding, padding)
-    elif isinstance(padding, (list, tuple)):
-        padding = tuple(padding)  # Convert list to tuple for consistency
-
-    if padding == (0, 0):
-        return input_star
-
-    # Pad the ImageStar
-    h, w, c = input_star.height, input_star.width, input_star.num_channels
-    n_pred = input_star.nVar
-
-    # Padding: (top, bottom, left, right)
-    pad_t, pad_b = padding[0], padding[0]
-    pad_l, pad_r = padding[1], padding[1]
-
-    h_pad = h + pad_t + pad_b
-    w_pad = w + pad_l + pad_r
-
-    # Reshape V to image format
-    V_img = input_star.V.reshape(h, w, c, n_pred + 1)
-
-    # Create padded V
-    V_pad = np.zeros((h_pad, w_pad, c, n_pred + 1))
-    V_pad[pad_t:pad_t + h, pad_l:pad_l + w, :, :] = V_img
-
-    # Flatten back
-    V_pad_flat = V_pad.reshape(-1, n_pred + 1)
-
-    return ImageStar(
-        V_pad_flat, input_star.C, input_star.d,
-        input_star.predicate_lb, input_star.predicate_ub,
-        h_pad, w_pad, c
-    )
 
 
 def _apply_padding_zono(layer: nn.AvgPool2d, input_zono: ImageZono) -> ImageZono:

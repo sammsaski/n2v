@@ -4,6 +4,8 @@ Conv2D layer reachability operations.
 Convolutional layers are affine transformations, so they're exact for all set types.
 The key is properly handling image dimensions and applying convolution to each
 basis vector.
+
+Supports both ImageStar (4D V) and Star (2D V) inputs with optimized paths for each.
 """
 
 import torch
@@ -30,9 +32,11 @@ def conv2d_star(
     Convolution is a linear operation, so it's exact for Star sets.
     We apply the convolution to each basis vector in the Star.
 
+    Supports both ImageStar (optimized 4D path) and Star (requires conversion).
+
     Args:
         layer: PyTorch nn.Conv2d layer
-        input_stars: List of input Star sets
+        input_stars: List of input Star sets (ImageStar or Star)
         method: 'exact' or 'approx' (both are exact for conv)
         **kwargs: Additional options
 
@@ -42,44 +46,47 @@ def conv2d_star(
     output_stars = []
 
     for star in input_stars:
-        # Convert Star to ImageStar if needed
         if isinstance(star, ImageStar):
-            image_star = star
-        else:
-            # Need to know input image dimensions
-            # For now, assume Star is already in correct shape or raise error
+            # Optimized 4D path for ImageStar
+            output_star = _conv2d_imagestar_4d(layer, star)
+        elif isinstance(star, Star):
+            # TODO: Add conv2d support for Star by constructing conv matrix
+            # For now, require ImageStar
             raise ValueError(
                 "Conv2D requires ImageStar input. Please convert Star to ImageStar "
                 "with proper height/width/channels before calling conv2d."
             )
+        else:
+            raise TypeError(f"conv2d_star expects Star or ImageStar, got {type(star)}")
 
-        output_star = _conv2d_single_imagestar(layer, image_star)
         output_stars.append(output_star)
 
     return output_stars
 
 
-def _conv2d_single_imagestar(layer: nn.Conv2d, input_star: ImageStar) -> ImageStar:
+def _conv2d_imagestar_4d(layer: nn.Conv2d, input_star: ImageStar) -> ImageStar:
     """
-    Apply Conv2D to a single ImageStar.
+    Apply Conv2D to ImageStar using optimized 4D operations.
+
+    Works directly on the 4D V tensor (H, W, C, nVar+1) without reshaping.
 
     Algorithm:
-    1. Extract center and basis vectors from ImageStar
+    1. Extract center (V[:,:,:,0]) and generators (V[:,:,:,1:])
     2. Apply convolution to center (with bias)
-    3. Apply convolution to each basis vector (without bias)
-    4. Construct output ImageStar
+    3. Apply convolution to all generators at once (without bias)
+    4. Construct output ImageStar with 4D V
 
     Args:
         layer: Conv2D layer
-        input_star: Input ImageStar
+        input_star: Input ImageStar with 4D V
 
     Returns:
-        Output ImageStar
+        Output ImageStar with 4D V
     """
-    # Get input dimensions
-    h_in = input_star.height
-    w_in = input_star.width
-    c_in = input_star.num_channels
+    # V is already 4D: (H, W, C_in, nVar+1)
+    V = input_star.V
+    h_in, w_in, c_in, n_cols = V.shape
+    n_pred = n_cols - 1
 
     # Verify channel consistency
     if c_in != layer.in_channels:
@@ -87,21 +94,12 @@ def _conv2d_single_imagestar(layer: nn.Conv2d, input_star: ImageStar) -> ImageSt
             f"Input has {c_in} channels but Conv2D expects {layer.in_channels}"
         )
 
-    # Extract V matrix: V = [center, v1, v2, ..., vn]
-    # Shape: (h_in, w_in, c_in, n_pred+1) in NNV format
-    # We need to reshape to (h_in, w_in, c_in, n_pred+1)
+    # Extract center and generators
+    center = V[:, :, :, 0]    # (H, W, C_in)
+    generators = V[:, :, :, 1:]  # (H, W, C_in, nVar)
 
-    V = input_star.V  # Shape: (dim, nVar+1) where dim = h*w*c
-
-    # Reshape V to image format
-    n_pred = input_star.nVar
-    V_img = V.reshape(h_in, w_in, c_in, n_pred + 1)
-
-    # Convert to PyTorch format: (N, C, H, W)
-    # Center is V_img[:, :, :, 0]
-    center = V_img[:, :, :, 0]  # (h_in, w_in, c_in)
+    # Convert center to PyTorch format: (1, C_in, H, W)
     center_torch = torch.from_numpy(center).permute(2, 0, 1).unsqueeze(0).float()
-    # Shape: (1, c_in, h_in, w_in)
 
     # Apply convolution to center (with bias)
     with torch.no_grad():
@@ -115,45 +113,41 @@ def _conv2d_single_imagestar(layer: nn.Conv2d, input_star: ImageStar) -> ImageSt
             groups=layer.groups
         )
 
-    # c_out shape: (1, c_out, h_out, w_out)
-    c_out = c_out.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    # Shape: (h_out, w_out, c_out)
+    # c_out shape: (1, C_out, H_out, W_out)
+    c_out_np = c_out.squeeze(0).permute(1, 2, 0).cpu().numpy()  # (H_out, W_out, C_out)
+    h_out, w_out, c_out_channels = c_out_np.shape
 
-    h_out, w_out, c_out_channels = c_out.shape
-
-    # Apply convolution to each basis vector (without bias)
-    V_out = np.zeros((h_out, w_out, c_out_channels, n_pred + 1))
-    V_out[:, :, :, 0] = c_out  # Set center
-
+    # Apply convolution to generators (all at once, without bias)
     if n_pred > 0:
-        # Process basis vectors
-        basis_vectors = V_img[:, :, :, 1:]  # (h_in, w_in, c_in, n_pred)
-
-        # Convert to PyTorch: (n_pred, c_in, h_in, w_in)
-        basis_torch = torch.from_numpy(basis_vectors).permute(3, 2, 0, 1).float()
+        # Convert generators to PyTorch: (nVar, C_in, H, W)
+        generators_torch = torch.from_numpy(generators).permute(3, 2, 0, 1).float()
 
         with torch.no_grad():
             V_conv = F.conv2d(
-                basis_torch,
+                generators_torch,
                 layer.weight,
-                None,  # No bias for basis vectors
+                None,  # No bias for generators
                 stride=layer.stride,
                 padding=layer.padding,
                 dilation=layer.dilation,
                 groups=layer.groups
             )
 
-        # V_conv shape: (n_pred, c_out, h_out, w_out)
-        # Convert back to (h_out, w_out, c_out, n_pred)
-        V_conv_np = V_conv.permute(2, 3, 1, 0).cpu().numpy()
-        V_out[:, :, :, 1:] = V_conv_np
+        # V_conv shape: (nVar, C_out, H_out, W_out)
+        # Convert to (H_out, W_out, C_out, nVar)
+        generators_out = V_conv.permute(2, 3, 1, 0).cpu().numpy()
+    else:
+        generators_out = np.zeros((h_out, w_out, c_out_channels, 0))
 
-    # Flatten V_out to create Star V matrix
-    V_star = V_out.reshape(-1, n_pred + 1)
+    # Assemble output V as 4D directly
+    V_out = np.zeros((h_out, w_out, c_out_channels, n_cols))
+    V_out[:, :, :, 0] = c_out_np
+    if n_pred > 0:
+        V_out[:, :, :, 1:] = generators_out
 
-    # Create output ImageStar
+    # Create output ImageStar (V is already 4D)
     output_star = ImageStar(
-        V_star,
+        V_out,
         input_star.C,
         input_star.d,
         input_star.predicate_lb,

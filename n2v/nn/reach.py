@@ -13,6 +13,7 @@ from typing import List, Union, Optional
 
 # Import set types
 from n2v.sets import Star, Zono, Box, Hexatope, Octatope
+from n2v.sets.image_star import ImageStar
 
 # Import layer ops
 from n2v.nn.layer_ops.dispatcher import reach_layer
@@ -61,7 +62,11 @@ def reach_pytorch_model(
         ValueError: If method is not valid for the given set type
     """
     # Validate method for set type
-    if isinstance(input_set, Star):
+    # Note: ImageStar is checked first since it's more specific than Star
+    if isinstance(input_set, ImageStar):
+        if method not in ('exact', 'approx'):
+            raise ValueError(f"ImageStar supports 'exact' or 'approx', got '{method}'")
+    elif isinstance(input_set, Star):
         if method not in ('exact', 'approx'):
             raise ValueError(f"Star supports 'exact' or 'approx', got '{method}'")
     elif isinstance(input_set, Zono):
@@ -78,7 +83,7 @@ def reach_pytorch_model(
     else:
         raise TypeError(
             f"Unsupported input set type: {type(input_set).__name__}. "
-            f"Supported types: Star, Zono, Box, Hexatope, Octatope"
+            f"Supported types: Star, ImageStar, Zono, Box, Hexatope, Octatope"
         )
 
     # Check if model is a GraphModule (from torch.fx / onnx2torch)

@@ -69,6 +69,113 @@ class TestImageStar:
         assert simple_image_star.state_ub is not None
         assert simple_image_star.state_lb.shape[0] == simple_image_star.dim
 
+    def test_sample(self):
+        """Test sampling images from ImageStar."""
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        img_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        samples = img_star.sample(5)
+
+        assert len(samples) == 5
+        for sample in samples:
+            assert sample.shape == (4, 4, 1)
+            # All samples should be within bounds
+            assert np.all(sample >= lb - 1e-6)
+            assert np.all(sample <= ub + 1e-6)
+
+    def test_sample_single_point(self):
+        """Test sampling from ImageStar with no uncertainty."""
+        # Create ImageStar with lb == ub (single point)
+        image = np.random.rand(4, 4, 1)
+        lb = image.copy()
+        ub = image.copy()
+        img_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        samples = img_star.sample(3)
+
+        assert len(samples) == 3
+        for sample in samples:
+            np.testing.assert_allclose(sample, image, atol=1e-6)
+
+    def test_evaluate(self):
+        """Test evaluating ImageStar at specific predicate values."""
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        img_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        # Evaluate at predicate bounds (all -1 gives lower bound)
+        pred_val_low = -np.ones(img_star.nVar)
+        image_low = img_star.evaluate(pred_val_low)
+        np.testing.assert_allclose(image_low, lb, atol=1e-6)
+
+        # Evaluate at upper bound predicates (all +1 gives upper bound)
+        pred_val_high = np.ones(img_star.nVar)
+        image_high = img_star.evaluate(pred_val_high)
+        np.testing.assert_allclose(image_high, ub, atol=1e-6)
+
+    def test_evaluate_wrong_dimension(self):
+        """Test that evaluate raises error for wrong predicate dimension."""
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        img_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        wrong_pred = np.ones(img_star.nVar + 5)
+
+        with pytest.raises(ValueError):
+            img_star.evaluate(wrong_pred)
+
+    def test_contains_center(self):
+        """Test that center image is contained in ImageStar."""
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        img_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        # Center image (at predicate = 0)
+        center = img_star.evaluate(np.zeros(img_star.nVar))
+
+        assert img_star.contains(center)
+
+    def test_contains_bounds(self):
+        """Test that bound images are contained in ImageStar."""
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        img_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        assert img_star.contains(lb)
+        assert img_star.contains(ub)
+
+    def test_contains_outside(self):
+        """Test that images outside bounds are not contained."""
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        img_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        outside_image = np.ones((4, 4, 1)) * 2  # Above upper bound
+        assert not img_star.contains(outside_image)
+
+    def test_contains_flattened_input(self):
+        """Test contains with flattened image input."""
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        img_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        center = img_star.evaluate(np.zeros(img_star.nVar))
+        center_flat = center.flatten()
+
+        assert img_star.contains(center_flat)
+
+    def test_contains_wrong_shape(self):
+        """Test that contains raises error for wrong image shape."""
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        img_star = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        wrong_shape = np.zeros((8, 8, 1))
+
+        with pytest.raises(ValueError):
+            img_star.contains(wrong_shape)
+
 
 class TestImageZono:
     """Tests for ImageZono set."""
