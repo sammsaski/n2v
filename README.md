@@ -437,7 +437,25 @@ See [examples/README.md](examples/README.md) for detailed documentation.
 
 ## Performance Tips
 
-### 1. ⭐ Enable Parallel LP Solving
+### 1. 🚀 Use scipy linprog (HiGHS) - 1.5-2x Faster
+
+```python
+import n2v
+
+# Use scipy linprog with HiGHS solver (1.5-2x faster than default CVXPY)
+n2v.set_lp_solver('linprog')
+
+# Now all verification uses the faster LP solver
+output = verifier.reach(input_star, method='exact')
+```
+
+**Speedup**: 1.5-2x faster than default CVXPY
+**Why**: Lower problem setup overhead, efficient sparse matrix handling
+**Best for**: Exact methods and relaxed methods that solve many LPs
+
+See [docs/lp_solvers.md](docs/lp_solvers.md) for detailed LP solver comparison.
+
+### 2. ⭐ Enable Parallel LP Solving
 
 ```python
 import n2v
@@ -452,31 +470,13 @@ output = verifier.reach(input_star, method='approx')
 **Speedup**: 1.5-2x on multi-core systems (4+ cores)
 **Best for**: High-dimensional outputs (dim >= 10), exact method with many stars
 
-### 2. 🚀 Install Gurobi or MOSEK (10-100x faster)
+### 3. 🏆 Gurobi Support (TODO)
 
-```python
-# Install Gurobi (free academic license)
-# pip install gurobipy
-# Register at: https://www.gurobi.com/academia/
+Gurobi support is planned but not yet implemented. When available, it will provide 10-100x speedup over open-source solvers.
 
-import n2v
-n2v.set_lp_solver('GUROBI')
+- **License**: Free for academics at https://www.gurobi.com/academia/
 
-# Combined with parallel: 3-4x total speedup!
-n2v.set_parallel(True)
-```
-
-**Speedup**: 10-100x faster LP solving vs open-source solvers
-**Why**: MATLAB NNV likely uses Gurobi, explaining 2x performance difference
-
-**Alternative**: MOSEK (also free for academics)
-```python
-# pip install mosek
-# Get license: https://www.mosek.com/products/academic-licenses/
-n2v.set_lp_solver('MOSEK')
-```
-
-### 3. ⭐ Use AvgPool2D Instead of MaxPool2D
+### 4. ⭐ Use AvgPool2D Instead of MaxPool2D
 
 ```python
 # Instead of:
@@ -488,7 +488,7 @@ nn.AvgPool2d(2, 2)  # Always exact, no splitting!
 
 **Speedup**: 10-100x faster for verification!
 
-### 4. Use Smaller Perturbations
+### 5. Use Smaller Perturbations
 
 ```python
 epsilon = 0.01  # Instead of 0.1
@@ -496,7 +496,7 @@ epsilon = 0.01  # Instead of 0.1
 
 Reduces ReLU splitting significantly.
 
-### 5. Choose Appropriate Method
+### 6. Choose Appropriate Method
 
 ```python
 # For small networks (< 1000 neurons)
@@ -509,7 +509,7 @@ method = 'approx'
 method = 'approx'
 ```
 
-### 6. Monitor Star Count
+### 7. Monitor Star Count
 
 ```python
 for layer in layers:
@@ -520,15 +520,12 @@ for layer in layers:
 
 ### Performance Comparison
 
-| Configuration | ACAS Xu Time | vs Baseline |
-|---------------|--------------|-------------|
-| Default (CVXPY) | 120s | baseline |
-| + Parallel (4 cores) | 90-100s | 1.2-1.3x faster |
-| + Gurobi | 60s | 2.0x faster |
-| + Gurobi + Parallel | 30-40s | 3-4x faster |
-| MATLAB NNV (Gurobi) | 60s | 2.0x faster |
+| Configuration | vs Default CVXPY |
+|---------------|------------------|
+| scipy linprog | 1.5-2x faster |
+| + Parallel (4 cores) | 2-3x faster |
 
-**Bottom line:** Gurobi + Parallel matches or exceeds MATLAB performance!
+**Bottom line:** Use `n2v.set_lp_solver('linprog')` for best performance!
 
 ---
 

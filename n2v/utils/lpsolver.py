@@ -1,7 +1,12 @@
 """
-LP solver interface using CVXPY.
+LP solver interface with multiple backends.
 
 Provides a unified interface for linear programming, replacing MATLAB's linprog.
+Supports:
+- scipy.optimize.linprog with HiGHS (fast, recommended for Star set operations)
+- CVXPY with various solvers (CLARABEL, ECOS, etc.)
+- Differentiable solver for DCS/UTVPI constraints
+
 Includes differentiable solver based on constraint-aware Gumbel-Softmax for
 difference constraint systems (DCS) and UTVPI constraints, inspired by
 "Differentiable Combinatorial Scheduling at Scale" (ICML'24).
@@ -9,6 +14,8 @@ difference constraint systems (DCS) and UTVPI constraints, inspired by
 
 import numpy as np
 import cvxpy as cp
+from scipy.optimize import linprog as scipy_linprog
+from scipy.sparse import issparse, csr_matrix
 from typing import Optional, Tuple, Dict, Any, List
 try:
     import torch
@@ -17,6 +24,10 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
+
+
+# Solvers that use scipy linprog backend
+SCIPY_SOLVERS = {'linprog', 'highs', 'highs-ds', 'highs-ipm'}
 
 
 def solve_lp(
@@ -49,7 +60,12 @@ def solve_lp(
         beq: Equality constraint vector (p,) or (p, 1)
         lb: Lower bounds (n,) or (n, 1)
         ub: Upper bounds (n,) or (n, 1)
-        lp_solver: CVXPY solver name ('ECOS', 'SCS', 'OSQP', 'GLPK', etc.)
+        lp_solver: Solver to use:
+            - 'default': Use global config (n2v.set_lp_solver), falls back to CVXPY
+            - 'linprog' or 'highs': scipy.optimize.linprog with HiGHS (fast)
+            - 'highs-ds': HiGHS dual simplex
+            - 'highs-ipm': HiGHS interior point method
+            - Any CVXPY solver name ('ECOS', 'SCS', 'OSQP', 'GLPK', etc.)
         minimize: If True, minimize; otherwise maximize
         **solver_kwargs: Additional keyword arguments for solver
 
@@ -59,6 +75,134 @@ def solve_lp(
             fval: Optimal objective value (or None)
             status: Solution status string
             info: Dictionary with solver information
+    """
+    # Check global config for 'default' solver
+    if lp_solver == 'default':
+        from n2v.config import config
+        lp_solver = config.lp_solver
+
+    # Route to appropriate solver backend
+    if lp_solver in SCIPY_SOLVERS:
+        return _solve_lp_scipy(f, A, b, Aeq, beq, lb, ub, lp_solver, minimize, **solver_kwargs)
+    else:
+        return _solve_lp_cvxpy(f, A, b, Aeq, beq, lb, ub, lp_solver, minimize, **solver_kwargs)
+
+
+def _solve_lp_scipy(
+    f: np.ndarray,
+    A: Optional[np.ndarray] = None,
+    b: Optional[np.ndarray] = None,
+    Aeq: Optional[np.ndarray] = None,
+    beq: Optional[np.ndarray] = None,
+    lb: Optional[np.ndarray] = None,
+    ub: Optional[np.ndarray] = None,
+    lp_solver: str = 'highs',
+    minimize: bool = True,
+    **solver_kwargs
+) -> Tuple[Optional[np.ndarray], Optional[float], str, Dict[str, Any]]:
+    """
+    Solve LP using scipy.optimize.linprog with HiGHS solver.
+
+    HiGHS is a high-performance LP solver that handles sparse matrices efficiently.
+    This is significantly faster than CVXPY for the sparse constraint structures
+    typical in Star set reachability analysis.
+    """
+    # Convert to numpy arrays
+    f = np.asarray(f, dtype=np.float64).flatten()
+    n = f.shape[0]
+
+    # Handle maximization by negating objective
+    if not minimize:
+        f = -f
+
+    # Prepare inequality constraints
+    A_ub = None
+    b_ub = None
+    if A is not None and b is not None:
+        A_ub = np.asarray(A, dtype=np.float64) if not issparse(A) else A
+        b_ub = np.asarray(b, dtype=np.float64).flatten()
+
+    # Prepare equality constraints
+    A_eq = None
+    b_eq = None
+    if Aeq is not None and beq is not None:
+        A_eq = np.asarray(Aeq, dtype=np.float64) if not issparse(Aeq) else Aeq
+        b_eq = np.asarray(beq, dtype=np.float64).flatten()
+
+    # Prepare bounds as list of (lb, ub) tuples
+    if lb is not None:
+        lb = np.asarray(lb, dtype=np.float64).flatten()
+    else:
+        lb = np.full(n, -np.inf)
+
+    if ub is not None:
+        ub = np.asarray(ub, dtype=np.float64).flatten()
+    else:
+        ub = np.full(n, np.inf)
+
+    bounds = list(zip(lb, ub))
+
+    # Map solver name to scipy method
+    if lp_solver == 'linprog':
+        method = 'highs'  # Default to HiGHS
+    else:
+        method = lp_solver
+
+    try:
+        result = scipy_linprog(
+            c=f,
+            A_ub=A_ub,
+            b_ub=b_ub,
+            A_eq=A_eq,
+            b_eq=b_eq,
+            bounds=bounds,
+            method=method,
+            **solver_kwargs
+        )
+
+        # Extract results
+        if result.success:
+            x_opt = result.x
+            fval = result.fun
+            if not minimize:
+                fval = -fval  # Undo negation for maximization
+            status = 'optimal'
+        else:
+            x_opt = None
+            fval = None
+            if 'infeasible' in result.message.lower():
+                status = 'infeasible'
+            elif 'unbounded' in result.message.lower():
+                status = 'unbounded'
+            else:
+                status = f'failed: {result.message}'
+
+        info = {
+            'solver': f'scipy_{method}',
+            'num_iters': result.nit if hasattr(result, 'nit') else None,
+            'message': result.message,
+        }
+
+        return x_opt, fval, status, info
+
+    except Exception as e:
+        return None, None, f'error: {str(e)}', {}
+
+
+def _solve_lp_cvxpy(
+    f: np.ndarray,
+    A: Optional[np.ndarray] = None,
+    b: Optional[np.ndarray] = None,
+    Aeq: Optional[np.ndarray] = None,
+    beq: Optional[np.ndarray] = None,
+    lb: Optional[np.ndarray] = None,
+    ub: Optional[np.ndarray] = None,
+    lp_solver: str = 'default',
+    minimize: bool = True,
+    **solver_kwargs
+) -> Tuple[Optional[np.ndarray], Optional[float], str, Dict[str, Any]]:
+    """
+    Solve LP using CVXPY with specified solver.
     """
     # Convert to numpy arrays
     f = np.asarray(f, dtype=np.float64).flatten()

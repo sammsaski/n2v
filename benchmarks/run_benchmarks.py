@@ -394,6 +394,7 @@ Examples:
   python run_benchmarks.py                    # Run all, compare to latest.json
   python run_benchmarks.py --category cnn     # Run CNN benchmarks only
   python run_benchmarks.py --save             # Run all and update latest.json
+  python run_benchmarks.py --lp-solver linprog  # Use scipy linprog (HiGHS)
 '''
     )
     parser.add_argument('--model', type=str, help='Run benchmarks for specific model')
@@ -403,8 +404,16 @@ Examples:
     parser.add_argument('--no-warmup', action='store_true', help='Skip warmup runs')
     parser.add_argument('--save', action='store_true', help='Save results to latest.json (updates baseline)')
     parser.add_argument('--quiet', action='store_true', help='Minimal output')
+    parser.add_argument('--lp-solver', type=str, default='default',
+                        help='LP solver: default (CVXPY/CLARABEL), linprog (scipy/HiGHS)')
 
     args = parser.parse_args()
+
+    # Set LP solver globally
+    if args.lp_solver != 'default':
+        import n2v
+        n2v.set_lp_solver(args.lp_solver)
+        print(f"Using LP solver: {args.lp_solver}")
 
     # Select benchmarks
     if args.model:

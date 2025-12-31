@@ -197,6 +197,10 @@ python run_benchmarks.py --method approx        # Run specific method
 python run_benchmarks.py --save                 # Run all and save
 python run_benchmarks.py --category cnn --save  # Run CNN and save
 
+# LP solver selection
+python run_benchmarks.py --lp-solver linprog    # Use scipy linprog (HiGHS) - faster
+python run_benchmarks.py --lp-solver default    # Use CVXPY/CLARABEL (default)
+
 # Other options
 python run_benchmarks.py --include-slow         # Include CNN exact (very slow)
 python run_benchmarks.py --no-warmup            # Skip warmup runs
