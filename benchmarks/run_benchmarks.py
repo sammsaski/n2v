@@ -5,11 +5,16 @@ n2v Benchmark Runner
 Runs performance benchmarks for n2v verification methods and reports timing results.
 
 Usage:
-    python run_benchmarks.py                    # Run all benchmarks
-    python run_benchmarks.py --model fc_mnist   # Run specific model
-    python run_benchmarks.py --category cnn     # Run category
-    python run_benchmarks.py --save-baseline    # Save as baseline
-    python run_benchmarks.py --compare baseline.json  # Compare to baseline
+    python run_benchmarks.py                    # Run all, compare to latest.json
+    python run_benchmarks.py --category cnn     # Run CNN benchmarks only
+    python run_benchmarks.py --save             # Run all and update latest.json
+
+Workflow:
+    1. Make code changes
+    2. Run: python run_benchmarks.py            # Compare against baseline
+    3. If improvements are acceptable:
+       Run: python run_benchmarks.py --save     # Update baseline
+    4. Commit the updated latest.json with your changes
 """
 
 import argparse
@@ -48,6 +53,52 @@ from n2v.utils.model_loader import load_onnx
 MODELS_DIR = Path(__file__).parent.parent / 'examples' / 'CompareNNV' / 'models'
 SAMPLES_DIR = Path(__file__).parent.parent / 'examples' / 'CompareNNV' / 'samples'
 RESULTS_DIR = Path(__file__).parent / 'results'
+
+
+# NNV timing data from CompareNNV experiments (2024-12-31)
+# These are static since NNV doesn't change - avoids re-running MATLAB experiments
+NNV_TIMINGS = {
+    # FC MNIST
+    'fc_mnist_exact': 1.2946,
+    'fc_mnist_approx': 0.2172,
+    'fc_mnist_area_0.25': 0.1553,
+    'fc_mnist_area_0.50': 0.1241,
+    'fc_mnist_area_0.75': 0.1132,
+    'fc_mnist_range_0.25': 0.1380,
+    'fc_mnist_range_0.50': 0.0786,
+    'fc_mnist_range_0.75': 0.0674,
+    'fc_mnist_small_exact': 0.0586,
+    'fc_mnist_small_approx': 0.0530,
+    # CNN conv+relu
+    'cnn_conv_relu_approx': 4.2755,
+    'cnn_conv_relu_area_0.25': 3.2630,
+    'cnn_conv_relu_area_0.50': 2.1223,
+    'cnn_conv_relu_area_0.75': 1.0712,
+    'cnn_conv_relu_range_0.25': 3.1747,
+    'cnn_conv_relu_range_0.50': 2.1289,
+    'cnn_conv_relu_range_0.75': 1.0695,
+    # CNN avgpool
+    'cnn_avgpool_approx': 0.1386,
+    'cnn_avgpool_area_0.25': 0.1053,
+    'cnn_avgpool_area_0.50': 0.1054,
+    'cnn_avgpool_area_0.75': 0.0824,
+    'cnn_avgpool_range_0.25': 0.1116,
+    'cnn_avgpool_range_0.50': 0.1027,
+    'cnn_avgpool_range_0.75': 0.0795,
+    # CNN maxpool
+    'cnn_maxpool_approx': 17.6356,
+    'cnn_maxpool_area_0.25': 17.5725,
+    'cnn_maxpool_area_0.50': 17.1401,
+    'cnn_maxpool_area_0.75': 16.6098,
+    'cnn_maxpool_range_0.25': 17.3391,
+    'cnn_maxpool_range_0.50': 16.9986,
+    'cnn_maxpool_range_0.75': 16.5728,
+    # Toy models
+    'toy_fc_4_3_2_zono': 0.0069,
+    'toy_fc_4_3_2_box': 0.0574,
+    'toy_fc_8_4_2_zono': 0.0014,
+    'toy_fc_8_4_2_box': 0.0295,
+}
 
 
 def load_test_sample(sample_path: Path, model_type: str = 'mnist') -> Dict[str, Any]:
@@ -212,11 +263,11 @@ def run_benchmarks(
 
 def compare_results(current: Dict, baseline: Dict) -> None:
     """Compare current results to baseline and print comparison."""
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 85)
     print("COMPARISON TO BASELINE")
-    print("=" * 70)
-    print(f"{'Benchmark':<35} {'Current':>10} {'Baseline':>10} {'Change':>12}")
-    print("-" * 70)
+    print("=" * 85)
+    print(f"{'Benchmark':<35} {'Current':>10} {'Baseline':>10} {'Change':>10} {'Speedup':>10}")
+    print("-" * 85)
 
     improvements = []
     regressions = []
@@ -233,26 +284,76 @@ def compare_results(current: Dict, baseline: Dict) -> None:
         curr_time = curr_data['time']
         base_time = base_data['time']
         change = (curr_time - base_time) / base_time * 100
+        speedup = base_time / curr_time if curr_time > 0 else float('inf')
+
+        # Format change percentage (pad to fixed width before adding color)
+        change_text = f"{change:+.1f}%"
+        speedup_text = f"{speedup:.2f}x"
 
         if change < -5:  # More than 5% faster
-            change_str = f"\033[32m{change:+.1f}%\033[0m"  # Green
-            improvements.append((name, change))
+            change_str = f"\033[32m{change_text:>10}\033[0m"  # Green
+            speedup_str = f"\033[32m{speedup_text:>10}\033[0m"
+            improvements.append((name, change, speedup))
         elif change > 5:  # More than 5% slower
-            change_str = f"\033[31m{change:+.1f}%\033[0m"  # Red
-            regressions.append((name, change))
+            change_str = f"\033[31m{change_text:>10}\033[0m"  # Red
+            speedup_str = f"\033[31m{speedup_text:>10}\033[0m"
+            regressions.append((name, change, speedup))
         else:
-            change_str = f"{change:+.1f}%"
+            change_str = f"{change_text:>10}"
+            speedup_str = f"{speedup_text:>10}"
 
-        print(f"{name:<35} {curr_time:>10.3f}s {base_time:>10.3f}s {change_str:>12}")
+        print(f"{name:<35} {curr_time:>10.3f}s {base_time:>10.3f}s {change_str} {speedup_str}")
 
-    print("-" * 70)
+    print("-" * 85)
     print(f"Improvements (>5% faster): {len(improvements)}")
     print(f"Regressions (>5% slower):  {len(regressions)}")
 
     if regressions:
         print("\nRegressions:")
-        for name, change in sorted(regressions, key=lambda x: -x[1]):
-            print(f"  {name}: {change:+.1f}%")
+        for name, change, speedup in sorted(regressions, key=lambda x: -x[1]):
+            print(f"  {name}: {change:+.1f}% ({speedup:.2f}x)")
+
+
+def compare_to_nnv(results: Dict) -> None:
+    """Compare current results to NNV timings and print comparison."""
+    print("\n" + "=" * 85)
+    print("COMPARISON TO NNV (MATLAB)")
+    print("=" * 85)
+    print(f"{'Benchmark':<35} {'n2v':>10} {'NNV':>10} {'Speedup':>10}")
+    print("-" * 85)
+
+    faster = []
+    slower = []
+
+    for name, data in results['benchmarks'].items():
+        if not data['success']:
+            continue
+
+        # Look up NNV timing
+        nnv_time = NNV_TIMINGS.get(name)
+        if nnv_time is None:
+            continue
+
+        n2v_time = data['time']
+        speedup = nnv_time / n2v_time if n2v_time > 0 else float('inf')
+
+        # Format speedup (pad to fixed width before adding color)
+        speedup_text = f"{speedup:.1f}x"
+
+        if speedup > 1.5:  # n2v is faster
+            speedup_str = f"\033[32m{speedup_text:>10}\033[0m"  # Green
+            faster.append((name, speedup))
+        elif speedup < 0.67:  # n2v is slower (NNV >1.5x faster)
+            speedup_str = f"\033[31m{speedup_text:>10}\033[0m"  # Red
+            slower.append((name, speedup))
+        else:
+            speedup_str = f"{speedup_text:>10}"
+
+        print(f"{name:<35} {n2v_time:>10.3f}s {nnv_time:>10.3f}s {speedup_str}")
+
+    print("-" * 85)
+    print(f"n2v faster (>1.5x): {len(faster)}")
+    print(f"n2v slower (<0.67x): {len(slower)}")
 
 
 def print_summary(results: Dict) -> None:
@@ -285,13 +386,22 @@ def print_summary(results: Dict) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Run n2v benchmarks')
+    parser = argparse.ArgumentParser(
+        description='Run n2v benchmarks',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python run_benchmarks.py                    # Run all, compare to latest.json
+  python run_benchmarks.py --category cnn     # Run CNN benchmarks only
+  python run_benchmarks.py --save             # Run all and update latest.json
+'''
+    )
     parser.add_argument('--model', type=str, help='Run benchmarks for specific model')
     parser.add_argument('--method', type=str, help='Run benchmarks for specific method')
     parser.add_argument('--category', type=str, help='Run benchmarks for specific category (fc, cnn, toy)')
     parser.add_argument('--include-slow', action='store_true', help='Include slow benchmarks (CNN exact)')
     parser.add_argument('--no-warmup', action='store_true', help='Skip warmup runs')
-    parser.add_argument('--compare', type=str, help='Compare to baseline file (e.g., latest.json)')
+    parser.add_argument('--save', action='store_true', help='Save results to latest.json (updates baseline)')
     parser.add_argument('--quiet', action='store_true', help='Minimal output')
 
     args = parser.parse_args()
@@ -324,26 +434,28 @@ def main():
     if not args.quiet:
         print_summary(results)
 
-    # Save results
     RESULTS_DIR.mkdir(exist_ok=True)
-
-    # Save as latest (this becomes the new baseline for future comparisons)
     latest_file = RESULTS_DIR / 'latest.json'
-    with open(latest_file, 'w') as f:
-        json.dump(results, f, indent=2)
-    print(f"\nResults saved to: {latest_file}")
 
-    # Compare to baseline if requested
-    if args.compare:
-        baseline_path = Path(args.compare)
-        if not baseline_path.exists():
-            baseline_path = RESULTS_DIR / args.compare
-        if baseline_path.exists():
-            with open(baseline_path) as f:
-                baseline = json.load(f)
-            compare_results(results, baseline)
-        else:
-            print(f"Baseline file not found: {args.compare}")
+    # Always compare to latest.json if it exists
+    if latest_file.exists():
+        with open(latest_file) as f:
+            baseline = json.load(f)
+        compare_results(results, baseline)
+    else:
+        print("\nNo baseline found (latest.json). Use --save to create one.")
+
+    # Always compare to NNV timings
+    if not args.quiet:
+        compare_to_nnv(results)
+
+    # Only save if --save flag is passed
+    if args.save:
+        with open(latest_file, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"\nResults saved to: {latest_file}")
+    else:
+        print(f"\nResults NOT saved (use --save to update latest.json)")
 
     return 0 if results['failed'] == 0 else 1
 

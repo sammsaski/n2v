@@ -5,22 +5,23 @@ Performance benchmarks for n2v neural network verification.
 ## Quick Start
 
 ```bash
-# Run all benchmarks
+# Run benchmarks and compare to baseline (does NOT overwrite latest.json)
 python run_benchmarks.py
 
-# Run by category
+# Run specific category
 python run_benchmarks.py --category cnn
 
-# Compare against baseline after making changes
-python run_benchmarks.py --compare latest.json
+# Save results after confirming improvements
+python run_benchmarks.py --save
 ```
 
 ## Development Workflow
 
 1. **Before changes**: `results/latest.json` is the committed baseline
 2. **Make changes**: Implement your optimization
-3. **Compare**: `python run_benchmarks.py --compare latest.json`
-4. **If acceptable**: Commit updated `latest.json` with your changes
+3. **Compare**: `python run_benchmarks.py` (automatically compares to latest.json)
+4. **If acceptable**: `python run_benchmarks.py --save` to update baseline
+5. **Commit**: Include updated `latest.json` with your changes
 
 ---
 
@@ -85,16 +86,16 @@ ub = min(image + epsilon, 1)
 
 ## Current Results
 
-**Last Updated:** 2024-12-31
+**Last Updated:** 2024-12-31 (after vectorized `estimate_ranges()` optimization)
 
 ### Summary by Category
 
 | Category | Benchmarks | Total Time | Avg Time |
 |----------|------------|------------|----------|
-| FC (Star) | 10 | 1.67s | 0.17s |
-| CNN (ImageStar) | 21 | 61.9s | 2.95s |
+| FC (Star) | 10 | 1.23s | 0.12s |
+| CNN (ImageStar) | 21 | 35.1s | 1.67s |
 | Toy (Zono/Box) | 4 | <0.01s | <0.01s |
-| **Total** | **35** | **63.6s** | **1.82s** |
+| **Total** | **35** | **36.3s** | **1.04s** |
 
 *3 CNN exact benchmarks skipped (exponential complexity)*
 
@@ -102,14 +103,14 @@ ub = min(image + epsilon, 1)
 
 | Method | FC Time | CNN Time | Description |
 |--------|---------|----------|-------------|
-| exact | 0.83s | skipped | Exact reachability (splits on ReLU) |
-| approx | 0.12s | 3.71s | Triangle relaxation (no splitting) |
-| relax-area-0.25 | 0.21s | 12.8s | Area-based relaxation, 25% relaxed |
-| relax-area-0.50 | 0.10s | 9.71s | Area-based relaxation, 50% relaxed |
-| relax-area-0.75 | 0.05s | 6.80s | Area-based relaxation, 75% relaxed |
-| relax-range-0.25 | 0.22s | 12.6s | Range-based relaxation, 25% relaxed |
-| relax-range-0.50 | 0.10s | 9.71s | Range-based relaxation, 50% relaxed |
-| relax-range-0.75 | 0.05s | 6.62s | Range-based relaxation, 75% relaxed |
+| exact | 0.63s | skipped | Exact reachability (splits on ReLU) |
+| approx | 0.03s | 0.35s | Triangle relaxation (no splitting) |
+| relax-area-0.25 | 0.18s | 8.50s | Area-based relaxation, 25% relaxed |
+| relax-area-0.50 | 0.08s | 5.84s | Area-based relaxation, 50% relaxed |
+| relax-area-0.75 | 0.02s | 3.23s | Area-based relaxation, 75% relaxed |
+| relax-range-0.25 | 0.19s | 8.43s | Range-based relaxation, 25% relaxed |
+| relax-range-0.50 | 0.09s | 5.82s | Range-based relaxation, 50% relaxed |
+| relax-range-0.75 | 0.03s | 3.07s | Range-based relaxation, 75% relaxed |
 
 ### Results by Network
 
@@ -117,47 +118,47 @@ ub = min(image + epsilon, 1)
 
 | Benchmark | exact | approx | area-0.25 | area-0.50 | area-0.75 | range-0.25 | range-0.50 | range-0.75 |
 |-----------|-------|--------|-----------|-----------|-----------|------------|------------|------------|
-| fc_mnist | 0.73s | 0.09s | 0.21s | 0.10s | 0.05s | 0.22s | 0.10s | 0.05s |
-| fc_mnist_small | 0.09s | 0.03s | - | - | - | - | - | - |
+| fc_mnist | 0.55s | 0.02s | 0.18s | 0.08s | 0.02s | 0.19s | 0.09s | 0.03s |
+| fc_mnist_small | 0.08s | 0.01s | - | - | - | - | - | - |
 
 #### CNN: cnn_conv_relu (ImageStar)
 
-| Method | Time | Notes |
-|--------|------|-------|
-| exact | skipped | Exponential complexity |
-| approx | 0.41s | Fast triangle relaxation |
-| relax-area-0.25 | 7.86s | LP-based bound refinement |
-| relax-area-0.50 | 5.29s | |
-| relax-area-0.75 | 2.84s | |
-| relax-range-0.25 | 7.78s | |
-| relax-range-0.50 | 5.36s | |
-| relax-range-0.75 | 2.82s | |
+| Method | Time | NNV Time | Speedup | Notes |
+|--------|------|----------|---------|-------|
+| exact | skipped | - | - | Exponential complexity |
+| approx | 0.04s | 4.28s | **100x** | Fast triangle relaxation |
+| relax-area-0.25 | 6.67s | 3.26s | 0.5x | LP-based bound refinement |
+| relax-area-0.50 | 4.45s | 2.12s | 0.5x | |
+| relax-area-0.75 | 2.25s | 1.07s | 0.5x | |
+| relax-range-0.25 | 6.64s | 3.17s | 0.5x | |
+| relax-range-0.50 | 4.46s | 2.13s | 0.5x | |
+| relax-range-0.75 | 2.25s | 1.07s | 0.5x | |
 
 #### CNN: cnn_avgpool (ImageStar)
 
-| Method | Time | Notes |
-|--------|------|-------|
-| exact | skipped | Exponential complexity |
-| approx | 1.60s | AvgPool is linear (no splitting) |
-| relax-area-0.25 | 1.64s | |
-| relax-area-0.50 | 1.57s | |
-| relax-area-0.75 | 1.57s | |
-| relax-range-0.25 | 1.63s | |
-| relax-range-0.50 | 1.57s | |
-| relax-range-0.75 | 1.57s | |
+| Method | Time | NNV Time | Speedup | Notes |
+|--------|------|----------|---------|-------|
+| exact | skipped | - | - | Exponential complexity |
+| approx | 0.16s | 0.14s | 0.9x | AvgPool is linear (no splitting) |
+| relax-area-0.25 | 0.19s | 0.11s | 0.6x | |
+| relax-area-0.50 | 0.15s | 0.11s | 0.7x | |
+| relax-area-0.75 | 0.14s | 0.08s | 0.6x | |
+| relax-range-0.25 | 0.18s | 0.11s | 0.6x | |
+| relax-range-0.50 | 0.16s | 0.10s | 0.6x | |
+| relax-range-0.75 | 0.14s | 0.08s | 0.5x | |
 
 #### CNN: cnn_maxpool (ImageStar)
 
-| Method | Time | Notes |
-|--------|------|-------|
-| exact | skipped | Exponential complexity |
-| approx | 1.70s | MaxPool uses over-approximation |
-| relax-area-0.25 | 3.25s | |
-| relax-area-0.50 | 2.85s | |
-| relax-area-0.75 | 2.40s | |
-| relax-range-0.25 | 3.21s | |
-| relax-range-0.50 | 2.79s | |
-| relax-range-0.75 | 2.23s | |
+| Method | Time | NNV Time | Speedup | Notes |
+|--------|------|----------|---------|-------|
+| exact | skipped | - | - | Exponential complexity |
+| approx | 0.15s | 17.64s | **118x** | MaxPool uses over-approximation |
+| relax-area-0.25 | 1.64s | 17.57s | **11x** | |
+| relax-area-0.50 | 1.24s | 17.14s | **14x** | |
+| relax-area-0.75 | 0.84s | 16.61s | **20x** | |
+| relax-range-0.25 | 1.61s | 17.34s | **11x** | |
+| relax-range-0.50 | 1.20s | 17.00s | **14x** | |
+| relax-range-0.75 | 0.68s | 16.57s | **24x** | |
 
 #### Toy Models
 
@@ -186,18 +187,20 @@ ub = min(image + epsilon, 1)
 ## Command Reference
 
 ```bash
-# Filter options
-python run_benchmarks.py --model fc_mnist       # Specific model
-python run_benchmarks.py --method approx        # Specific method
-python run_benchmarks.py --category cnn         # Category: fc, cnn, toy
+# Basic usage (compares to latest.json, does NOT save)
+python run_benchmarks.py                        # Run all benchmarks
+python run_benchmarks.py --category cnn         # Run CNN benchmarks only
+python run_benchmarks.py --model fc_mnist       # Run specific model
+python run_benchmarks.py --method approx        # Run specific method
 
-# Execution options
+# Save results (updates latest.json baseline)
+python run_benchmarks.py --save                 # Run all and save
+python run_benchmarks.py --category cnn --save  # Run CNN and save
+
+# Other options
 python run_benchmarks.py --include-slow         # Include CNN exact (very slow)
 python run_benchmarks.py --no-warmup            # Skip warmup runs
 python run_benchmarks.py --quiet                # Minimal output
-
-# Comparison
-python run_benchmarks.py --compare latest.json  # Compare to baseline
 ```
 
 ---
@@ -208,3 +211,20 @@ python run_benchmarks.py --compare latest.json  # Compare to baseline
 2. **Warmup**: Each benchmark runs once for warmup before timed run
 3. **Set types**: FC uses Star, CNN uses ImageStar, Toy uses Zono/Box
 4. **Models**: Same as `examples/CompareNNV/` for NNV comparison
+5. **NNV Timings**: Static NNV timing data is stored in `run_benchmarks.py` (see `NNV_TIMINGS` dictionary). Update this after re-running CompareNNV experiments.
+
+---
+
+## Test Environment
+
+Results were obtained on the following hardware:
+
+| Component | Specification |
+|-----------|---------------|
+| CPU | Intel Xeon Gold 6238R @ 2.20GHz |
+| Cores | 112 (logical) |
+| RAM | 504 GB |
+| OS | Linux 5.15.0 |
+| Python | 3.10+ with NumPy, CVXPY |
+
+Note: Timing results may vary on different hardware. The relative speedups between methods and vs NNV should remain consistent.

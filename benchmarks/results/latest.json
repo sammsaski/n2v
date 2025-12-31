@@ -1,10 +1,10 @@
 {
-  "timestamp": "2025-12-31T11:01:57.567429",
+  "timestamp": "2025-12-31T13:29:59.835001",
   "total_benchmarks": 38,
   "skipped": 3,
   "succeeded": 35,
   "failed": 0,
-  "total_time": 63.6119696367532,
+  "total_time": 40.78014335036278,
   "benchmarks": {
     "fc_mnist_exact": {
       "id": 1,
@@ -16,7 +16,7 @@
       "relax_factor": null,
       "category": "fc",
       "success": true,
-      "time": 0.7311430210247636,
+      "time": 0.6575540993362665,
       "num_output_sets": 8,
       "error": null
     },
@@ -30,7 +30,7 @@
       "relax_factor": null,
       "category": "fc",
       "success": true,
-      "time": 0.08948162291198969,
+      "time": 0.021910564973950386,
       "num_output_sets": 1,
       "error": null
     },
@@ -44,7 +44,7 @@
       "relax_factor": 0.25,
       "category": "fc",
       "success": true,
-      "time": 0.21025462914258242,
+      "time": 0.1769016059115529,
       "num_output_sets": 1,
       "error": null
     },
@@ -58,7 +58,7 @@
       "relax_factor": 0.5,
       "category": "fc",
       "success": true,
-      "time": 0.10391996102407575,
+      "time": 0.07016786700114608,
       "num_output_sets": 1,
       "error": null
     },
@@ -72,7 +72,7 @@
       "relax_factor": 0.75,
       "category": "fc",
       "success": true,
-      "time": 0.04642181424424052,
+      "time": 0.01229109289124608,
       "num_output_sets": 1,
       "error": null
     },
@@ -86,7 +86,7 @@
       "relax_factor": 0.25,
       "category": "fc",
       "success": true,
-      "time": 0.2174700810573995,
+      "time": 0.1774087380617857,
       "num_output_sets": 1,
       "error": null
     },
@@ -100,7 +100,7 @@
       "relax_factor": 0.5,
       "category": "fc",
       "success": true,
-      "time": 0.10184266837313771,
+      "time": 0.06808946514502168,
       "num_output_sets": 1,
       "error": null
     },
@@ -114,7 +114,7 @@
       "relax_factor": 0.75,
       "category": "fc",
       "success": true,
-      "time": 0.046401023864746094,
+      "time": 0.012362891342490911,
       "num_output_sets": 1,
       "error": null
     },
@@ -128,7 +128,7 @@
       "relax_factor": null,
       "category": "fc",
       "success": true,
-      "time": 0.09404176101088524,
+      "time": 0.06616077944636345,
       "num_output_sets": 2,
       "error": null
     },
@@ -142,7 +142,7 @@
       "relax_factor": null,
       "category": "fc",
       "success": true,
-      "time": 0.03209568886086345,
+      "time": 0.008427603635936975,
       "num_output_sets": 1,
       "error": null
     },
@@ -156,7 +156,7 @@
       "relax_factor": null,
       "category": "cnn",
       "success": true,
-      "time": 0.41328941797837615,
+      "time": 0.08620080491527915,
       "num_output_sets": 1,
       "error": null
     },
@@ -170,7 +170,7 @@
       "relax_factor": 0.25,
       "category": "cnn",
       "success": true,
-      "time": 7.86398217221722,
+      "time": 7.575527078006417,
       "num_output_sets": 1,
       "error": null
     },
@@ -184,7 +184,7 @@
       "relax_factor": 0.5,
       "category": "cnn",
       "success": true,
-      "time": 5.292838415596634,
+      "time": 5.087858765386045,
       "num_output_sets": 1,
       "error": null
     },
@@ -198,7 +198,7 @@
       "relax_factor": 0.75,
       "category": "cnn",
       "success": true,
-      "time": 2.836087256204337,
+      "time": 2.6532499762251973,
       "num_output_sets": 1,
       "error": null
     },
@@ -212,7 +212,7 @@
       "relax_factor": 0.25,
       "category": "cnn",
       "success": true,
-      "time": 7.782653173897415,
+      "time": 7.744882215745747,
       "num_output_sets": 1,
       "error": null
     },
@@ -226,7 +226,7 @@
       "relax_factor": 0.5,
       "category": "cnn",
       "success": true,
-      "time": 5.359974649734795,
+      "time": 5.160444534383714,
       "num_output_sets": 1,
       "error": null
     },
@@ -240,7 +240,7 @@
       "relax_factor": 0.75,
       "category": "cnn",
       "success": true,
-      "time": 2.824773829896003,
+      "time": 2.589053512085229,
       "num_output_sets": 1,
       "error": null
     },
@@ -254,7 +254,7 @@
       "relax_factor": null,
       "category": "cnn",
       "success": true,
-      "time": 1.5961873391643167,
+      "time": 0.15540882432833314,
       "num_output_sets": 1,
       "error": null
     },
@@ -268,7 +268,7 @@
       "relax_factor": 0.25,
       "category": "cnn",
       "success": true,
-      "time": 1.6425543599762022,
+      "time": 0.15703341690823436,
       "num_output_sets": 1,
       "error": null
     },
@@ -282,7 +282,7 @@
       "relax_factor": 0.5,
       "category": "cnn",
       "success": true,
-      "time": 1.5701384842395782,
+      "time": 0.11233162507414818,
       "num_output_sets": 1,
       "error": null
     },
@@ -296,7 +296,7 @@
       "relax_factor": 0.75,
       "category": "cnn",
       "success": true,
-      "time": 1.5656613470055163,
+      "time": 0.08040398312732577,
       "num_output_sets": 1,
       "error": null
     },
@@ -310,7 +310,7 @@
       "relax_factor": 0.25,
       "category": "cnn",
       "success": true,
-      "time": 1.6293306350708008,
+      "time": 0.15210154000669718,
       "num_output_sets": 1,
       "error": null
     },
@@ -324,7 +324,7 @@
       "relax_factor": 0.5,
       "category": "cnn",
       "success": true,
-      "time": 1.5686366939917207,
+      "time": 0.11797945201396942,
       "num_output_sets": 1,
       "error": null
     },
@@ -338,7 +338,7 @@
       "relax_factor": 0.75,
       "category": "cnn",
       "success": true,
-      "time": 1.5701166801154613,
+      "time": 0.1104782810434699,
       "num_output_sets": 1,
       "error": null
     },
@@ -352,7 +352,7 @@
       "relax_factor": null,
       "category": "cnn",
       "success": true,
-      "time": 1.7010924499481916,
+      "time": 0.1820343192666769,
       "num_output_sets": 1,
       "error": null
     },
@@ -366,7 +366,7 @@
       "relax_factor": 0.25,
       "category": "cnn",
       "success": true,
-      "time": 3.2529560308903456,
+      "time": 1.7414676691405475,
       "num_output_sets": 1,
       "error": null
     },
@@ -380,7 +380,7 @@
       "relax_factor": 0.5,
       "category": "cnn",
       "success": true,
-      "time": 2.8452177620492876,
+      "time": 1.3049631700851023,
       "num_output_sets": 1,
       "error": null
     },
@@ -394,7 +394,7 @@
       "relax_factor": 0.75,
       "category": "cnn",
       "success": true,
-      "time": 2.396521240938455,
+      "time": 0.8540458418428898,
       "num_output_sets": 1,
       "error": null
     },
@@ -408,7 +408,7 @@
       "relax_factor": 0.25,
       "category": "cnn",
       "success": true,
-      "time": 3.2138297841884196,
+      "time": 1.6903336960822344,
       "num_output_sets": 1,
       "error": null
     },
@@ -422,7 +422,7 @@
       "relax_factor": 0.5,
       "category": "cnn",
       "success": true,
-      "time": 2.786838232073933,
+      "time": 1.265489290934056,
       "num_output_sets": 1,
       "error": null
     },
@@ -436,7 +436,7 @@
       "relax_factor": 0.75,
       "category": "cnn",
       "success": true,
-      "time": 2.225466342177242,
+      "time": 0.6868180492892861,
       "num_output_sets": 1,
       "error": null
     },
@@ -450,7 +450,7 @@
       "relax_factor": null,
       "category": "toy",
       "success": true,
-      "time": 0.00013524899259209633,
+      "time": 0.0001367093063890934,
       "num_output_sets": 1,
       "error": null
     },
@@ -464,7 +464,7 @@
       "relax_factor": null,
       "category": "toy",
       "success": true,
-      "time": 0.00024406937882304192,
+      "time": 0.0002460898831486702,
       "num_output_sets": 1,
       "error": null
     },
@@ -478,7 +478,7 @@
       "relax_factor": null,
       "category": "toy",
       "success": true,
-      "time": 0.0001279851421713829,
+      "time": 0.00012702681124210358,
       "num_output_sets": 1,
       "error": null
     },
@@ -492,7 +492,7 @@
       "relax_factor": null,
       "category": "toy",
       "success": true,
-      "time": 0.00024376437067985535,
+      "time": 0.00025277072563767433,
       "num_output_sets": 1,
       "error": null
     }

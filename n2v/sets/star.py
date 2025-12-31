@@ -540,41 +540,54 @@ class Star:
             # Fall back to LP
             return self.get_range(index)
 
-        # Estimate using interval arithmetic on predicate bounds
+        # Use vectorized computation for single dimension
         c = self.V[index, 0]
-        generators = self.V[index, 1:]
+        generators = self.V[index, 1:]  # Shape: (nVar,)
 
-        # For each generator, compute its contribution range
-        lb_contrib = 0.0
-        ub_contrib = 0.0
+        pred_lb_flat = self.predicate_lb.flatten()
+        pred_ub_flat = self.predicate_ub.flatten()
 
-        for i, g in enumerate(generators):
-            alpha_min = self.predicate_lb[i, 0]
-            alpha_max = self.predicate_ub[i, 0]
+        # Separate positive and negative generators
+        pos_gens = np.maximum(generators, 0)
+        neg_gens = np.minimum(generators, 0)
 
-            if g >= 0:
-                lb_contrib += g * alpha_min
-                ub_contrib += g * alpha_max
-            else:
-                lb_contrib += g * alpha_max
-                ub_contrib += g * alpha_min
+        # lb = c + pos_gens @ pred_lb + neg_gens @ pred_ub
+        # ub = c + pos_gens @ pred_ub + neg_gens @ pred_lb
+        lb = c + np.dot(pos_gens, pred_lb_flat) + np.dot(neg_gens, pred_ub_flat)
+        ub = c + np.dot(pos_gens, pred_ub_flat) + np.dot(neg_gens, pred_lb_flat)
 
-        return c + lb_contrib, c + ub_contrib
+        return float(lb), float(ub)
 
     def estimate_ranges(self) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Fast over-approximate ranges for all dimensions.
+        Fast over-approximate ranges for all dimensions using vectorized operations.
 
+        Uses matrix operations instead of loops for efficiency.
         Also stores results in state_lb and state_ub for convenience.
 
         Returns:
-            Tuple of (lb, ub) arrays
+            Tuple of (lb, ub) arrays, each shape (dim, 1)
         """
-        lb = np.zeros((self.dim, 1))
-        ub = np.zeros((self.dim, 1))
+        if self.predicate_lb is None or self.predicate_ub is None:
+            # Fall back to LP-based computation
+            return self.get_ranges()
 
-        for i in range(self.dim):
-            lb[i], ub[i] = self.estimate_range(i)
+        # Extract center and generators
+        center = self.V[:, 0:1]           # Shape: (dim, 1)
+        generators = self.V[:, 1:]        # Shape: (dim, nVar)
+
+        pred_lb_flat = self.predicate_lb.flatten()  # Shape: (nVar,)
+        pred_ub_flat = self.predicate_ub.flatten()  # Shape: (nVar,)
+
+        # Separate positive and negative parts of generators
+        pos_gens = np.maximum(generators, 0)  # Shape: (dim, nVar)
+        neg_gens = np.minimum(generators, 0)  # Shape: (dim, nVar)
+
+        # Vectorized computation using matrix multiplication
+        # lb = center + pos_gens @ pred_lb + neg_gens @ pred_ub
+        # ub = center + pos_gens @ pred_ub + neg_gens @ pred_lb
+        lb = center + (pos_gens @ pred_lb_flat + neg_gens @ pred_ub_flat).reshape(-1, 1)
+        ub = center + (pos_gens @ pred_ub_flat + neg_gens @ pred_lb_flat).reshape(-1, 1)
 
         # Store in state attributes for later use
         self.state_lb = lb
