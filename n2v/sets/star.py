@@ -374,6 +374,62 @@ class Star:
 
         return xmin, xmax
 
+    def get_min(self, index: int, lp_solver: str = 'default') -> Optional[float]:
+        """
+        Compute exact minimum at specific dimension using LP.
+
+        More efficient than get_range() when only the minimum is needed,
+        as it only solves one LP instead of two.
+
+        Args:
+            index: Dimension index (0-based)
+            lp_solver: LP solver to use
+
+        Returns:
+            Minimum value, or None if infeasible
+        """
+        if index < 0 or index >= self.dim:
+            raise ValueError(f"Invalid index {index}, dimension is {self.dim}")
+
+        # Define LP: min f^T * alpha subject to C * alpha <= d
+        f = self.V[index, 1:].reshape(-1, 1)
+
+        xmin = self._solve_lp(f, minimize=True, lp_solver=lp_solver)
+
+        if xmin is None:
+            return None
+
+        # Add constant term
+        return xmin + self.V[index, 0]
+
+    def get_max(self, index: int, lp_solver: str = 'default') -> Optional[float]:
+        """
+        Compute exact maximum at specific dimension using LP.
+
+        More efficient than get_range() when only the maximum is needed,
+        as it only solves one LP instead of two.
+
+        Args:
+            index: Dimension index (0-based)
+            lp_solver: LP solver to use
+
+        Returns:
+            Maximum value, or None if infeasible
+        """
+        if index < 0 or index >= self.dim:
+            raise ValueError(f"Invalid index {index}, dimension is {self.dim}")
+
+        # Define LP: max f^T * alpha subject to C * alpha <= d
+        f = self.V[index, 1:].reshape(-1, 1)
+
+        xmax = self._solve_lp(f, minimize=False, lp_solver=lp_solver)
+
+        if xmax is None:
+            return None
+
+        # Add constant term
+        return xmax + self.V[index, 0]
+
     def get_ranges(self, lp_solver: str = 'default', parallel: bool = None,
                    n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
         """

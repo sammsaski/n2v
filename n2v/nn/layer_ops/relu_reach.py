@@ -952,7 +952,8 @@ def _get_maxs(star: Star, indices: np.ndarray, lp_solver: str = 'default') -> np
     xmax = np.zeros(n)
 
     for i, idx in enumerate(indices):
-        _, xmax[i] = star.get_range(int(idx), lp_solver)
+        result = star.get_max(int(idx), lp_solver)
+        xmax[i] = result if result is not None else 0.0
 
     return xmax
 
@@ -975,7 +976,8 @@ def _get_mins(star: Star, indices: np.ndarray, lp_solver: str = 'default') -> np
     xmin = np.zeros(n)
 
     for i, idx in enumerate(indices):
-        xmin[i], _ = star.get_range(int(idx), lp_solver)
+        result = star.get_min(int(idx), lp_solver)
+        xmin[i] = result if result is not None else 0.0
 
     return xmin
 
