@@ -8,7 +8,7 @@ The test suite is organized into two categories:
 
 ### 1. Unit Tests (`unit/`)
 
-**~550 tests** that verify correct implementation and edge case handling.
+**~480 tests** that verify correct implementation and edge case handling.
 
 These tests check that:
 - Code compiles and runs without errors
@@ -23,17 +23,9 @@ These tests check that:
 - `utils/` - Tests for VNN-LIB parsing and differentiable solvers
 - `integration/` - Integration tests for complete workflows
 
-**Skipped tests** (~14 total): Tests for features not yet implemented:
-- `Box.contains()` - Point containment check for Box sets
-- `Box.intersect()` - Box-box intersection
-- `Box.union()` - Box-box union
-- `Zono.reduce_order()` - Generator order reduction for Zonotopes
-
-These can be implemented in the future as needed.
-
 ### 2. Soundness Tests (`soundness/`)
 
-**~100 tests** (all passing) that verify mathematical correctness and soundness properties.
+**~190 tests** (all passing) that verify mathematical correctness and soundness properties.
 
 These tests check that:
 - Operations produce mathematically correct results
@@ -59,7 +51,7 @@ See [soundness/README.md](soundness/README.md) for detailed methodology.
 ### Quick Start
 
 ```bash
-# Run all tests (unit + soundness, ~650 passing)
+# Run all tests (unit + soundness, ~670 passing)
 pytest tests/
 
 # Run with verbose output
@@ -72,10 +64,10 @@ pytest tests/ -q
 ### Test Categories
 
 ```bash
-# Run only unit tests (~550 tests)
+# Run only unit tests (~480 tests)
 pytest tests/unit/
 
-# Run only soundness tests (~100 tests)
+# Run only soundness tests (~190 tests)
 pytest tests/soundness/
 ```
 

@@ -57,7 +57,6 @@ class TestZono:
         assert ub.shape == (simple_zono.dim, 1)
         assert np.all(lb <= ub)
 
-    @pytest.mark.skip(reason="Zono.reduce_order() not implemented yet")
     def test_order_reduction(self):
         """Test order reduction."""
         # Create high-order zonotope
@@ -568,7 +567,6 @@ class TestZono:
         np.testing.assert_allclose(hull_lb, orig_lb, atol=1e-6)
         np.testing.assert_allclose(hull_ub, orig_ub, atol=1e-6)
 
-    @pytest.mark.skip(reason="Bug in Zono.get_vertices() implementation - alpha needs reshaping")
     def test_get_vertices_small(self):
         """Test vertex enumeration for small zonotope."""
         c = np.array([[0.0], [0.0]])
@@ -599,7 +597,6 @@ class TestZono:
     # Utility Tests
     # ========================================================================
 
-    @pytest.mark.skip(reason="Bug: Zono constructor always converts to float64, overriding astype()")
     def test_change_vars_precision_to_float32(self):
         """Test conversion to float32."""
         c = np.array([[1.0], [2.0]], dtype=np.float64)

@@ -565,14 +565,14 @@ pytest tests/unit/sets/test_star.py::TestStar::test_from_bounds -v
 tests/
 ├── conftest.py              # Shared fixtures and helpers
 │
-├── unit/                    # Unit tests (~550 tests)
+├── unit/                    # Unit tests (~480 tests)
 │   ├── sets/                # Set representation tests (Star, Zono, Box, etc.)
 │   ├── layer_ops/           # Layer operation tests (linear, relu, conv2d, etc.)
 │   ├── core/                # Core functionality tests (dispatcher, parallel)
 │   ├── utils/               # Utility tests (VNN-LIB parsing, solvers)
 │   └── integration/         # End-to-end verification tests
 │
-└── soundness/               # Soundness tests (~100 tests)
+└── soundness/               # Soundness tests (~190 tests)
     ├── test_soundness_linear.py     # Linear layer soundness
     ├── test_soundness_relu.py       # ReLU activation soundness
     ├── test_soundness_conv2d.py     # Conv2D soundness
@@ -645,11 +645,11 @@ open htmlcov/index.html
 
 ### Current Test Status
 
-- **Total**: 657 passing, 14 skipped
+- **Total**: 670 passing, 1 skipped
 - Unit tests cover sets, layer operations, dispatcher, VNN-LIB parsing, and integration
 - Soundness tests verify mathematical correctness of all layer implementations
 
-Skipped tests are for features not yet implemented (e.g., `Box.contains()`, `Box.intersect()`, `Box.union()`, `Zono.reduce_order()`). These can be implemented in the future as needed.
+The single skipped test is for Conv2d with Zonotope sets (not yet implemented).
 
 ---
 

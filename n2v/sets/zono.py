@@ -50,9 +50,13 @@ class Zono:
             self.V = np.array([]).reshape(0, 0)
             self.dim = 0
         elif c is not None and V is not None:
-            # Full constructor
-            c = np.asarray(c, dtype=np.float64)
-            V = np.asarray(V, dtype=np.float64)
+            # Full constructor - preserve dtype if float, otherwise default to float64
+            c = np.asarray(c)
+            V = np.asarray(V)
+            if not np.issubdtype(c.dtype, np.floating):
+                c = c.astype(np.float64)
+            if not np.issubdtype(V.dtype, np.floating):
+                V = V.astype(np.float64)
 
             # Ensure c is column vector
             if c.ndim == 1:
@@ -264,6 +268,36 @@ class Zono:
         new_V = np.hstack([V_kept, V_hull])
         return Zono(self.c, new_V)
 
+    def reduce_order(self, target_order: int) -> 'Zono':
+        """
+        Reduce zonotope to target order (generators per dimension).
+
+        Order = n_generators / dim. Target order of k means at most k*dim generators.
+
+        The reduction keeps the largest generators and over-approximates the
+        removed ones with an interval hull. Since the hull can add up to dim
+        generators, we keep (target_order - 1) * dim generators to ensure the
+        final result has at most target_order * dim generators.
+
+        Args:
+            target_order: Target order (max generators = target_order * dim)
+
+        Returns:
+            New Zono with at most target_order * dim generators
+        """
+        if target_order < 1:
+            raise ValueError(f"target_order must be >= 1, got {target_order}")
+
+        # Current order
+        current_order = self.V.shape[1] / self.dim if self.dim > 0 else 0
+        if current_order <= target_order:
+            return Zono(self.c.copy(), self.V.copy())
+
+        # Keep (target_order - 1) * dim generators, hull adds up to dim more
+        # This ensures final result has at most target_order * dim generators
+        n_keep = max(self.dim, (target_order - 1) * self.dim)
+        return self.order_reduction_box(n_keep)
+
     # ======================== Conversion Methods ========================
 
     def to_star(self) -> 'Star':
@@ -469,9 +503,9 @@ class Zono:
         for i in range(n_vertices):
             # Convert i to binary: 0 -> -1, 1 -> +1
             binary = np.array([(i >> j) & 1 for j in range(n_gens)])
-            alpha = 2 * binary - 1  # Map {0, 1} to {-1, +1}
+            alpha = (2 * binary - 1).reshape(-1, 1)  # Map {0, 1} to {-1, +1}, column vector
 
-            # Compute vertex
+            # Compute vertex: c is (dim, 1), V @ alpha is (dim, 1)
             vertices[:, i] = (self.c + self.V @ alpha).flatten()
 
         return vertices

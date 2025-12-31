@@ -308,6 +308,75 @@ class Box:
         hull_ub = np.maximum(self.ub, other.ub)
         return Box(hull_lb, hull_ub)
 
+    def contains(self, point: np.ndarray) -> bool:
+        """
+        Check if a point is contained in the box.
+
+        Args:
+            point: Point to check, shape (dim,) or (dim, 1)
+
+        Returns:
+            True if point is inside the box (inclusive of boundaries)
+
+        Raises:
+            ValueError: If point dimension doesn't match box dimension
+        """
+        point = np.asarray(point, dtype=np.float64)
+        if point.ndim == 1:
+            point = point.reshape(-1, 1)
+
+        if point.shape[0] != self.dim:
+            raise ValueError(
+                f"Point dimension {point.shape[0]} doesn't match box dimension {self.dim}"
+            )
+
+        return bool(np.all(point >= self.lb) and np.all(point <= self.ub))
+
+    def intersect(self, other: 'Box') -> Optional['Box']:
+        """
+        Compute the intersection of two boxes.
+
+        Args:
+            other: Another Box of the same dimension
+
+        Returns:
+            New Box representing the intersection, or None if boxes don't intersect
+
+        Raises:
+            ValueError: If dimensions don't match
+        """
+        if self.dim != other.dim:
+            raise ValueError(
+                f"Dimension mismatch: self has dim {self.dim}, other has dim {other.dim}"
+            )
+
+        new_lb = np.maximum(self.lb, other.lb)
+        new_ub = np.minimum(self.ub, other.ub)
+
+        # Check if intersection is empty
+        if np.any(new_lb > new_ub):
+            return None
+
+        return Box(new_lb, new_ub)
+
+    def union(self, other: 'Box') -> 'Box':
+        """
+        Compute the union of two boxes (over-approximation).
+
+        Since the exact union of two boxes is not necessarily a box,
+        this returns the smallest box containing both (same as convex_hull).
+
+        Args:
+            other: Another Box of the same dimension
+
+        Returns:
+            New Box representing the bounding box of the union
+
+        Raises:
+            ValueError: If dimensions don't match
+        """
+        return self.convex_hull(other)
+
     # ======================== Static Methods ========================
 
     @staticmethod

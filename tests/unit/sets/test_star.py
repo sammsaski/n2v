@@ -797,7 +797,6 @@ class TestStar:
         np.testing.assert_array_equal(result.C[:original_C_rows, :], star.C)
         np.testing.assert_array_equal(result.d[:original_C_rows, :], star.d)
 
-    @pytest.mark.skip(reason="Bug in convex_hull implementation - dimension mismatch in C_extra")
     def test_convex_hull(self):
         """Test convex hull over-approximation of two Stars."""
         # Create two box Stars
@@ -828,7 +827,6 @@ class TestStar:
         assert np.all(result_lb <= expected_lb + 1e-6)
         assert np.all(result_ub >= expected_ub - 1e-6)
 
-    @pytest.mark.skip(reason="Bug in convex_hull implementation - dimension mismatch in C_extra")
     def test_convex_hull_overlapping(self):
         """Test convex hull of overlapping Stars."""
         # Star1: [0,1] × [0,1]
@@ -852,8 +850,6 @@ class TestStar:
         assert result_ub[0] >= 1.5 - 1e-6
         assert result_ub[1] >= 1.5 - 1e-6
 
-    @pytest.mark.skip(reason="Bug in convex_hull implementation")
-    @pytest.mark.skip(reason="Bug in convex_hull implementation - dimension mismatch in C_extra")
     def test_convex_hull_identical(self):
         """Test convex hull of identical Stars."""
         lb = np.array([[0.0], [0.0]])
@@ -872,7 +868,6 @@ class TestStar:
         assert result_ub[0] >= 1.0 - 1e-6
         assert result_ub[1] >= 1.0 - 1e-6
 
-    @pytest.mark.skip(reason="Bug in convex_hull implementation - dimension mismatch in C_extra")
     def test_convex_hull_1d(self):
         """Test convex hull in 1D."""
         # Star1: [0,1]
@@ -894,7 +889,6 @@ class TestStar:
         assert result_lb[0] <= 0.0 + 1e-6
         assert result_ub[0] >= 4.0 - 1e-6
 
-    @pytest.mark.skip(reason="Bug in convex_hull implementation - dimension mismatch in C_extra")
     def test_convex_hull_3d(self):
         """Test convex hull in 3D."""
         # Star1: [0,1]³
@@ -916,7 +910,6 @@ class TestStar:
         assert np.all(result_lb <= np.array([[0.0], [0.0], [0.0]]) + 1e-6)
         assert np.all(result_ub >= np.array([[3.0], [3.0], [3.0]]) - 1e-6)
 
-    @pytest.mark.skip(reason="Bug in convex_hull implementation - dimension mismatch in C_extra")
     def test_convex_hull_point_containment(self):
         """Test that convex hull contains points from both original Stars."""
         # Star1: [0,1] × [0,1]
@@ -942,7 +935,6 @@ class TestStar:
         # Midpoint: [2.0, 2.0]
         assert result.contains(np.array([[2.0], [2.0]]))
 
-    @pytest.mark.skip(reason="Bug in convex_hull implementation - dimension mismatch in C_extra")
     def test_convex_hull_structure(self):
         """Test that convex hull has correct internal structure."""
         lb1 = np.array([[0.0], [0.0]])

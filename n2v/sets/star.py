@@ -295,19 +295,27 @@ class Star:
             [new_c, self.V[:, 1:], other.V[:, 1:], 0.5 * (self.V[:, 0:1] - other.V[:, 0:1])]
         )
 
-        # Combine constraints
-        new_C = block_diag(self.C, other.C)
+        # Number of predicate variables in new star
+        n_new_var = new_V.shape[1] - 1  # self.nVar + other.nVar + 1
+
+        # Combine constraints from both stars
+        # block_diag creates a matrix where:
+        # - First self.nVar columns constrain self's predicates
+        # - Next other.nVar columns constrain other's predicates
+        # We need to pad with zeros for the new lambda variable
+        C_block = block_diag(self.C, other.C)
+        # Pad with zeros for the lambda column
+        C_block_padded = np.hstack([C_block, np.zeros((C_block.shape[0], 1))])
         new_d = np.vstack([self.d, other.d])
 
-        # Add constraint for convex combination parameter
-        # This is an over-approximation
-        n_new_var = new_V.shape[1] - 1
+        # Add constraint for convex combination parameter lambda
+        # -1 <= lambda <= 1
         C_extra = np.zeros((2, n_new_var))
-        C_extra[0, -1] = 1  # lambda <= 1
-        C_extra[1, -1] = -1  # lambda >= -1
+        C_extra[0, -1] = 1   # lambda <= 1
+        C_extra[1, -1] = -1  # -lambda <= 1 (i.e., lambda >= -1)
         d_extra = np.ones((2, 1))
 
-        new_C = np.vstack([new_C, C_extra])
+        new_C = np.vstack([C_block_padded, C_extra])
         new_d = np.vstack([new_d, d_extra])
 
         return Star(new_V, new_C, new_d)

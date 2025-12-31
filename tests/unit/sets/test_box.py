@@ -64,7 +64,6 @@ class TestBox:
         np.testing.assert_array_equal(lb_get, lb_est)
         np.testing.assert_array_equal(ub_get, ub_est)
 
-    @pytest.mark.skip(reason="Box.contains() not implemented yet")
     def test_contains_point(self, simple_box):
         """Test point containment."""
         point_in = np.array([[0.5], [0.5], [0.5]])
@@ -73,7 +72,6 @@ class TestBox:
         assert simple_box.contains(point_in)
         assert not simple_box.contains(point_out)
 
-    @pytest.mark.skip(reason="Box.intersect() not implemented yet")
     def test_intersection(self):
         """Test box intersection."""
         box1 = Box(np.array([[0.0], [0.0]]), np.array([[1.0], [1.0]]))
@@ -85,7 +83,6 @@ class TestBox:
         np.testing.assert_array_equal(result.lb, np.array([[0.5], [0.5]]))
         np.testing.assert_array_equal(result.ub, np.array([[1.0], [1.0]]))
 
-    @pytest.mark.skip(reason="Box.union() not implemented yet")
     def test_union(self):
         """Test box union (overapproximation)."""
         box1 = Box(np.array([[0.0], [0.0]]), np.array([[0.5], [0.5]]))
