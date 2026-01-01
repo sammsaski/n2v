@@ -155,6 +155,40 @@ Layer 3/8: AvgPool1 (AvgPool2d)
 
 ---
 
+### ACAS Xu VNN-COMP Benchmark
+
+#### `ACASXu/`
+**What it demonstrates**:
+- VNN-COMP 2025 benchmark verification
+- Falsification with random sampling and PGD
+- ONNX model loading with VNN-LIB properties
+- Two-stage verification strategy (approx → exact)
+
+**Contents**:
+- `verify_acasxu.py` - Interactive verification with all set types
+- `run_instance.py` - VNN-COMP strategy for single instances
+- `run_benchmark.sh` - Full 186-instance benchmark runner
+- `onnx/` - 45 ACAS Xu neural networks
+- `vnnlib/` - 10 property specifications
+
+**Run**:
+```bash
+cd ACASXu
+
+# Interactive verification
+python verify_acasxu.py onnx/ACASXU_run2a_1_1_batch_2000.onnx vnnlib/prop_1.vnnlib
+
+# Single instance with VNN-COMP strategy
+python run_instance.py onnx/ACASXU_run2a_1_1_batch_2000.onnx vnnlib/prop_1.vnnlib
+
+# Full benchmark (requires conda activate n2v)
+./run_benchmark.sh --timeout 120 --falsify-method random+pgd
+```
+
+See [ACASXu/README.md](ACASXu/README.md) for complete documentation.
+
+---
+
 ## Performance Comparison
 
 ### MaxPool2D vs AvgPool2D

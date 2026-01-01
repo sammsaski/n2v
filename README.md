@@ -17,6 +17,7 @@ Python implementation of the Neural Network Verification (NNV) tool, supporting 
 - [Reachability Methods](#reachability-methods)
 - [CNN Verification](#cnn-verification)
 - [Examples](#examples)
+- [Falsification](#falsification)
 - [Performance Tips](#performance-tips)
 - [Testing](#testing)
 - [API Reference](#api-reference)
@@ -419,6 +420,9 @@ See [`examples/`](examples/) directory for complete examples:
 - **`mnist_cnn_maxpool_verification.py`** - CNN with MaxPool2D
 - **`mnist_cnn_avgpool_verification.py`** - CNN with AvgPool2D ⭐ (recommended!)
 
+### Benchmark Examples
+- **`ACASXu/`** - VNN-COMP 2025 ACAS Xu benchmark (186 instances)
+
 ### Running Examples
 
 ```bash
@@ -429,9 +433,51 @@ python simple_verification.py
 
 # CNN with AvgPool (fastest!)
 python mnist_cnn_avgpool_verification.py
+
+# ACAS Xu VNN-COMP benchmark
+cd ACASXu
+./run_benchmark.sh --timeout 120 --falsify-method random+pgd
 ```
 
 See [examples/README.md](examples/README.md) for detailed documentation.
+
+---
+
+## Falsification
+
+Before running expensive reachability analysis, n2v can attempt to quickly find counterexamples using falsification techniques.
+
+### Available Methods
+
+| Method | Description | Speed |
+|--------|-------------|-------|
+| `random` | Uniform random sampling | Fast |
+| `pgd` | Projected Gradient Descent | Moderate |
+| `random+pgd` | Random first, then PGD | Combined |
+
+### Usage
+
+```python
+from n2v.utils import falsify
+
+# Try to find a counterexample via random sampling
+result, counterexample = falsify(model, lb, ub, property_spec, method='random', n_samples=500)
+
+# Use PGD for targeted search
+result, counterexample = falsify(model, lb, ub, property_spec, method='pgd', n_restarts=10, n_steps=50)
+
+# Combined approach: random first, then PGD
+result, counterexample = falsify(model, lb, ub, property_spec, method='random+pgd')
+
+# Check result
+if result == 0:  # SAT - counterexample found
+    inp, out = counterexample
+    print(f"Found counterexample: input={inp}, output={out}")
+elif result == 2:  # UNKNOWN - no counterexample found, need verification
+    print("No counterexample found, running reachability analysis...")
+```
+
+**Note**: Falsification assumes hyperbox input sets (axis-aligned bounds `[lb, ub]`).
 
 ---
 
