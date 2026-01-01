@@ -24,7 +24,7 @@ ACAS Xu (Airborne Collision Avoidance System X for Unmanned Aircraft) is a safet
 **`verify_acasxu.py`** - Generalized verification script supporting all set types (Box, Zono, Star, Hexatope, Octatope). Provides detailed output including input/output bounds, timing breakdowns, and step-by-step progress. Best for interactive exploration and comparing different verification approaches.
 
 **`run_instance.py`** - Implements NNV's VNN-COMP 2025 strategy:
-1. Falsification via random sampling (500 samples)
+1. Falsification (random sampling, PGD, or both)
 2. Two-stage verification for prop_3/4 (approx first, then exact if needed)
 3. Exact verification for other properties
 
@@ -72,6 +72,14 @@ python run_instance.py onnx/ACASXU_run2a_2_1_batch_2000.onnx vnnlib/prop_2.vnnli
 # With custom workers and falsification samples
 python run_instance.py onnx/ACASXU_run2a_3_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
   --workers 8 --falsify-samples 1000
+
+# Using PGD falsification
+python run_instance.py onnx/ACASXU_run2a_2_1_batch_2000.onnx vnnlib/prop_2.vnnlib \
+  --falsify-method pgd --pgd-restarts 20 --pgd-steps 100
+
+# Combined: random sampling first, then PGD
+python run_instance.py onnx/ACASXU_run2a_2_1_batch_2000.onnx vnnlib/prop_2.vnnlib \
+  --falsify-method random+pgd
 ```
 
 ### Full Benchmark
@@ -96,6 +104,12 @@ conda activate n2v
 
 # Custom output file
 ./run_benchmark.sh --csv results/my_results.csv
+
+# Use PGD falsification
+./run_benchmark.sh --falsify-method pgd
+
+# Combined falsification with custom PGD settings
+./run_benchmark.sh --falsify-method random+pgd --pgd-restarts 20 --pgd-steps 100
 ```
 
 #### Benchmark Options
@@ -104,7 +118,10 @@ conda activate n2v
 |--------|-------------|---------|
 | `--timeout N` | Timeout per instance in seconds | 120 |
 | `--workers N` | Number of parallel workers | CPU count |
-| `--falsify-samples N` | Falsification samples | 500 |
+| `--falsify-method M` | Falsification method: random, pgd, random+pgd | random |
+| `--falsify-samples N` | Random falsification samples | 500 |
+| `--pgd-restarts N` | PGD restarts | 10 |
+| `--pgd-steps N` | PGD steps per restart | 50 |
 | `--property N` | Only run property N (1-10) | All |
 | `--subset N` | Run N randomly selected instances | All |
 | `--csv FILE` | Output CSV file | results/benchmark_results.csv |

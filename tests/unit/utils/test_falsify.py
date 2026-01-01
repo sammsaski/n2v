@@ -1,5 +1,5 @@
 """
-Unit tests for falsification via random sampling.
+Unit tests for falsification techniques.
 """
 
 import pytest
@@ -11,54 +11,48 @@ from n2v.utils import falsify
 from n2v.sets import HalfSpace
 
 
-class TestFalsify:
-    """Tests for the falsify function."""
+class TestFalsifyRandom:
+    """Tests for random sampling falsification (method='random')."""
 
-    def test_falsify_finds_counterexample(self):
-        """Test that falsify finds a counterexample when one exists."""
-        # Simple model: identity
+    def test_finds_counterexample(self):
+        """Test that random sampling finds a counterexample when one exists."""
         model = nn.Sequential(nn.Linear(2, 2, bias=False))
         model[0].weight.data = torch.eye(2)
 
-        # Input bounds: [0, 1] x [0, 1]
         lb = np.array([0.0, 0.0])
         ub = np.array([1.0, 1.0])
 
-        # Property: output[0] > 0.5 is unsafe (i.e., x[0] > 0.5 is unsafe)
-        # HalfSpace: -x[0] <= -0.5 means x[0] >= 0.5
+        # Property: output[0] >= 0.5 is unsafe
         G = np.array([[-1.0, 0.0]])
         g = np.array([-0.5])
         hs = HalfSpace(G, g)
 
-        result, cex = falsify(model, lb, ub, hs, n_samples=100, seed=42)
+        result, cex = falsify(model, lb, ub, hs, method='random', n_samples=100, seed=42)
 
         assert result == 0, "Should find counterexample (SAT)"
         assert cex is not None, "Counterexample should be returned"
         inp, out = cex
         assert inp[0] >= 0.5, "Counterexample input should satisfy property"
 
-    def test_falsify_no_counterexample(self):
-        """Test that falsify returns UNKNOWN when no counterexample exists in samples."""
-        # Simple model: identity
+    def test_no_counterexample(self):
+        """Test that random sampling returns UNKNOWN when no counterexample exists."""
         model = nn.Sequential(nn.Linear(2, 2, bias=False))
         model[0].weight.data = torch.eye(2)
 
-        # Input bounds: [0, 0.4] x [0, 0.4]
         lb = np.array([0.0, 0.0])
         ub = np.array([0.4, 0.4])
 
-        # Property: output[0] > 0.5 is unsafe
-        # Since inputs are in [0, 0.4], outputs will be in [0, 0.4], never > 0.5
+        # Property: output[0] >= 0.5 is unsafe (but inputs never reach 0.5)
         G = np.array([[-1.0, 0.0]])
         g = np.array([-0.5])
         hs = HalfSpace(G, g)
 
-        result, cex = falsify(model, lb, ub, hs, n_samples=100, seed=42)
+        result, cex = falsify(model, lb, ub, hs, method='random', n_samples=100, seed=42)
 
         assert result == 2, "Should return UNKNOWN (no counterexample found)"
         assert cex is None, "No counterexample should be returned"
 
-    def test_falsify_with_dict_property(self):
+    def test_with_dict_property(self):
         """Test that falsify handles dict property format (from vnnlib)."""
         model = nn.Sequential(nn.Linear(2, 2, bias=False))
         model[0].weight.data = torch.eye(2)
@@ -66,17 +60,16 @@ class TestFalsify:
         lb = np.array([0.0, 0.0])
         ub = np.array([1.0, 1.0])
 
-        # Property in dict format (like from load_vnnlib)
         G = np.array([[-1.0, 0.0]])
         g = np.array([-0.5])
         hs = HalfSpace(G, g)
         prop = [{'Hg': hs}]
 
-        result, cex = falsify(model, lb, ub, prop, n_samples=100, seed=42)
+        result, cex = falsify(model, lb, ub, prop, method='random', n_samples=100, seed=42)
 
         assert result == 0, "Should find counterexample"
 
-    def test_falsify_reproducible_with_seed(self):
+    def test_reproducible_with_seed(self):
         """Test that falsify is reproducible with the same seed."""
         model = nn.Sequential(nn.Linear(2, 2, bias=False))
         model[0].weight.data = torch.eye(2)
@@ -88,10 +81,206 @@ class TestFalsify:
         g = np.array([-0.5])
         hs = HalfSpace(G, g)
 
-        result1, cex1 = falsify(model, lb, ub, hs, n_samples=10, seed=123)
-        result2, cex2 = falsify(model, lb, ub, hs, n_samples=10, seed=123)
+        result1, cex1 = falsify(model, lb, ub, hs, method='random', n_samples=10, seed=123)
+        result2, cex2 = falsify(model, lb, ub, hs, method='random', n_samples=10, seed=123)
 
         assert result1 == result2
         if cex1 is not None and cex2 is not None:
             np.testing.assert_array_equal(cex1[0], cex2[0])
             np.testing.assert_array_equal(cex1[1], cex2[1])
+
+    def test_default_method_is_random(self):
+        """Test that the default method is random sampling."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        G = np.array([[-1.0, 0.0]])
+        g = np.array([-0.5])
+        hs = HalfSpace(G, g)
+
+        # No method specified - should default to random
+        result, cex = falsify(model, lb, ub, hs, n_samples=100, seed=42)
+
+        assert result == 0, "Default method should find counterexample"
+
+
+class TestFalsifyPGD:
+    """Tests for PGD falsification (method='pgd')."""
+
+    def test_finds_counterexample(self):
+        """Test that PGD finds a counterexample when one exists."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        G = np.array([[-1.0, 0.0]])
+        g = np.array([-0.5])
+        hs = HalfSpace(G, g)
+
+        result, cex = falsify(model, lb, ub, hs, method='pgd',
+                              n_restarts=5, n_steps=20, seed=42)
+
+        assert result == 0, "Should find counterexample (SAT)"
+        assert cex is not None, "Counterexample should be returned"
+        inp, out = cex
+        assert inp[0] >= 0.5 - 1e-6, "Counterexample input should satisfy property"
+
+    def test_no_counterexample(self):
+        """Test that PGD returns UNKNOWN when no counterexample exists."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([0.4, 0.4])
+
+        G = np.array([[-1.0, 0.0]])
+        g = np.array([-0.5])
+        hs = HalfSpace(G, g)
+
+        result, cex = falsify(model, lb, ub, hs, method='pgd',
+                              n_restarts=5, n_steps=20, seed=42)
+
+        assert result == 2, "Should return UNKNOWN (no counterexample found)"
+        assert cex is None, "No counterexample should be returned"
+
+    def test_with_relu_model(self):
+        """Test PGD with a model containing ReLU (non-linear)."""
+        model = nn.Sequential(
+            nn.Linear(2, 2, bias=False),
+            nn.ReLU(),
+            nn.Linear(2, 1, bias=False)
+        )
+        model[0].weight.data = torch.eye(2)
+        model[2].weight.data = torch.ones(1, 2)
+
+        lb = np.array([-1.0, -1.0])
+        ub = np.array([1.0, 1.0])
+
+        # Property: output >= 1.5 is unsafe
+        G = np.array([[-1.0]])
+        g = np.array([-1.5])
+        hs = HalfSpace(G, g)
+
+        result, cex = falsify(model, lb, ub, hs, method='pgd',
+                              n_restarts=10, n_steps=50, seed=42)
+
+        assert result == 0, "Should find counterexample"
+        assert cex is not None
+        inp, out = cex
+        assert out[0] >= 1.5 - 1e-6, "Output should be >= 1.5"
+
+    def test_reproducible_with_seed(self):
+        """Test that PGD is reproducible with the same seed."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        G = np.array([[-1.0, 0.0]])
+        g = np.array([-0.5])
+        hs = HalfSpace(G, g)
+
+        result1, cex1 = falsify(model, lb, ub, hs, method='pgd',
+                                n_restarts=3, n_steps=10, seed=123)
+        result2, cex2 = falsify(model, lb, ub, hs, method='pgd',
+                                n_restarts=3, n_steps=10, seed=123)
+
+        assert result1 == result2
+        if cex1 is not None and cex2 is not None:
+            np.testing.assert_allclose(cex1[0], cex2[0], rtol=1e-5)
+            np.testing.assert_allclose(cex1[1], cex2[1], rtol=1e-5)
+
+    def test_custom_step_size(self):
+        """Test PGD with custom step size."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        G = np.array([[-1.0, 0.0]])
+        g = np.array([-0.5])
+        hs = HalfSpace(G, g)
+
+        result, cex = falsify(model, lb, ub, hs, method='pgd',
+                              n_restarts=3, n_steps=30, step_size=0.05, seed=42)
+
+        assert result == 0, "Should find counterexample with custom step size"
+
+
+class TestFalsifyCombined:
+    """Tests for combined falsification (method='random+pgd')."""
+
+    def test_finds_counterexample_via_random(self):
+        """Test that combined method finds counterexample via random (first)."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        G = np.array([[-1.0, 0.0]])
+        g = np.array([-0.5])
+        hs = HalfSpace(G, g)
+
+        # With enough random samples, should find via random first
+        result, cex = falsify(model, lb, ub, hs, method='random+pgd',
+                              n_samples=100, n_restarts=5, n_steps=20, seed=42)
+
+        assert result == 0, "Should find counterexample"
+        assert cex is not None
+
+    def test_finds_counterexample_via_pgd_when_random_fails(self):
+        """Test that combined method falls back to PGD when random fails."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        G = np.array([[-1.0, 0.0]])
+        g = np.array([-0.5])
+        hs = HalfSpace(G, g)
+
+        # With 0 random samples, PGD should find the counterexample
+        result, cex = falsify(model, lb, ub, hs, method='random+pgd',
+                              n_samples=0, n_restarts=5, n_steps=20, seed=42)
+
+        assert result == 0, "PGD should find counterexample when random has 0 samples"
+        assert cex is not None
+
+
+class TestFalsifyValidation:
+    """Tests for input validation."""
+
+    def test_invalid_method(self):
+        """Test that invalid method raises ValueError."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        G = np.array([[-1.0, 0.0]])
+        g = np.array([-0.5])
+        hs = HalfSpace(G, g)
+
+        with pytest.raises(ValueError, match="Unknown method"):
+            falsify(model, lb, ub, hs, method='invalid_method')
+
+    def test_mismatched_bounds(self):
+        """Test that mismatched bounds raise ValueError."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0, 1.0])  # Wrong shape
+
+        G = np.array([[-1.0, 0.0]])
+        g = np.array([-0.5])
+        hs = HalfSpace(G, g)
+
+        with pytest.raises(ValueError, match="same shape"):
+            falsify(model, lb, ub, hs)

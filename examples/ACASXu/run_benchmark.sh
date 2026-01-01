@@ -19,7 +19,10 @@ set -e
 # Default configuration
 TIMEOUT=120
 WORKERS=$(nproc)
+FALSIFY_METHOD="random"
 FALSIFY_SAMPLES=500
+PGD_RESTARTS=10
+PGD_STEPS=50
 OUTPUT_CSV="results/benchmark_results.csv"
 PROPERTY_FILTER=""
 SUBSET=""
@@ -36,8 +39,20 @@ while [[ $# -gt 0 ]]; do
             WORKERS="$2"
             shift 2
             ;;
+        --falsify-method)
+            FALSIFY_METHOD="$2"
+            shift 2
+            ;;
         --falsify-samples)
             FALSIFY_SAMPLES="$2"
+            shift 2
+            ;;
+        --pgd-restarts)
+            PGD_RESTARTS="$2"
+            shift 2
+            ;;
+        --pgd-steps)
+            PGD_STEPS="$2"
             shift 2
             ;;
         --csv)
@@ -56,13 +71,16 @@ while [[ $# -gt 0 ]]; do
             echo "Usage: $0 [OPTIONS]"
             echo ""
             echo "Options:"
-            echo "  --timeout SECONDS    Timeout per instance (default: 120)"
-            echo "  --workers N          Number of parallel workers (default: CPU count)"
-            echo "  --falsify-samples N  Falsification samples (default: 500)"
-            echo "  --csv FILE           Output CSV file (default: results/benchmark_results.csv)"
-            echo "  --property N         Only run property N (1-10)"
-            echo "  --subset N           Run N randomly selected instances"
-            echo "  -h, --help           Show this help"
+            echo "  --timeout SECONDS      Timeout per instance (default: 120)"
+            echo "  --workers N            Number of parallel workers (default: CPU count)"
+            echo "  --falsify-method M     Falsification method: random, pgd, random+pgd (default: random)"
+            echo "  --falsify-samples N    Random falsification samples (default: 500)"
+            echo "  --pgd-restarts N       PGD restarts (default: 10)"
+            echo "  --pgd-steps N          PGD steps per restart (default: 50)"
+            echo "  --csv FILE             Output CSV file (default: results/benchmark_results.csv)"
+            echo "  --property N           Only run property N (1-10)"
+            echo "  --subset N             Run N randomly selected instances"
+            echo "  -h, --help             Show this help"
             exit 0
             ;;
         *)
@@ -123,7 +141,7 @@ echo "==========================================================================
 echo "Total instances: $TOTAL"
 echo "Timeout: ${TIMEOUT}s"
 echo "Workers: $WORKERS"
-echo "Falsification samples: $FALSIFY_SAMPLES"
+echo "Falsification: $FALSIFY_METHOD (samples=$FALSIFY_SAMPLES, pgd_restarts=$PGD_RESTARTS, pgd_steps=$PGD_STEPS)"
 echo "Output: $OUTPUT_CSV"
 echo "================================================================================"
 echo ""
@@ -154,7 +172,10 @@ for instance in "${INSTANCES[@]}"; do
         "$SCRIPT_DIR/onnx/$onnx_name" \
         "$SCRIPT_DIR/vnnlib/$vnnlib_name" \
         --workers "$WORKERS" \
-        --falsify-samples "$FALSIFY_SAMPLES" 2>/dev/null) || EXIT_CODE=$?
+        --falsify-method "$FALSIFY_METHOD" \
+        --falsify-samples "$FALSIFY_SAMPLES" \
+        --pgd-restarts "$PGD_RESTARTS" \
+        --pgd-steps "$PGD_STEPS" 2>/dev/null) || EXIT_CODE=$?
 
     # Parse output
     if [[ $EXIT_CODE -eq 124 ]] || [[ $EXIT_CODE -eq 137 ]]; then

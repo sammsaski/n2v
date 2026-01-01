@@ -3,7 +3,7 @@
 Verify a single ACAS Xu instance following NNV's VNN-COMP strategy.
 
 Strategy:
-1. Falsification via random sampling (find counterexamples quickly)
+1. Falsification (random sampling, optionally with PGD)
 2. Two-stage verification for prop_3/4: approx first, then exact if needed
 3. Single-stage verification for other properties: exact directly
 
@@ -33,14 +33,24 @@ def main():
     parser.add_argument('vnnlib', help='Path to VNN-LIB file')
     parser.add_argument('--workers', type=int, default=None,
                         help='Number of parallel workers (default: CPU count)')
+    parser.add_argument('--falsify-method', type=str, default='random',
+                        choices=['random', 'pgd', 'random+pgd'],
+                        help='Falsification method (default: random)')
     parser.add_argument('--falsify-samples', type=int, default=500,
-                        help='Number of falsification samples (default: 500)')
+                        help='Number of random falsification samples (default: 500)')
+    parser.add_argument('--pgd-restarts', type=int, default=10,
+                        help='Number of PGD restarts (default: 10)')
+    parser.add_argument('--pgd-steps', type=int, default=50,
+                        help='Number of PGD steps per restart (default: 50)')
     args = parser.parse_args()
 
     onnx_path = args.onnx
     vnnlib_path = args.vnnlib
     n_workers = args.workers
+    falsify_method = args.falsify_method
     n_falsify_samples = args.falsify_samples
+    pgd_restarts = args.pgd_restarts
+    pgd_steps = args.pgd_steps
 
     vnnlib_name = os.path.basename(vnnlib_path)
     t_start = time.time()
@@ -58,8 +68,14 @@ def main():
         use_two_stage = prop_num in [3, 4]
 
         # Step 1: Falsification
-        falsify_result, cex = falsify(model, lb, ub, property_spec,
-                                       n_samples=n_falsify_samples, seed=42)
+        falsify_result, cex = falsify(
+            model, lb, ub, property_spec,
+            method=falsify_method,
+            n_samples=n_falsify_samples,
+            n_restarts=pgd_restarts,
+            n_steps=pgd_steps,
+            seed=42
+        )
 
         if falsify_result == 0:
             # Found counterexample
