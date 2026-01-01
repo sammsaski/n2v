@@ -1,6 +1,0 @@
-onnx_file,vnnlib_file,result,time,method,falsify_time,reach_time,num_sets,error
-ACASXU_run2a_1_1_batch_2000.onnx,prop_1.vnnlib,TIMEOUT,30.000,,0.000,0.000,0,
-ACASXU_run2a_1_2_batch_2000.onnx,prop_1.vnnlib,TIMEOUT,30.000,,0.000,0.000,0,
-ACASXU_run2a_1_3_batch_2000.onnx,prop_1.vnnlib,TIMEOUT,30.000,,0.000,0.000,0,
-ACASXU_run2a_1_4_batch_2000.onnx,prop_1.vnnlib,TIMEOUT,30.000,,0.000,0.000,0,
-ACASXU_run2a_1_5_batch_2000.onnx,prop_1.vnnlib,TIMEOUT,30.000,,0.000,0.000,0,
