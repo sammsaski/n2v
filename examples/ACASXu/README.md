@@ -11,7 +11,7 @@ ACAS Xu (Airborne Collision Avoidance System X for Unmanned Aircraft) is a safet
 ### Data
 - `onnx/` - ACAS Xu neural networks in ONNX format (45 networks)
 - `vnnlib/` - VNN-LIB property files (10 properties)
-- `results/` - Output directory for benchmark results
+- `outputs/` - Output directory for benchmark results and logs
 
 ### Scripts
 
@@ -103,7 +103,7 @@ conda activate n2v
 ./run_benchmark.sh --subset 10
 
 # Custom output file
-./run_benchmark.sh --csv results/my_results.csv
+./run_benchmark.sh --csv outputs/my_results.csv
 
 # Use PGD falsification
 ./run_benchmark.sh --falsify-method pgd
@@ -124,7 +124,7 @@ conda activate n2v
 | `--pgd-steps N` | PGD steps per restart | 50 |
 | `--property N` | Only run property N (1-10) | All |
 | `--subset N` | Run N randomly selected instances | All |
-| `--csv FILE` | Output CSV file | results/benchmark_results.csv |
+| `--csv FILE` | Output CSV file | outputs/benchmark_results.csv |
 
 ## Verification Results
 

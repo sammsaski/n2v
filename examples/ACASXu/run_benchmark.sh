@@ -23,7 +23,7 @@ FALSIFY_METHOD="random"
 FALSIFY_SAMPLES=500
 PGD_RESTARTS=10
 PGD_STEPS=50
-OUTPUT_CSV="results/benchmark_results.csv"
+OUTPUT_CSV="outputs/benchmark_results.csv"
 PROPERTY_FILTER=""
 SUBSET=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -77,7 +77,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --falsify-samples N    Random falsification samples (default: 500)"
             echo "  --pgd-restarts N       PGD restarts (default: 10)"
             echo "  --pgd-steps N          PGD steps per restart (default: 50)"
-            echo "  --csv FILE             Output CSV file (default: results/benchmark_results.csv)"
+            echo "  --csv FILE             Output CSV file (default: outputs/benchmark_results.csv)"
             echo "  --property N           Only run property N (1-10)"
             echo "  --subset N             Run N randomly selected instances"
             echo "  -h, --help             Show this help"
