@@ -15,6 +15,7 @@ to recommend advisory actions.
 """
 
 import os
+import sys
 import time
 import numpy as np
 from pathlib import Path
@@ -91,7 +92,7 @@ def verify_acasxu_property(network_file: str, property_file: str,
             - For Hexatope/Octatope: 'exact', 'exact-differentiable', or 'approx'
         timeout: Timeout in seconds
         use_parallel: Enable parallel processing (Star only)
-        n_workers: Number of parallel workers (None = auto-detect)
+        n_workers: Number of parallel workers (None = use default of 4)
 
     Returns:
         result: Verification result (0=violated, 1=verified, 2=unknown)
@@ -306,7 +307,7 @@ Examples:
     parser.add_argument('--parallel', action='store_true',
                         help='Enable parallel processing (Star only)')
     parser.add_argument('--workers', type=int, default=None,
-                        help='Number of parallel workers (default: auto-detect based on CPU cores)')
+                        help='Number of parallel workers (default: 4; set to CPU count for best performance)')
 
     args = parser.parse_args()
 

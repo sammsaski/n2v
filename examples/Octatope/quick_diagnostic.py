@@ -176,7 +176,7 @@ def diagnostic_test():
         print("\n1. Look at sets/octatope.py, method estimate_ranges()")
         print("   Specifically check _optimize_utvpi_lp() and LP solver usage")
         print("\n2. Try the differentiable solver:")
-        print("   cd ../AcasXu")
+        print("   cd ../ACASXu")
         print("   python verify_acasxu.py ... --set octatope --method exact-differentiable")
         print("\n3. Run full profiling:")
         print("   python profile_octatope.py")

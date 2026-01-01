@@ -144,13 +144,15 @@ def set_parallel(enabled = True, n_workers: Optional[int] = None, threshold: Opt
 
     Args:
         enabled: Whether to enable parallel LP solving (True/False/'auto')
-        n_workers: Number of parallel workers (None = auto-detect)
+        n_workers: Number of parallel workers (None = keep current, default is 4).
+                   For best performance, set to your CPU core count.
         threshold: Dimension threshold for auto-parallel mode
 
     Example:
         >>> import n2v
-        >>> n2v.set_parallel(True, n_workers=8)
-        >>> # Now all get_ranges() calls will use parallel solving
+        >>> import multiprocessing
+        >>> n2v.set_parallel(True, n_workers=multiprocessing.cpu_count())
+        >>> # Now all get_ranges() calls will use parallel solving with all cores
 
         >>> n2v.set_parallel('auto', threshold=10)
         >>> # Automatically use parallel for dim >= 10

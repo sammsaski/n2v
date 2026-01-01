@@ -125,7 +125,7 @@ Identify the top time-consuming functions and focus optimization there.
 
 ### Step 4: Try Differentiable Solver
 ```bash
-cd ../AcasXu
+cd ../ACASXu
 python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib \
   --set octatope --method exact-differentiable
 ```

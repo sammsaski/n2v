@@ -460,15 +460,21 @@ See [docs/lp_solvers.md](docs/lp_solvers.md) for detailed LP solver comparison.
 ```python
 import n2v
 
-# Enable parallel solving for 1.5-2x speedup on multi-core systems
-n2v.set_parallel(True, n_workers=4)
+# Enable parallel solving with explicit worker count
+n2v.set_parallel(True, n_workers=8)  # Use 8 parallel workers
+
+# Or use all available CPU cores
+import multiprocessing
+n2v.set_parallel(True, n_workers=multiprocessing.cpu_count())
 
 # Now all verification uses parallel LP solving
-output = verifier.reach(input_star, method='approx')
+output = net.reach(input_star, method='exact')
 ```
 
-**Speedup**: 1.5-2x on multi-core systems (4+ cores)
-**Best for**: High-dimensional outputs (dim >= 10), exact method with many stars
+**Note**: The default is 4 workers. For best performance, set `n_workers` to your CPU core count.
+
+**Speedup**: 2-10x on multi-core systems depending on core count
+**Best for**: Exact method with many output stars, high-dimensional problems
 
 ### 3. 🏆 Gurobi Support (TODO)
 
