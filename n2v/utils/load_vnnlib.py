@@ -4,15 +4,20 @@ Load and parse VNN-LIB property files.
 This module provides functionality to parse VNN-LIB format property files
 and convert them into a structured format for verification.
 
-Assumptions for this function:
-    1) Unique input set, only one value for the upper and lower bounds of the inputs
-    2) Output property
-        a) Series of assertions with no "and", "or" conditions                ---->  property['prop']: (1x1) HalfSpace
-        b) One assertion with one or more "and", no "or" included             ---->  property['prop']: (1x1) HalfSpace
-        c) One assertion with 1 "or" statement followed by N "and" statements ---->  property['prop']: (Nx1) list of HalfSpace
-    3) Constraints must be linear, only >= or <= are supported
+Supported formats:
+    Input specifications:
+        a) Multiple assert statements with individual bounds (e.g., prop_1-4)
+        b) Single assert with (or (and ...) (and ...)) for multiple input regions (e.g., prop_6)
+        c) Combined input/output in same assert (both X_ and Y_ in one or statement)
 
-    If the vnnlib does not meet these conditions, this function may not work
+    Output specifications:
+        a) Series of assertions with no "and", "or" conditions  ---->  property['prop']: (1x1) HalfSpace
+        b) One assertion with "and" statements                  ---->  property['prop']: (1x1) HalfSpace
+        c) One assertion with "or" of "and" statements          ---->  property['prop']: (Nx1) list of HalfSpace
+
+    Constraints must be linear, only >= or <= are supported.
+
+    If the vnnlib does not meet these conditions, this function may not work.
 """
 
 import numpy as np
@@ -87,28 +92,34 @@ def load_vnnlib(property_file: str) -> Dict:
                 continue  # Redo this line in correct phase
 
         elif phase == "DefineInput":
-            # Three options:
+            # Four options:
             # 1) One input set -> multiple assert statements (2 per dimension)
-            # 2) Multiple input sets -> or statement defining all constraints
-            # 3) Multiple input and output sets -> same as above with output constraints
+            # 2) Multiple input sets -> or statement with only X_ constraints,
+            #    followed by separate output assertion(s)
+            # 3) Multiple input and output sets -> or statement with both X_ and Y_
+            # 4) Transition to output phase when assertion has no X_
 
             if "assert" in tline and "or" in tline and "X_" in tline:
-                if "Y_" in tline:  # Option 3
+                if "Y_" in tline:  # Option 3: combined input/output in same assertion
                     lb_array, ub_array, prop_array = _process_combined_input_output(
                         tline, lb_input, ub_input, output_dim
                     )
                     property_dict['lb'] = lb_array
                     property_dict['ub'] = ub_array
                     property_dict['prop'] = prop_array
-                else:  # Option 2
+                    # Done processing - this format has everything in one assertion
+                else:  # Option 2: multiple input regions, separate output assertion
                     lb_array, ub_array = _process_multiple_inputs(tline, lb_input, ub_input)
                     property_dict['lb'] = lb_array
                     property_dict['ub'] = ub_array
+                    # Transition to DefineOutput phase for the next assertion
+                    phase = "DefineOutput"
+                    property_dict['prop'] = []
 
-            if ">" in tline or "<" in tline:
-                if "X_" in tline:  # Option 1
+            elif ">" in tline or "<" in tline:
+                if "X_" in tline:  # Option 1: single input set with separate assertions
                     lb_input, ub_input = _process_input_constraint(tline, lb_input, ub_input)
-                else:  # Move to next phase (define output constraints)
+                else:  # Option 4: Move to output phase (assertion without X_)
                     phase = "DefineOutput"
                     property_dict['lb'] = lb_input
                     property_dict['ub'] = ub_input

@@ -93,6 +93,10 @@ done
 # Create output directory
 mkdir -p "$(dirname "$OUTPUT_CSV")"
 
+# Create counterexamples directory
+CEX_DIR="$(dirname "$OUTPUT_CSV")/counterexamples"
+mkdir -p "$CEX_DIR"
+
 # Build instances list from VNN-COMP format
 INSTANCES_CSV="$HOME/v/other/VNNCOMP/vnncomp2025_benchmarks/benchmarks/acasxu_2023/instances.csv"
 
@@ -188,6 +192,18 @@ for instance in "${INSTANCES[@]}"; do
         RESULT=$(echo "$OUTPUT" | grep "^RESULT:" | cut -d: -f2)
         TIME=$(echo "$OUTPUT" | grep "^TIME:" | cut -d: -f2)
         METHOD=$(echo "$OUTPUT" | grep "^METHOD:" | cut -d: -f2)
+
+        # Extract counterexample if SAT
+        if [[ "$RESULT" == "SAT" ]]; then
+            # CEX is multiline, extract everything after "CEX:" to the end
+            CEX=$(echo "$OUTPUT" | sed -n '/^CEX:/,$p' | sed '1s/^CEX://')
+            if [[ -n "$CEX" ]]; then
+                # Create counterexample filename: network_prop.counterexample
+                CEX_BASENAME="${onnx_name%.onnx}_${vnnlib_name%.vnnlib}"
+                CEX_FILE="$CEX_DIR/${CEX_BASENAME}.counterexample"
+                echo "$CEX" > "$CEX_FILE"
+            fi
+        fi
 
         # Update statistics
         case "$RESULT" in
