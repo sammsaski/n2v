@@ -169,6 +169,7 @@ The full benchmark consists of 186 instances (prop_1-4: 45 each, prop_5-10: 1 ea
 - Algorithm: `random+pgd` falsification → exact Star reachability (two-stage approx→exact for prop_3/4)
 - Timeout: 120s per instance
 - Hardware: Intel Xeon Gold 6238R (56 cores), 504GB RAM, Ubuntu 22.04
+- Version: commit `abeb40d`
 
 **Notes:**
 - alpha-beta-CROWN and NNV results are from VNN-COMP 2025 [1]
