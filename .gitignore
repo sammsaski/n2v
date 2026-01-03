@@ -49,3 +49,6 @@ CLAUDE.md
 
 # MNIST data (auto-downloaded by PyTorch for CompareNNV experiments)
 examples/CompareNNV/data/
+
+# Claude
+.claude/
