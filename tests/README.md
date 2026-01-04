@@ -8,7 +8,7 @@ The test suite is organized into two categories:
 
 ### 1. Unit Tests (`unit/`)
 
-**~480 tests** that verify correct implementation and edge case handling.
+**~620 tests** that verify correct implementation and edge case handling.
 
 These tests check that:
 - Code compiles and runs without errors
@@ -17,15 +17,16 @@ These tests check that:
 - Integration between components works as expected
 
 **Subdirectories:**
-- `sets/` - Tests for Star, Zono, Box, ImageStar, Hexatope, Octatope
+- `sets/` - Tests for Star, Zono, Box, ImageStar, Hexatope, Octatope, ProbabilisticBox
 - `layer_ops/` - Tests for layer operations (Linear, ReLU, Conv2D, MaxPool2D, AvgPool2D, Flatten)
 - `core/` - Tests for dispatcher and parallel processing
 - `utils/` - Tests for VNN-LIB parsing and differentiable solvers
+- `probabilistic/` - Tests for probabilistic verification (conformal inference, surrogates, verify)
 - `integration/` - Integration tests for complete workflows
 
 ### 2. Soundness Tests (`soundness/`)
 
-**~190 tests** (all passing) that verify mathematical correctness and soundness properties.
+**~200 tests** (all passing) that verify mathematical correctness and soundness properties.
 
 These tests check that:
 - Operations produce mathematically correct results
@@ -43,6 +44,7 @@ These tests check that:
 - `test_soundness_parallel.py` - Parallel LP solving
 - `test_soundness_to_star.py` - Conversion to Star sets
 - `test_soundness_differentiable.py` - Differentiable verification
+- `test_soundness_probabilistic.py` - Probabilistic verification guarantees
 
 See [soundness/README.md](soundness/README.md) for detailed methodology.
 
@@ -51,7 +53,7 @@ See [soundness/README.md](soundness/README.md) for detailed methodology.
 ### Quick Start
 
 ```bash
-# Run all tests (unit + soundness, ~670 passing)
+# Run all tests (unit + soundness, ~846 passing)
 pytest tests/
 
 # Run with verbose output
@@ -64,11 +66,14 @@ pytest tests/ -q
 ### Test Categories
 
 ```bash
-# Run only unit tests (~480 tests)
+# Run only unit tests (~620 tests)
 pytest tests/unit/
 
-# Run only soundness tests (~190 tests)
+# Run only soundness tests (~200 tests)
 pytest tests/soundness/
+
+# Run only probabilistic verification tests
+pytest tests/unit/probabilistic/ tests/soundness/test_soundness_probabilistic.py -v
 ```
 
 ### Specific Test Files

@@ -753,6 +753,138 @@ class Star:
         else:
             return np.array([]).reshape(self.dim, 0)
 
+    def get_vertices(
+        self,
+        n_directions: int = 64,
+        projection: Optional[List[int]] = None
+    ) -> Optional[np.ndarray]:
+        """
+        Compute vertices of the Star polytope for visualization.
+
+        Uses LP-based vertex enumeration by optimizing in many directions.
+        Works for 2D and 3D Stars (or projections to 2D/3D).
+
+        Args:
+            n_directions: Number of directions to optimize over.
+                For 2D: angles around a circle.
+                For 3D: points on a sphere (Fibonacci lattice).
+            projection: List of dimension indices to project onto (e.g., [0, 1] for 2D).
+                If None, uses all dimensions (must be 2 or 3).
+
+        Returns:
+            Array of vertices (n_vertices, dim) ordered for polygon/polyhedron plotting,
+            or None if the Star is empty or has fewer than 3 vertices.
+
+        Raises:
+            ValueError: If the resulting dimension is not 2 or 3.
+
+        Example:
+            >>> star = Star.from_bounds(lb, ub)
+            >>> vertices = star.get_vertices()
+            >>> plt.fill(vertices[:, 0], vertices[:, 1], alpha=0.3)
+        """
+        from scipy.optimize import linprog
+        from scipy.spatial import ConvexHull
+
+        # Determine output dimension
+        if projection is not None:
+            out_dim = len(projection)
+            if out_dim not in [2, 3]:
+                raise ValueError(f"Projection must be to 2 or 3 dimensions, got {out_dim}")
+        else:
+            out_dim = self.dim
+            if out_dim not in [2, 3]:
+                raise ValueError(
+                    f"Star dimension is {out_dim}. Use projection=[i, j] or [i, j, k] "
+                    "to project to 2D or 3D for visualization."
+                )
+            projection = list(range(out_dim))
+
+        # Extract Star components
+        center = self.V[:, 0]
+        generators = self.V[:, 1:]
+        n_alpha = generators.shape[1]
+
+        if n_alpha == 0:
+            # Degenerate case: single point
+            return center[projection].reshape(1, -1)
+
+        # Build bounds for alpha variables
+        pred_lb = self.predicate_lb.flatten() if self.predicate_lb is not None else -np.inf * np.ones(n_alpha)
+        pred_ub = self.predicate_ub.flatten() if self.predicate_ub is not None else np.inf * np.ones(n_alpha)
+        bounds = [(pred_lb[i], pred_ub[i]) for i in range(n_alpha)]
+
+        # Constraint matrix and RHS
+        C = self.C if self.C.size > 0 else None
+        d = self.d.flatten() if self.d.size > 0 else None
+
+        # Project generators to output dimension
+        proj_center = center[projection]
+        proj_generators = generators[projection, :]
+
+        # Generate directions based on dimension
+        if out_dim == 2:
+            # Circle: evenly spaced angles
+            angles = np.linspace(0, 2 * np.pi, n_directions, endpoint=False)
+            directions = np.column_stack([np.cos(angles), np.sin(angles)])
+        else:
+            # Sphere: Fibonacci lattice for uniform distribution
+            directions = self._fibonacci_sphere(n_directions)
+
+        # Find extreme points by optimizing in each direction
+        vertices = []
+        for direction in directions:
+            # Maximize direction @ x = direction @ (proj_center + proj_generators @ alpha)
+            # Equivalent to minimizing -(proj_generators.T @ direction) @ alpha
+            c_obj = -proj_generators.T @ direction
+
+            result = linprog(c_obj, A_ub=C, b_ub=d, bounds=bounds, method='highs')
+            if result.success:
+                alpha_opt = result.x
+                x_opt = proj_center + proj_generators @ alpha_opt
+                vertices.append(x_opt)
+
+        if len(vertices) < 3:
+            return np.array(vertices) if vertices else None
+
+        vertices = np.array(vertices)
+
+        # Get convex hull to get unique vertices in proper order
+        try:
+            hull = ConvexHull(vertices)
+            return vertices[hull.vertices]
+        except Exception:
+            # ConvexHull may fail for degenerate cases
+            return vertices
+
+    @staticmethod
+    def _fibonacci_sphere(n: int) -> np.ndarray:
+        """
+        Generate n approximately uniformly distributed points on a unit sphere.
+
+        Uses the Fibonacci lattice method.
+
+        Args:
+            n: Number of points
+
+        Returns:
+            Array of shape (n, 3) with unit vectors
+        """
+        points = []
+        phi = np.pi * (3.0 - np.sqrt(5.0))  # Golden angle
+
+        for i in range(n):
+            y = 1 - (i / (n - 1)) * 2  # y goes from 1 to -1
+            radius = np.sqrt(1 - y * y)
+            theta = phi * i
+
+            x = np.cos(theta) * radius
+            z = np.sin(theta) * radius
+
+            points.append([x, y, z])
+
+        return np.array(points)
+
     # ======================== Reachability Analysis ========================
     # Note: Reachability analysis should be performed through NeuralNetwork.reach()
     # instead of calling reach() on set objects directly. This maintains proper

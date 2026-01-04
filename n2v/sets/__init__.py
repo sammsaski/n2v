@@ -13,5 +13,16 @@ from n2v.sets.image_zono import ImageZono
 from n2v.sets.halfspace import HalfSpace
 from n2v.sets.hexatope import Hexatope
 from n2v.sets.octatope import Octatope
+from n2v.sets.probabilistic_box import ProbabilisticBox
 
-__all__ = ["Box", "Zono", "Star", "ImageStar", "ImageZono", "HalfSpace", "Hexatope", "Octatope"]
+__all__ = [
+    "Box",
+    "Zono",
+    "Star",
+    "ImageStar",
+    "ImageZono",
+    "HalfSpace",
+    "Hexatope",
+    "Octatope",
+    "ProbabilisticBox",
+]

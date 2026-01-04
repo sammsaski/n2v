@@ -26,6 +26,7 @@ soundness/
 ├── test_soundness_pooling.py          # Pooling layer soundness tests
 ├── test_soundness_other_layers.py     # Other layers (Flatten, etc.)
 ├── test_soundness_integration.py      # Multi-layer network tests
+├── test_soundness_probabilistic.py    # Probabilistic verification soundness
 └── ground_truth/                      # Ground truth data
     ├── linear_examples.json
     ├── relu_examples.json
@@ -120,6 +121,18 @@ For all x in Input: lb ≤ f(x) ≤ ub
 If Input1 ⊆ Input2, then ReLU(Input1) ⊆ ReLU(Input2)
 ```
 
+### 6. Probabilistic Coverage Guarantee
+For probabilistic verification with ⟨ε, ℓ, m⟩ parameters:
+```
+With high probability (confidence δ₂), at least (1-ε) fraction of
+outputs from the input set are contained in the ProbabilisticBox.
+```
+
+Probabilistic soundness tests (`test_soundness_probabilistic.py`):
+- Verify coverage guarantee holds empirically (sample N >> m points)
+- Verify confidence guarantee holds across repeated runs
+- Compare naive vs clipping_block surrogate tightness
+
 ## Running Soundness Tests
 
 ```bash
@@ -161,3 +174,4 @@ When adding a new layer operation or method:
 1. Star Set: Tran et al. "Star-Based Reachability Analysis of Deep Neural Networks" (FM 2019)
 2. Zonotope: Ghorbal et al. "Characterizing the Accuracy of the Zonotope Abstract Domain" (NASA 2009)
 3. Verification Benchmarks: VNN-COMP 2020-2024 benchmarks
+4. Probabilistic Verification: Hashemi et al. "Scaling Data-Driven Probabilistic Reachability Analysis" (ICLR 2026)

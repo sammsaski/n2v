@@ -15,6 +15,7 @@ Python implementation of the Neural Network Verification (NNV) tool, supporting 
 - [Supported Layers](#supported-layers)
 - [Set Representations](#set-representations)
 - [Reachability Methods](#reachability-methods)
+- [Probabilistic Verification](#probabilistic-verification)
 - [CNN Verification](#cnn-verification)
 - [Examples](#examples)
 - [Falsification](#falsification)
@@ -63,7 +64,8 @@ NNV-Python is a Python port of the MATLAB NNV tool, designed for:
 ### Verification Methods
 - **Exact**: Sound and complete (may be slower)
 - **Approximate**: Over-approximate (faster, still sound)
-- **Hybrid**: Mix exact/approximate for optimal performance
+- **Probabilistic**: Model-agnostic with formal coverage guarantees
+- **Hybrid**: Mix exact/approximate/probabilistic for optimal performance
 
 ---
 
@@ -310,7 +312,7 @@ output = verifier.reach(input_star, method='exact')
 ### Approximate Methods
 
 #### `'approx'`
-- Over-approximate using relaxed Star sets
+- Over-approximate using relaxed Star sets or Zonotopes
 - Faster than exact (no splitting)
 - Best for: Large networks, quick verification
 
@@ -318,22 +320,137 @@ output = verifier.reach(input_star, method='exact')
 output = verifier.reach(input_star, method='approx')
 ```
 
-#### `'approx'`
-- Over-approximate using Zonotopes
-- Very fast, more conservative
-- Best for: Very large networks, initial screening
+### Probabilistic Methods
+
+#### `'probabilistic'`
+- Model-agnostic using conformal inference
+- Works with any callable model (black-box)
+- Provides formal coverage guarantees
+- Best for: Very large networks, external APIs
 
 ```python
-output = verifier.reach(input_star, method='approx')
+output = verifier.reach(input_box, method='probabilistic', m=1000, epsilon=0.01)
+```
+
+#### `'hybrid'`
+- Starts with deterministic, switches to probabilistic when needed
+- Automatic switching based on star count or timeout
+- Best for: Medium-large networks with unknown complexity
+
+```python
+output = verifier.reach(input_star, method='hybrid', max_stars=1000)
 ```
 
 ### Method Comparison
 
-| Method | Speed | Precision | Use Case |
+| Method | Speed | Guarantee | Use Case |
 |--------|-------|-----------|----------|
-| `exact` | Slow | Exact | Safety-critical, small nets |
-| `approx` | Medium | Tight | Large networks |
-| `approx` | Fast | Conservative | Very large nets, screening |
+| `exact` | Slow | Sound & complete | Safety-critical, small nets |
+| `approx` | Medium | Sound (over-approx) | Large networks |
+| `probabilistic` | Fast | Coverage only (not sound) | Very large nets, black-box |
+| `hybrid` | Adaptive | Depends on fallback | Unknown complexity |
+
+---
+
+## Probabilistic Verification
+
+For large models or when deterministic methods are too slow, n2v provides **probabilistic verification** using conformal inference. This approach provides high-confidence output bounds without requiring network-specific analysis.
+
+### Key Features
+
+- **Model-agnostic**: Works with any callable model (PyTorch, TensorFlow, ONNX, even APIs)
+- **Scalable**: Constant-time complexity regardless of network size
+- **Coverage guarantee**: With high confidence, (1-ε) of outputs are contained in bounds
+- **Not sound**: Unlike exact/approx methods, outputs may fall outside bounds with probability ε
+- **No network analysis**: Treats the model as a black box
+
+### Basic Usage
+
+```python
+from n2v.probabilistic import verify
+from n2v.sets import Box
+import numpy as np
+
+# Define input region
+lb = np.zeros(5)
+ub = np.ones(5)
+input_set = Box(lb, ub)
+
+# Any callable model
+def model(x):
+    return my_neural_network(x)
+
+# Run probabilistic verification
+result = verify(
+    model=model,
+    input_set=input_set,
+    m=1000,           # Number of calibration samples
+    epsilon=0.01,     # 99% coverage guarantee
+    surrogate='naive' # or 'clipping_block' for tighter bounds
+)
+
+# Result is a ProbabilisticBox with coverage guarantees
+print(f"Output bounds: [{result.lb}, {result.ub}]")
+print(f"Coverage: {result.coverage}")      # 0.99
+print(f"Confidence: {result.confidence}")  # High probability guarantee holds
+```
+
+### Using with NeuralNetwork.reach()
+
+```python
+import n2v
+
+model = nn.Sequential(nn.Linear(5, 10), nn.ReLU(), nn.Linear(10, 3))
+verifier = n2v.NeuralNetwork(model)
+
+# Use probabilistic method
+result = verifier.reach(
+    input_set,
+    method='probabilistic',
+    m=1000,
+    epsilon=0.01,
+    surrogate='clipping_block'
+)
+
+pbox = result[0]  # ProbabilisticBox
+```
+
+### Hybrid Method
+
+The hybrid method starts with deterministic reachability and automatically switches to probabilistic when thresholds are exceeded:
+
+```python
+result = verifier.reach(
+    input_set,
+    method='hybrid',
+    max_stars=1000,           # Switch if star count exceeds this
+    timeout_per_layer=30.0,   # Switch if layer takes too long
+    m=500,                    # Probabilistic parameters
+    epsilon=0.05
+)
+```
+
+### Parameters
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `m` | Calibration set size | 8000 |
+| `ell` | Rank parameter (affects threshold) | m-1 |
+| `epsilon` | Miscoverage level (1-epsilon = coverage) | 0.001 |
+| `surrogate` | 'naive' (center-based) or 'clipping_block' (tighter) | 'clipping_block' |
+| `training_samples` | Samples for clipping_block fitting | m//2 |
+
+### When to Use Probabilistic Verification
+
+| Scenario | Recommended Method | Note |
+|----------|-------------------|------|
+| Small network, safety-critical | `exact` | Sound guarantee required |
+| Medium network | `approx` | Sound, faster than exact |
+| Large network, coverage acceptable | `probabilistic` | Not sound, but scalable |
+| External API / black-box model | `probabilistic` | Only option for black-box |
+| Unknown complexity | `hybrid` | May lose soundness on fallback |
+
+See [docs/probabilistic_verification.md](docs/probabilistic_verification.md) for detailed theory and advanced usage.
 
 ---
 
@@ -585,7 +702,7 @@ for layer in layers:
 
 ### Running Tests
 
-NNV-Python includes comprehensive unit and soundness tests (650+ total tests) using pytest.
+NNV-Python includes comprehensive unit and soundness tests (840+ total tests) using pytest.
 
 ```bash
 # Run all tests (unit + soundness)
@@ -614,28 +731,31 @@ pytest tests/unit/sets/test_star.py::TestStar::test_from_bounds -v
 tests/
 ├── conftest.py              # Shared fixtures and helpers
 │
-├── unit/                    # Unit tests (~480 tests)
+├── unit/                    # Unit tests (~620 tests)
 │   ├── sets/                # Set representation tests (Star, Zono, Box, etc.)
 │   ├── layer_ops/           # Layer operation tests (linear, relu, conv2d, etc.)
 │   ├── core/                # Core functionality tests (dispatcher, parallel)
 │   ├── utils/               # Utility tests (VNN-LIB parsing, solvers)
+│   ├── probabilistic/       # Probabilistic verification tests
 │   └── integration/         # End-to-end verification tests
 │
-└── soundness/               # Soundness tests (~190 tests)
-    ├── test_soundness_linear.py     # Linear layer soundness
-    ├── test_soundness_relu.py       # ReLU activation soundness
-    ├── test_soundness_conv2d.py     # Conv2D soundness
-    ├── test_soundness_maxpool2d.py  # MaxPool2D soundness
-    ├── test_soundness_avgpool2d.py  # AvgPool2D soundness
-    └── test_soundness_flatten.py    # Flatten soundness
+└── soundness/               # Soundness tests (~200 tests)
+    ├── test_soundness_linear.py           # Linear layer soundness
+    ├── test_soundness_relu.py             # ReLU activation soundness
+    ├── test_soundness_conv2d.py           # Conv2D soundness
+    ├── test_soundness_maxpool2d.py        # MaxPool2D soundness
+    ├── test_soundness_avgpool2d.py        # AvgPool2D soundness
+    ├── test_soundness_flatten.py          # Flatten soundness
+    └── test_soundness_probabilistic.py    # Probabilistic verification soundness
 ```
 
 ### Test Coverage
 
 **Unit Tests** verify implementation correctness:
-- Set Representations: Star, Zono, Box creation and operations
+- Set Representations: Star, Zono, Box, ProbabilisticBox creation and operations
 - Image Sets: ImageStar, ImageZono with spatial operations
 - Layer Operations: Linear, ReLU, Conv2D, MaxPool2D, AvgPool2D, Flatten
+- Probabilistic: Conformal inference, surrogates, verify interface
 - Dispatcher: Layer-type routing and method selection
 - VNN-LIB: Property file parsing
 - Integration: End-to-end network verification workflows
@@ -645,6 +765,7 @@ tests/
 - Over-approximations contain exact reachable sets
 - Bounds computation is correct
 - Ground truth validation for simple cases
+- Probabilistic coverage and confidence guarantees hold empirically
 
 See [tests/README.md](tests/README.md) for detailed test organization and [tests/soundness/README.md](tests/soundness/README.md) for soundness testing methodology.
 
@@ -694,11 +815,11 @@ open htmlcov/index.html
 
 ### Current Test Status
 
-- **Total**: 670 passing, 1 skipped
-- Unit tests cover sets, layer operations, dispatcher, VNN-LIB parsing, and integration
-- Soundness tests verify mathematical correctness of all layer implementations
+- **Total**: 846 passing, 2 skipped
+- Unit tests cover sets, layer operations, dispatcher, VNN-LIB parsing, probabilistic verification, and integration
+- Soundness tests verify mathematical correctness of all layer implementations including probabilistic guarantees
 
-The single skipped test is for Conv2d with Zonotope sets (not yet implemented).
+Skipped tests are for Conv2d with Zonotope (not yet implemented) and sklearn PCA comparison (optional dependency).
 
 ---
 
@@ -733,9 +854,12 @@ star = Star(V, C, d, pred_lb, pred_ub)
 # Operations
 output_star = star.affine_map(W, b)
 new_star = star.intersect_half_space(G, g)
-lb, ub = star.get_range(dim_index)
-star.estimate_ranges()  # Compute all bounds
+lb, ub = star.get_range(dim_index)  # LP-based exact bound for one dimension
+lb, ub = star.get_ranges()          # LP-based exact bounds for all dimensions
 ```
+
+**Important**: Always use `get_ranges()` for final bounds (LP-based, exact for the polytope).
+Avoid `estimate_ranges()` for final results - it's a fast heuristic for internal use that ignores constraints.
 
 #### `ImageStar`
 
@@ -762,6 +886,25 @@ output = reach_layer(
     method='exact', # 'exact' or 'approx'
     **kwargs        # lp_solver, verbose, etc.
 )
+```
+
+#### `ProbabilisticBox`
+
+```python
+from n2v.sets import ProbabilisticBox
+
+# From verify() result
+result = verify(model, input_set, m=1000, epsilon=0.01)
+
+# Properties
+result.coverage     # 0.99 (1 - epsilon)
+result.confidence   # High probability guarantee holds
+result.m            # Number of calibration samples
+result.ell          # Rank parameter
+
+# Inherits from Box - all Box methods work
+lb, ub = result.get_range()
+star = result.to_star()  # Warning: loses probabilistic metadata
 ```
 
 ### Utilities
@@ -829,7 +972,7 @@ This tool is based on the MATLAB NNV tool:
 
 ```
 n2v/
-├── sets/              # Set representations (Star, Zono, Box, etc.)
+├── sets/              # Set representations (Star, Zono, Box, ProbabilisticBox, etc.)
 ├── nn/                # Neural network wrapper and layer operations
 │   ├── neural_network.py
 │   ├── reach.py              # Top-level reachability orchestration
@@ -841,6 +984,11 @@ n2v/
 │       ├── avgpool2d_reach.py
 │       ├── maxpool2d_reach.py
 │       └── flatten_reach.py
+├── probabilistic/     # Probabilistic verification module
+│   ├── verify.py             # Main verify() entry point
+│   ├── conformal.py          # Conformal inference primitives
+│   ├── surrogates/           # Surrogate models (naive, clipping_block)
+│   └── dimensionality/       # Deflation PCA for high-dim outputs
 ├── utils/             # Utilities (LP solver, etc.)
 └── examples/          # Example scripts
 ```

@@ -46,6 +46,8 @@ def reach_pytorch_model(
             - 'exact': Exact reachability (Star, Hexatope, Octatope)
             - 'exact-differentiable': Exact with differentiable solver (Hexatope, Octatope)
             - 'approx': Over-approximate reachability (all set types)
+            - 'probabilistic': Model-agnostic probabilistic verification (any input set -> ProbabilisticBox)
+            - 'hybrid': Deterministic until threshold, then probabilistic
         **kwargs: Method-specific arguments:
             - lp_solver: LP solver to use
             - verbose: 'display' to show progress
@@ -54,13 +56,32 @@ def reach_pytorch_model(
             - relax_factor: Relaxation factor for approx methods
             - relax_method: Relaxation strategy
 
+            For 'probabilistic' and 'hybrid' methods:
+            - m: int - Calibration set size (default: 8000)
+            - ell: int - Rank parameter (default: m-1)
+            - epsilon: float - Miscoverage level (default: 0.001)
+            - surrogate: str - 'naive' or 'clipping_block' (default: 'clipping_block')
+            - training_samples: int - For clipping_block surrogate (default: m//2)
+            - pca_components: int - Dimensionality reduction (default: None)
+
+            For 'hybrid' method additionally:
+            - max_stars: int - Switch to probabilistic if exceeded (default: 1000)
+            - timeout_per_layer: float - Seconds before switching (default: 30.0)
+
     Returns:
-        List of output sets (same type as input)
+        List of output sets (same type as input for deterministic methods,
+        ProbabilisticBox for probabilistic method)
 
     Raises:
         TypeError: If input_set type is not supported
         ValueError: If method is not valid for the given set type
     """
+    # Handle probabilistic and hybrid methods
+    if method == 'probabilistic':
+        return _reach_probabilistic(model, input_set, **kwargs)
+
+    if method == 'hybrid':
+        return _reach_hybrid(model, input_set, **kwargs)
     # Validate method for set type
     # Note: ImageStar is checked first since it's more specific than Star
     if isinstance(input_set, ImageStar):
@@ -350,3 +371,129 @@ def _handle_onnx_matmul(module, node, node_values, graph_module, set_type):
         raise NotImplementedError(
             f"ONNX MatMul not supported for {set_type.__name__}"
         )
+
+
+def _reach_probabilistic(model, input_set, **kwargs):
+    """
+    Probabilistic reachability using conformal inference.
+
+    This is a model-agnostic approach that works with any PyTorch model.
+    """
+    from n2v.probabilistic import verify
+
+    # Convert input_set to Box if needed
+    if isinstance(input_set, Box):
+        box = input_set
+    elif hasattr(input_set, 'estimate_ranges'):
+        lb, ub = input_set.estimate_ranges()
+        box = Box(lb, ub)
+    elif hasattr(input_set, 'get_ranges'):
+        lb, ub = input_set.get_ranges()
+        box = Box(lb, ub)
+    else:
+        raise TypeError(f"Cannot convert {type(input_set)} to Box for probabilistic verification")
+
+    # Create model wrapper for numpy interface
+    def model_fn(x):
+        with torch.no_grad():
+            x_tensor = torch.tensor(x, dtype=torch.float32)
+            output = model(x_tensor)
+            return output.numpy()
+
+    # Run probabilistic verification
+    result = verify(
+        model=model_fn,
+        input_set=box,
+        m=kwargs.get('m', 8000),
+        ell=kwargs.get('ell', None),
+        epsilon=kwargs.get('epsilon', 0.001),
+        surrogate=kwargs.get('surrogate', 'clipping_block'),
+        training_samples=kwargs.get('training_samples', None),
+        pca_components=kwargs.get('pca_components', None),
+        batch_size=kwargs.get('batch_size', 100),
+        seed=kwargs.get('seed', None),
+        verbose=kwargs.get('verbose', False)
+    )
+
+    return [result]
+
+
+def _reach_hybrid(model, input_set, **kwargs):
+    """
+    Hybrid reachability: deterministic until threshold, then probabilistic.
+
+    Attempts exact reachability layer by layer. If the number of stars exceeds
+    max_stars or time exceeds timeout_per_layer, switches to probabilistic
+    verification for the remaining layers.
+    """
+    import time
+
+    max_stars = kwargs.get('max_stars', 1000)
+    timeout_per_layer = kwargs.get('timeout_per_layer', 30.0)
+    verbose = kwargs.get('verbose', False)
+
+    # Get layers
+    layers = list(model.children())
+    if not layers:
+        layers = [model]
+
+    current_sets = [input_set]
+
+    for i, layer in enumerate(layers):
+        if verbose:
+            print(f"Layer {i+1}/{len(layers)}: {type(layer).__name__}")
+
+        start_time = time.time()
+
+        try:
+            # Try deterministic reachability
+            next_sets = reach_layer(layer, current_sets, 'exact', **kwargs)
+            elapsed = time.time() - start_time
+
+            # Check thresholds
+            if len(next_sets) > max_stars:
+                if verbose:
+                    print(f"  Exceeded {max_stars} stars, switching to probabilistic")
+                raise _SwitchToProbabilistic()
+
+            if elapsed > timeout_per_layer:
+                if verbose:
+                    print(f"  Exceeded {timeout_per_layer}s timeout, switching to probabilistic")
+                raise _SwitchToProbabilistic()
+
+            current_sets = next_sets
+
+        except (_SwitchToProbabilistic, MemoryError):
+            # Switch to probabilistic for remaining layers
+            remaining_model = nn.Sequential(*layers[i:])
+
+            # Get bounds from current sets
+            all_lb = []
+            all_ub = []
+            for s in current_sets:
+                if hasattr(s, 'estimate_ranges'):
+                    lb, ub = s.estimate_ranges()
+                elif hasattr(s, 'get_ranges'):
+                    lb, ub = s.get_ranges()
+                else:
+                    lb, ub = s.lb, s.ub
+                all_lb.append(lb.flatten())
+                all_ub.append(ub.flatten())
+
+            combined_lb = np.min(np.stack(all_lb), axis=0)
+            combined_ub = np.max(np.stack(all_ub), axis=0)
+
+            # Run probabilistic on remaining network
+            return _reach_probabilistic(
+                remaining_model,
+                Box(combined_lb, combined_ub),
+                **kwargs
+            )
+
+    return current_sets
+
+
+class _SwitchToProbabilistic(Exception):
+    """Signal to switch from deterministic to probabilistic."""
+    # TODO:
+    pass

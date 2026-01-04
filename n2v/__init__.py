@@ -10,15 +10,17 @@ Translated from the original MATLAB NNV tool by the VeriVital research group.
 __version__ = "2.0.0"
 __author__ = "NNV Team"
 
-from n2v.sets import Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope, HalfSpace
+from n2v.sets import Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope, HalfSpace, ProbabilisticBox
 from n2v.nn import NeuralNetwork
 from n2v import utils
+from n2v import probabilistic
 from n2v.config import config, set_parallel, set_lp_solver, get_config
 
 __all__ = [
     "Star",
     "Zono",
     "Box",
+    "ProbabilisticBox",
     "ImageStar",
     "ImageZono",
     "Hexatope",
@@ -26,6 +28,7 @@ __all__ = [
     "HalfSpace",
     "NeuralNetwork",
     "utils",
+    "probabilistic",
     "config",
     "set_parallel",
     "set_lp_solver",
