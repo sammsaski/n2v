@@ -52,3 +52,6 @@ examples/CompareNNV/data/
 
 # Claude
 .claude/
+
+# Research files
+examples/Research
