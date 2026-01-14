@@ -11,12 +11,14 @@ import warnings
 
 from n2v.sets import Box
 from n2v.sets.probabilistic_box import ProbabilisticBox
+from n2v.sets.copula_region import CopulaRegion
 from n2v.probabilistic.conformal import conformal_inference
 from n2v.probabilistic.surrogates.naive import NaiveSurrogate
 from n2v.probabilistic.surrogates.clipping_block import (
     ClippingBlockSurrogate,
     BatchedClippingBlockSurrogate
 )
+from n2v.probabilistic.copula.predictor import CopulaConformalPredictor
 
 
 def verify(
@@ -31,7 +33,7 @@ def verify(
     batch_size: int = 100,
     seed: Optional[int] = None,
     verbose: bool = False
-) -> ProbabilisticBox:
+) -> Union[ProbabilisticBox, CopulaRegion]:
     """
     Model-agnostic probabilistic reachability verification.
 
@@ -74,6 +76,9 @@ def verify(
                               conservative in high dimensions.
                    - 'clipping_block': Projects onto convex hull of training
                                        outputs. Tighter bounds. Default.
+                   - 'copula': Uses copula density as conformity score.
+                               Returns CopulaRegion instead of ProbabilisticBox.
+                               Produces tighter regions for correlated outputs.
 
         training_samples: Number of samples for surrogate construction.
                          Only used for 'clipping_block'. Default: m // 2.
@@ -93,6 +98,10 @@ def verify(
         - Lower and upper bounds on the reachable set
         - Guarantee parameters (m, ℓ, ε)
         - Computed coverage and confidence levels
+
+        Or CopulaRegion if surrogate='copula':
+        - Non-rectangular region capturing correlation structure
+        - Use .to_box() to convert to ProbabilisticBox
 
     Example:
         >>> import torch
@@ -150,8 +159,22 @@ def verify(
         raise ValueError(f"ell must be in [1, m], got ell={ell}, m={m}")
     if not 0 < epsilon < 1:
         raise ValueError(f"epsilon must be in (0, 1), got {epsilon}")
-    if surrogate not in ('naive', 'clipping_block'):
-        raise ValueError(f"surrogate must be 'naive' or 'clipping_block', got {surrogate}")
+    if surrogate not in ('naive', 'clipping_block', 'copula'):
+        raise ValueError(f"surrogate must be 'naive', 'clipping_block', or 'copula', got {surrogate}")
+
+    # Handle copula surrogate separately (different algorithm)
+    if surrogate == 'copula':
+        return _verify_copula(
+            model=model,
+            input_set=input_set,
+            m=m,
+            ell=ell,
+            epsilon=epsilon,
+            training_samples=training_samples,
+            batch_size=batch_size,
+            seed=seed,
+            verbose=verbose
+        )
 
     input_dim = input_set.dim
 
@@ -359,3 +382,73 @@ def _batched_inference(
         outputs.append(batch_output)
 
     return np.vstack(outputs)
+
+
+def _verify_copula(
+    model: Callable[[np.ndarray], np.ndarray],
+    input_set: Box,
+    m: int,
+    ell: Optional[int],
+    epsilon: float,
+    training_samples: Optional[int],
+    batch_size: int,
+    seed: Optional[int],
+    verbose: bool
+) -> CopulaRegion:
+    """
+    Copula-based probabilistic verification.
+
+    Uses copula density as the conformity score to produce prediction regions
+    that capture correlation structure between output dimensions.
+
+    Args:
+        model: Model callable
+        input_set: Input Box region
+        m: Calibration set size
+        ell: Rank parameter
+        epsilon: Miscoverage level
+        training_samples: Number of training samples
+        batch_size: Batch size for inference
+        seed: Random seed
+        verbose: Print progress
+
+    Returns:
+        CopulaRegion with probabilistic guarantee
+    """
+    # Set defaults
+    if ell is None:
+        ell = m - 1
+    if training_samples is None:
+        training_samples = m // 2
+
+    if verbose:
+        print(f"Copula-based Probabilistic Verification")
+        print(f"  Input dimension: {input_set.dim}")
+        print(f"  Calibration size m: {m}")
+        print(f"  Rank ell: {ell}")
+        print(f"  Miscoverage epsilon: {epsilon}")
+        print(f"  Training samples: {training_samples}")
+
+    # Create and calibrate predictor
+    predictor = CopulaConformalPredictor()
+    predictor.calibrate(
+        model=model,
+        input_lb=input_set.lb.flatten(),
+        input_ub=input_set.ub.flatten(),
+        training_samples=training_samples,
+        m=m,
+        ell=ell,
+        epsilon=epsilon,
+        batch_size=batch_size,
+        seed=seed,
+        verbose=verbose
+    )
+
+    # Create CopulaRegion
+    result = CopulaRegion(predictor)
+
+    if verbose:
+        print(f"\nResult: {result}")
+        print(result.get_guarantee_string())
+
+    return result

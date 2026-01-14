@@ -14,6 +14,7 @@ from n2v.sets.halfspace import HalfSpace
 from n2v.sets.hexatope import Hexatope
 from n2v.sets.octatope import Octatope
 from n2v.sets.probabilistic_box import ProbabilisticBox
+from n2v.sets.copula_region import CopulaRegion
 
 __all__ = [
     "Box",
@@ -25,4 +26,5 @@ __all__ = [
     "Hexatope",
     "Octatope",
     "ProbabilisticBox",
+    "CopulaRegion",
 ]

@@ -363,3 +363,213 @@ class TestParameterSensitivity:
         # Lower ell with lower coverage target should give tighter bounds
         assert width_low_cov <= width_high_cov, \
             f"Lower ell gave wider bounds: high_cov={width_high_cov:.4f}, low_cov={width_low_cov:.4f}"
+
+
+class TestCopulaCoverageGuarantee:
+    """Tests that copula-based coverage guarantees hold empirically."""
+
+    def test_copula_coverage_guarantee_linear_model(self):
+        """
+        Verify that copula method achieves stated coverage.
+        """
+        np.random.seed(42)
+
+        # Correlated output model
+        def model(x):
+            y1 = x[:, 0] + 0.5 * x[:, 1]
+            y2 = 0.8 * y1 + 0.2 * x[:, 1]  # y2 correlated with y1
+            return np.column_stack([y1, y2])
+
+        lb = np.zeros(2)
+        ub = np.ones(2)
+        input_set = Box(lb, ub)
+
+        # Run copula verification with 95% coverage
+        epsilon = 0.05
+        result = verify(
+            model=model,
+            input_set=input_set,
+            m=800,
+            epsilon=epsilon,
+            surrogate='copula',
+            training_samples=400,
+            seed=42
+        )
+
+        assert result.coverage == 1 - epsilon
+
+        # Sample many points and check coverage
+        n_test = 10000
+        test_inputs = np.random.uniform(lb, ub, size=(n_test, 2)).astype(np.float32)
+        test_outputs = model(test_inputs)
+
+        # Use copula region's contains method
+        inside = result.contains_batch(test_outputs)
+        empirical_coverage = np.mean(inside)
+
+        # Empirical coverage should be close to (1 - epsilon) = 0.95
+        assert empirical_coverage > 0.90, \
+            f"Copula empirical coverage {empirical_coverage:.3f} too low (expected ~0.95)"
+
+    def test_copula_coverage_guarantee_nonlinear_model(self):
+        """
+        Verify copula coverage for a nonlinear model.
+        """
+        np.random.seed(123)
+        torch.manual_seed(123)
+
+        # Neural network with correlated outputs
+        torch_model = nn.Sequential(
+            nn.Linear(3, 16),
+            nn.ReLU(),
+            nn.Linear(16, 2)
+        )
+        torch_model.eval()
+
+        def model(x):
+            with torch.no_grad():
+                return torch_model(torch.tensor(x, dtype=torch.float32)).numpy()
+
+        lb = np.array([-1.0, -1.0, -1.0])
+        ub = np.array([1.0, 1.0, 1.0])
+        input_set = Box(lb, ub)
+
+        # Run copula verification with 90% coverage
+        epsilon = 0.10
+        result = verify(
+            model=model,
+            input_set=input_set,
+            m=800,
+            epsilon=epsilon,
+            surrogate='copula',
+            training_samples=400,
+            seed=123
+        )
+
+        # Sample and check coverage
+        n_test = 5000
+        test_inputs = np.random.uniform(lb, ub, size=(n_test, 3)).astype(np.float32)
+        test_outputs = model(test_inputs)
+
+        inside = result.contains_batch(test_outputs)
+        empirical_coverage = np.mean(inside)
+
+        # Should achieve at least 85%
+        assert empirical_coverage > 0.85, \
+            f"Copula empirical coverage {empirical_coverage:.3f} too low (expected ~0.90)"
+
+
+class TestCopulaVsHyperrectangle:
+    """Tests comparing copula regions to hyperrectangle methods."""
+
+    def test_copula_tighter_for_correlated_outputs(self):
+        """
+        Verify that copula produces smaller regions for correlated outputs.
+
+        For highly correlated outputs, the copula region should have a
+        significantly smaller volume ratio compared to the bounding hyperrectangle.
+        """
+        np.random.seed(42)
+
+        # Highly correlated output model
+        def model(x):
+            y1 = x[:, 0] + x[:, 1]
+            y2 = 0.95 * y1 + 0.05 * x[:, 0]  # Highly correlated with y1
+            return np.column_stack([y1, y2])
+
+        lb = np.zeros(2)
+        ub = np.ones(2)
+        input_set = Box(lb, ub)
+
+        # Run copula verification
+        result = verify(
+            model=model,
+            input_set=input_set,
+            m=800,
+            epsilon=0.01,
+            surrogate='copula',
+            training_samples=400,
+            seed=42
+        )
+
+        # Compute volume ratio
+        volume_ratio = result.volume_ratio(n_samples=10000, seed=42)
+
+        # For highly correlated outputs, volume ratio should be significantly < 1
+        # Expected: around 0.3-0.5 for rho ≈ 0.95
+        assert volume_ratio < 0.8, \
+            f"Volume ratio {volume_ratio:.3f} too high for correlated outputs (expected < 0.8)"
+
+    def test_copula_similar_to_hyperrect_for_independent(self):
+        """
+        Verify that copula is similar to hyperrectangle for independent outputs.
+
+        For uncorrelated outputs, the copula region should have a volume
+        ratio close to 1 compared to the bounding hyperrectangle.
+        """
+        np.random.seed(42)
+
+        # Independent output model
+        def model(x):
+            y1 = x[:, 0]  # Only depends on x1
+            y2 = x[:, 1]  # Only depends on x2
+            return np.column_stack([y1, y2])
+
+        lb = np.zeros(2)
+        ub = np.ones(2)
+        input_set = Box(lb, ub)
+
+        # Run copula verification
+        result = verify(
+            model=model,
+            input_set=input_set,
+            m=800,
+            epsilon=0.01,
+            surrogate='copula',
+            training_samples=400,
+            seed=42
+        )
+
+        # Compute volume ratio
+        volume_ratio = result.volume_ratio(n_samples=10000, seed=42)
+
+        # For independent outputs, volume ratio should be close to 1
+        # (copula region is similar to hyperrectangle)
+        assert volume_ratio > 0.6, \
+            f"Volume ratio {volume_ratio:.3f} too low for independent outputs (expected > 0.6)"
+
+    def test_copula_region_converts_to_box(self):
+        """
+        Test that CopulaRegion.to_box() produces a valid ProbabilisticBox.
+        """
+        np.random.seed(42)
+
+        def model(x):
+            return x @ np.array([[1, 0.5], [0.5, 1]])
+
+        lb = np.zeros(2)
+        ub = np.ones(2)
+        input_set = Box(lb, ub)
+
+        result = verify(
+            model=model,
+            input_set=input_set,
+            m=500,
+            epsilon=0.01,
+            surrogate='copula',
+            seed=42
+        )
+
+        # Convert to box
+        box = result.to_box(n_samples=5000, seed=42)
+
+        from n2v.sets import ProbabilisticBox
+        assert isinstance(box, ProbabilisticBox)
+        assert box.m == result.m
+        assert box.ell == result.ell
+        assert box.epsilon == result.epsilon
+
+        # Box should contain the center
+        center = result.center
+        assert np.all(center >= box.lb.flatten())
+        assert np.all(center <= box.ub.flatten())
