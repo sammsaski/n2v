@@ -205,8 +205,8 @@ def main():
             x_tensor = torch.tensor(x, dtype=torch.float32)
             return model(x_tensor).numpy()
 
-    t_prob_start = time.time()
-    prob_result = prob_verify(
+    t_prob_naive_start = time.time()
+    prob_naive_result = prob_verify(
         model=model_fn,
         input_set=input_box,
         m=5000,           # Calibration samples
@@ -215,11 +215,11 @@ def main():
         seed=42,
         verbose=True
     )
-    t_prob = time.time() - t_prob_start
+    t_prob_naive = time.time() - t_prob_naive_start
 
-    print(f"    Time: {t_prob:.3f}s")
-    print(f"    Probabilistic bounds: lb={prob_result.lb}, ub={prob_result.ub}")
-    print(f"    {prob_result.get_guarantee_string()}")
+    print(f"    Time: {t_prob_naive:.3f}s")
+    print(f"    Probabilistic bounds: lb={prob_naive_result.lb.flatten()}, ub={prob_naive_result.ub.flatten()}")
+    print(f"    {prob_naive_result.get_guarantee_string()}")
 
     # =========================================
     # Step 7: Sample evaluations
@@ -262,70 +262,61 @@ def main():
     # =========================================
     print("\n[8] Plotting results...")
 
-    # Create figure with two subplots: zoomed (MATLAB-like) and full view
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    fig, ax = plt.subplots(figsize=(10, 8))
 
     # Plot colors for exact stars (cycling like MATLAB)
     exact_colors = ['red', 'green', 'blue', 'magenta', 'yellow']
-    prob_lb = prob_result.lb.flatten()
-    prob_ub = prob_result.ub.flatten()
+    prob_naive_lb = prob_naive_result.lb.flatten()
+    prob_naive_ub = prob_naive_result.ub.flatten()
 
     from matplotlib.patches import Patch
 
-    for ax_idx, ax in enumerate(axes):
-        # 1. Plot overapproximate set (cyan, background)
-        for star in approx_stars:
-            plot_star_2d(ax, star, color='cyan', alpha=0.8, edgecolor='black', linewidth=1.5)
+    # 1. Plot overapproximate set (cyan, background)
+    for star in approx_stars:
+        plot_star_2d(ax, star, color='cyan', alpha=0.8, edgecolor='black', linewidth=1.5)
 
-        # 2. Plot exact sets (colored polygons)
-        for i, star in enumerate(exact_stars):
-            color = exact_colors[i % len(exact_colors)]
-            plot_star_2d(ax, star, color=color, alpha=0.7, edgecolor='black', linewidth=0.5)
+    # 2. Plot probabilistic (naive) bounds (shaded with fine dashed edge)
+    prob_naive_rect = plt.Rectangle(
+        (prob_naive_lb[0], prob_naive_lb[1]),
+        prob_naive_ub[0] - prob_naive_lb[0],
+        prob_naive_ub[1] - prob_naive_lb[1],
+        facecolor='lightgreen', alpha=0.25,
+        edgecolor='darkgreen', linewidth=2.0,
+        linestyle=(0, (3, 1)),  # Fine dashes: 3 on, 1 off
+        label='Probabilistic (naive)'
+    )
+    ax.add_patch(prob_naive_rect)
 
-        # 3. Plot sample evaluations (black dots)
-        ax.plot(sample_outputs[:, 0], sample_outputs[:, 1], 'k.', markersize=4, label='Samples')
+    # 3. Plot exact sets (colored polygons)
+    for i, star in enumerate(exact_stars):
+        color = exact_colors[i % len(exact_colors)]
+        plot_star_2d(ax, star, color=color, alpha=0.7, edgecolor='black', linewidth=0.5)
 
-        # 4. Plot corner evaluations (black x markers)
-        ax.plot(y_lb[0], y_lb[1], 'kx', markersize=8, markeredgewidth=2)
-        ax.plot(y_ub[0], y_ub[1], 'kx', markersize=8, markeredgewidth=2)
-        ax.plot(y_mid[0], y_mid[1], 'kx', markersize=8, markeredgewidth=2)
+    # 5. Plot sample evaluations (black dots)
+    ax.plot(sample_outputs[:, 0], sample_outputs[:, 1], 'k.', markersize=4, label='Samples')
 
-        # 5. Plot probabilistic bounds (dashed rectangle)
-        prob_rect = plt.Rectangle(
-            (prob_lb[0], prob_lb[1]),
-            prob_ub[0] - prob_lb[0],
-            prob_ub[1] - prob_lb[1],
-            fill=False, edgecolor='darkgreen', linewidth=2.5,
-            linestyle='--', label='Probabilistic (naive)'
-        )
-        ax.add_patch(prob_rect)
+    # 6. Plot corner evaluations (black x markers)
+    ax.plot(y_lb[0], y_lb[1], 'kx', markersize=8, markeredgewidth=2)
+    ax.plot(y_ub[0], y_ub[1], 'kx', markersize=8, markeredgewidth=2)
+    ax.plot(y_mid[0], y_mid[1], 'kx', markersize=8, markeredgewidth=2)
 
-        # Set axis properties
-        ax.set_xlabel('Output Dimension 1', fontsize=12)
-        ax.set_ylabel('Output Dimension 2', fontsize=12)
-        ax.grid(True, alpha=0.3)
-        ax.set_axisbelow(True)
+    # Set axis properties
+    ax.set_xlabel('Output Dimension 1', fontsize=12)
+    ax.set_ylabel('Output Dimension 2', fontsize=12)
+    ax.set_title('Output Reachable Sets', fontsize=14)
+    ax.grid(True, alpha=0.3)
+    ax.set_axisbelow(True)
+    ax.autoscale()
 
-        if ax_idx == 0:
-            # Left plot: Zoomed to MATLAB-like view (exact + nearby region)
-            ax.set_title('Zoomed View (MATLAB-like)', fontsize=14)
-            # Set limits based on exact bounds with padding
-            padding = 10
-            ax.set_xlim(exact_lb[0] - padding, exact_ub[0] + padding)
-            ax.set_ylim(exact_lb[1] - padding, exact_ub[1] + padding)
-        else:
-            # Right plot: Full view showing all bounds
-            ax.set_title('Full View (all methods)', fontsize=14)
-            ax.autoscale()
-
-    # Add legend to the right plot
+    # Add legend
     legend_elements = [
         Patch(facecolor='cyan', edgecolor='black', alpha=0.8, label='Overapproximate'),
+        Patch(facecolor='lightgreen', edgecolor='darkgreen', alpha=0.25,
+              linestyle=(0, (3, 1)), linewidth=2.0, label='Probabilistic (naive)'),
         Patch(facecolor='red', edgecolor='black', alpha=0.7, label='Exact (multiple stars)'),
-        plt.Line2D([0], [0], color='darkgreen', linewidth=2.5, linestyle='--', label='Probabilistic (naive)'),
         plt.Line2D([0], [0], marker='.', color='black', linestyle='None', markersize=8, label='Sample evaluations'),
     ]
-    axes[1].legend(handles=legend_elements, loc='upper right', fontsize=10)
+    ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
 
     plt.tight_layout()
 
@@ -333,47 +324,6 @@ def main():
     output_file = script_dir / "output_reachability_comparison.png"
     plt.savefig(output_file, dpi=150, bbox_inches='tight')
     print(f"    Figure saved to: {output_file}")
-
-    # Also save a MATLAB-style zoomed version
-    fig2, ax2 = plt.subplots(figsize=(10, 8))
-
-    # Plot in MATLAB order: approx (background), exact (foreground), samples
-    for star in approx_stars:
-        plot_star_2d(ax2, star, color='cyan', alpha=0.8, edgecolor='black', linewidth=1.5)
-
-    for i, star in enumerate(exact_stars):
-        color = exact_colors[i % len(exact_colors)]
-        plot_star_2d(ax2, star, color=color, alpha=0.7, edgecolor='black', linewidth=0.5)
-
-    ax2.plot(sample_outputs[:, 0], sample_outputs[:, 1], 'k.', markersize=4)
-    ax2.plot(y_lb[0], y_lb[1], 'kx', markersize=8, markeredgewidth=2)
-    ax2.plot(y_ub[0], y_ub[1], 'kx', markersize=8, markeredgewidth=2)
-    ax2.plot(y_mid[0], y_mid[1], 'kx', markersize=8, markeredgewidth=2)
-
-    # Add probabilistic bounds
-    prob_rect2 = plt.Rectangle(
-        (prob_lb[0], prob_lb[1]),
-        prob_ub[0] - prob_lb[0],
-        prob_ub[1] - prob_lb[1],
-        fill=False, edgecolor='darkgreen', linewidth=2.5,
-        linestyle='--', label='Probabilistic (naive)'
-    )
-    ax2.add_patch(prob_rect2)
-
-    ax2.set_xlabel('Output Dimension 1', fontsize=12)
-    ax2.set_ylabel('Output Dimension 2', fontsize=12)
-    ax2.set_title('Output Reachable Sets', fontsize=14)
-    ax2.grid(True, alpha=0.3)
-    ax2.set_axisbelow(True)
-
-    # Zoom to exact region (like MATLAB plot)
-    padding = 10
-    ax2.set_xlim(exact_lb[0] - padding, exact_ub[0] + padding)
-    ax2.set_ylim(exact_lb[1] - padding, exact_ub[1] + padding)
-
-    output_file2 = script_dir / "output_reachability_zoomed.png"
-    plt.savefig(output_file2, dpi=150, bbox_inches='tight')
-    print(f"    Zoomed figure saved to: {output_file2}")
 
     plt.show()
 
@@ -383,15 +333,16 @@ def main():
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    print(f"  Exact reachability:    {len(exact_stars)} stars, {t_exact:.3f}s")
-    print(f"  Approx reachability:   {len(approx_stars)} stars, {t_approx:.3f}s")
-    print(f"  Probabilistic (naive): 1 box, {t_prob:.3f}s")
-    print(f"\n  Exact speedup over approx: {t_exact/t_approx:.1f}x slower")
-    print(f"  Probabilistic speedup over exact: {t_exact/t_prob:.1f}x faster")
+    print(f"  Exact reachability:           {len(exact_stars)} stars, {t_exact:.3f}s")
+    print(f"  Approx reachability:          {len(approx_stars)} stars, {t_approx:.3f}s")
+    print(f"  Probabilistic (naive):        1 box, {t_prob_naive:.3f}s")
+    print(f"\n  Timing comparison:")
+    print(f"    Exact is {t_exact/t_approx:.1f}x slower than approx")
+    print(f"    Prob (naive) is {t_exact/t_prob_naive:.1f}x faster than exact")
     print("\n  Bounds comparison:")
-    print(f"    Exact:         [{exact_lb[0]:.2f}, {exact_ub[0]:.2f}] x [{exact_lb[1]:.2f}, {exact_ub[1]:.2f}]")
-    print(f"    Approx:        [{approx_lb[0]:.2f}, {approx_ub[0]:.2f}] x [{approx_lb[1]:.2f}, {approx_ub[1]:.2f}]")
-    print(f"    Probabilistic: [{prob_lb[0]:.2f}, {prob_ub[0]:.2f}] x [{prob_lb[1]:.2f}, {prob_ub[1]:.2f}]")
+    print(f"    Exact:              [{exact_lb[0]:.2f}, {exact_ub[0]:.2f}] x [{exact_lb[1]:.2f}, {exact_ub[1]:.2f}]")
+    print(f"    Approx:             [{approx_lb[0]:.2f}, {approx_ub[0]:.2f}] x [{approx_lb[1]:.2f}, {approx_ub[1]:.2f}]")
+    print(f"    Prob (naive):       [{prob_naive_lb[0]:.2f}, {prob_naive_ub[0]:.2f}] x [{prob_naive_lb[1]:.2f}, {prob_naive_ub[1]:.2f}]")
     print("=" * 60)
 
 

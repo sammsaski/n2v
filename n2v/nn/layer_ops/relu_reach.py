@@ -265,18 +265,21 @@ def _relu_single_star_approx(
     """
     Approximate ReLU reachability for a single Star using triangle relaxation.
 
-    Algorithm (from MATLAB NNV PosLin.m stepReachStarApprox):
-    1. Estimate ranges for all dimensions
+    Algorithm (from MATLAB NNV PosLin.m reach_star_approx2):
+    1. Estimate ranges for all dimensions to quickly identify neurons with ub <= 0
     2. Reset neurons that are always ≤ 0 (set to zero)
     3. Keep neurons that are always > 0 (no change)
     4. For neurons crossing zero (lb < 0 < ub):
+       - Use LP to compute TIGHT bounds (this is the key difference from fast approx)
        - Add new predicate variable y representing output
        - Add triangle constraints:
          * y ≥ 0 (output non-negative)
          * y ≥ x (output at least input when active)
          * y ≤ (ub/(ub-lb))*(x - lb) (triangle upper bound)
 
-    This avoids splitting but creates an over-approximation.
+    This avoids splitting but creates an over-approximation. Using LP-optimized
+    bounds for the triangle constraints produces much tighter results than using
+    estimated bounds, especially for deep networks where errors compound.
 
     Args:
         I: Input Star
@@ -288,18 +291,22 @@ def _relu_single_star_approx(
     if I is None or I.dim == 0:
         return None
 
-    # Estimate ranges
-    lb, ub = I.estimate_ranges()
+    # Step 1: Estimate ranges to quickly identify definitely-inactive neurons
+    lb_est, ub_est = I.estimate_ranges()
 
-    if lb is None or ub is None:
+    if lb_est is None or ub_est is None:
         return None
 
-    lb = lb.flatten()
-    ub = ub.flatten()
+    lb_est = lb_est.flatten()
+    ub_est = ub_est.flatten()
 
-    # Step 1: Handle neurons always inactive (ub <= 0) - reset to 0
-    reset_map = np.where(ub <= 0)[0]
+    # Find neurons definitely inactive (ub <= 0 from estimate)
+    reset_map = np.where(ub_est <= 0)[0]
 
+    # Find neurons potentially crossing zero (need LP to confirm)
+    crossing_map_est = np.where((lb_est < 0) & (ub_est > 0))[0]
+
+    # Step 2: Reset definitely inactive neurons
     V = I.V.copy()
     V[reset_map, :] = 0
 
@@ -315,16 +322,64 @@ def _relu_single_star_approx(
 
     current_star = Star(V, I.C, I.d, I.predicate_lb, I.predicate_ub, outer_zono=new_Z)
 
-    # Step 2: Find neurons crossing zero (lb < 0 and ub > 0) - apply triangle approximation
-    crossing_map = np.where((lb < 0) & (ub > 0))[0]
-
-    if len(crossing_map) == 0:
+    if len(crossing_map_est) == 0:
         return current_star
 
-    # Apply triangle approximation to all crossing neurons at once (batch processing)
-    # This is much faster than processing one neuron at a time
+    # Step 3: Use LP to get TIGHT bounds for neurons potentially crossing zero
+    # This is the key step that matches MATLAB NNV's reach_star_approx2
+    lb_tight = np.zeros(len(crossing_map_est))
+    ub_tight = np.zeros(len(crossing_map_est))
+
+    # Get tight upper bounds first (like MATLAB getMaxs)
+    for i, idx in enumerate(crossing_map_est):
+        _, ub_val = current_star.get_range(idx, lp_solver)
+        ub_tight[i] = ub_val if ub_val is not None else ub_est[idx]
+
+    # Find which neurons are actually still crossing zero after LP
+    still_positive = ub_tight > 0
+    actually_inactive = ~still_positive
+
+    # Reset neurons that LP confirmed are <= 0
+    if np.any(actually_inactive):
+        inactive_indices = crossing_map_est[actually_inactive]
+        V2 = current_star.V.copy()
+        V2[inactive_indices, :] = 0
+        if current_star.Z is not None:
+            c2 = current_star.Z.c.copy()
+            c2[inactive_indices] = 0
+            V2_z = current_star.Z.V.copy()
+            V2_z[inactive_indices, :] = 0
+            new_Z2 = Zono(c2, V2_z)
+        else:
+            new_Z2 = None
+        current_star = Star(V2, current_star.C, current_star.d,
+                           current_star.predicate_lb, current_star.predicate_ub,
+                           outer_zono=new_Z2)
+
+    # Get tight lower bounds for neurons that still have ub > 0
+    crossing_indices = crossing_map_est[still_positive]
+    ub_for_crossing = ub_tight[still_positive]
+
+    if len(crossing_indices) == 0:
+        return current_star
+
+    lb_for_crossing = np.zeros(len(crossing_indices))
+    for i, idx in enumerate(crossing_indices):
+        lb_val, _ = current_star.get_range(idx, lp_solver)
+        lb_for_crossing[i] = lb_val if lb_val is not None else lb_est[idx]
+
+    # Find neurons that are actually crossing zero (lb < 0 and ub > 0)
+    actually_crossing = lb_for_crossing < 0
+    final_crossing_indices = crossing_indices[actually_crossing]
+    final_lb = lb_for_crossing[actually_crossing]
+    final_ub = ub_for_crossing[actually_crossing]
+
+    if len(final_crossing_indices) == 0:
+        return current_star
+
+    # Step 4: Apply triangle approximation with tight LP bounds
     return _apply_triangle_approx_multi(
-        current_star, crossing_map, lb[crossing_map], ub[crossing_map]
+        current_star, final_crossing_indices, final_lb, final_ub
     )
 
 
