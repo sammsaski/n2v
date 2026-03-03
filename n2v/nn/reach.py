@@ -20,6 +20,9 @@ from n2v.sets.image_zono import ImageZono
 from n2v.nn.layer_ops.dispatcher import reach_layer
 from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
 
+# Import model preprocessing
+from n2v.utils.model_preprocessing import fuse_batchnorm, has_batchnorm
+
 import torch.fx as fx
 
 # ONNX Reshape type (optional — onnx2torch may not be installed)
@@ -84,6 +87,11 @@ def reach_pytorch_model(
 
     if method == 'hybrid':
         return _reach_hybrid(model, input_set, **kwargs)
+
+    # Auto-fuse BatchNorm layers if present
+    if has_batchnorm(model):
+        model = fuse_batchnorm(model)
+
     # Validate method for set type
     # Note: ImageStar is checked first since it's more specific than Star
     if isinstance(input_set, ImageStar):
@@ -443,7 +451,18 @@ def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):
 
     first_input, second_input = input_nodes
 
-    # Check if second input is a parameter (bias term)
+    # Case 1: Both inputs are computed sets (residual connection)
+    if (first_input.name in node_values and
+            hasattr(second_input, 'name') and second_input.name in node_values):
+        sets_a = node_values[first_input.name]
+        sets_b = node_values[second_input.name]
+
+        if not hasattr(module, 'math_op_function'):
+            return None
+        op_name = module.math_op_function.__name__
+        return _add_sets(sets_a, sets_b, op_name)
+
+    # Case 2: Second input is a parameter (bias/constant)
     if second_input.op != 'get_attr':
         return None
 
@@ -558,6 +577,136 @@ def _handle_onnx_matmul(module, node, node_values, graph_module, set_type):
         raise NotImplementedError(
             f"ONNX MatMul not supported for {set_type.__name__}"
         )
+
+
+def _coerce_set_types(sa, sb):
+    """
+    Coerce mismatched set types for element-wise operations.
+
+    Handles cases where one branch produces an ImageStar/ImageZono and
+    the other produces a Star/Zono (e.g., after flatten in one branch).
+
+    Returns:
+        Tuple (sa_coerced, sb_coerced) with compatible types.
+    """
+    # ImageStar + Star -> flatten ImageStar to Star
+    if isinstance(sa, ImageStar) and isinstance(sb, Star) and not isinstance(sb, ImageStar):
+        return sa.flatten_to_star(), sb
+    if isinstance(sb, ImageStar) and isinstance(sa, Star) and not isinstance(sa, ImageStar):
+        return sa, sb.flatten_to_star()
+
+    # ImageZono + Zono -> convert ImageZono to plain Zono
+    if isinstance(sa, ImageZono) and isinstance(sb, Zono) and not isinstance(sb, ImageZono):
+        return Zono(sa.c, sa.V), sb
+    if isinstance(sb, ImageZono) and isinstance(sa, Zono) and not isinstance(sa, ImageZono):
+        return sa, Zono(sb.c, sb.V)
+
+    return sa, sb
+
+
+def _add_sets(sets_a, sets_b, op_name):
+    """
+    Element-wise addition or subtraction of two lists of sets.
+
+    Used for residual connections where both inputs are computed sets
+    (not constant parameters).
+
+    For Star/ImageStar: Both sets share the same predicate variables alpha
+    because they originated from the same input set. V_out = V1 +/- V2.
+    Constraints (C, d, predicate_lb, predicate_ub) are preserved unchanged.
+
+    For Zono/ImageZono: Generator tracking is not available, so we use
+    Minkowski sum (generator concatenation) which is sound but over-approximate.
+    c_out = c1 +/- c2, V_out = hstack(V1, +/-V2).
+
+    For Box: Interval arithmetic. Add: lb1+lb2, ub1+ub2. Sub: lb1-ub2, ub1-lb2.
+
+    Args:
+        sets_a: List of sets from the first operand
+        sets_b: List of sets from the second operand
+        op_name: 'add' or 'sub'
+
+    Returns:
+        List of output sets
+    """
+    if len(sets_a) != len(sets_b):
+        raise ValueError(
+            f"Cannot {op_name} set lists of different lengths: "
+            f"{len(sets_a)} vs {len(sets_b)}"
+        )
+
+    output_sets = []
+
+    for sa, sb in zip(sets_a, sets_b):
+        # Coerce mismatched types (e.g., ImageStar + Star)
+        sa, sb = _coerce_set_types(sa, sb)
+
+        if isinstance(sa, ImageStar) and isinstance(sb, ImageStar):
+            # ImageStar: element-wise V addition (shared predicates)
+            if op_name == 'add' or 'add' in op_name:
+                V_out = sa.V + sb.V
+            else:
+                V_out = sa.V - sb.V
+
+            out = ImageStar(
+                V_out, sa.C, sa.d, sa.predicate_lb, sa.predicate_ub,
+                sa.height, sa.width, sa.num_channels
+            )
+            output_sets.append(out)
+
+        elif isinstance(sa, Star) and isinstance(sb, Star):
+            # Star: element-wise V addition (shared predicates)
+            if op_name == 'add' or 'add' in op_name:
+                V_out = sa.V + sb.V
+            else:
+                V_out = sa.V - sb.V
+
+            out = Star(V_out, sa.C, sa.d, sa.predicate_lb, sa.predicate_ub)
+            output_sets.append(out)
+
+        elif isinstance(sa, ImageZono) and isinstance(sb, ImageZono):
+            # ImageZono: Minkowski sum via generator concatenation
+            if op_name == 'add' or 'add' in op_name:
+                c_out = sa.c + sb.c
+                V_out = np.hstack([sa.V, sb.V])
+            else:
+                c_out = sa.c - sb.c
+                V_out = np.hstack([sa.V, -sb.V])
+
+            out = ImageZono(c_out, V_out, sa.height, sa.width, sa.num_channels)
+            output_sets.append(out)
+
+        elif isinstance(sa, Zono) and isinstance(sb, Zono):
+            # Zono: Minkowski sum via generator concatenation
+            if op_name == 'add' or 'add' in op_name:
+                c_out = sa.c + sb.c
+                V_out = np.hstack([sa.V, sb.V])
+            else:
+                c_out = sa.c - sb.c
+                V_out = np.hstack([sa.V, -sb.V])
+
+            out = Zono(c_out, V_out)
+            output_sets.append(out)
+
+        elif isinstance(sa, Box) and isinstance(sb, Box):
+            # Box: interval arithmetic
+            if op_name == 'add' or 'add' in op_name:
+                lb_out = sa.lb + sb.lb
+                ub_out = sa.ub + sb.ub
+            else:
+                lb_out = sa.lb - sb.ub
+                ub_out = sa.ub - sb.lb
+
+            out = Box(lb_out, ub_out)
+            output_sets.append(out)
+
+        else:
+            raise NotImplementedError(
+                f"Residual {op_name} not supported for "
+                f"{type(sa).__name__} and {type(sb).__name__}"
+            )
+
+    return output_sets
 
 
 def _reach_probabilistic(model, input_set, **kwargs):

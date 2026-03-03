@@ -5,7 +5,9 @@ Dispatches reachability computation for a single layer based on PyTorch layer ty
 and input set type, without requiring custom layer wrapper classes.
 """
 
+import torch
 import torch.nn as nn
+import numpy as np
 from typing import List, Union
 
 # Import set types
@@ -16,6 +18,9 @@ from n2v.sets.image_zono import ImageZono
 # Import layer-specific reach functions
 from . import linear_reach, relu_reach, conv2d_reach, flatten_reach
 from . import maxpool2d_reach, avgpool2d_reach, global_avgpool_reach
+from . import batchnorm_reach
+from . import pad_reach
+from .pad_reach import _PAD_TYPES
 
 # ONNX GlobalAveragePool types (optional — onnx2torch may not be installed)
 try:
@@ -127,6 +132,12 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_star(layer, input_sets)
 
+    elif isinstance(layer, (nn.BatchNorm1d, nn.BatchNorm2d)):
+        return batchnorm_reach.batchnorm_star(layer, input_sets)
+
+    elif isinstance(layer, _PAD_TYPES):
+        return pad_reach.pad_star(layer, input_sets)
+
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
@@ -167,6 +178,12 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_zono(layer, input_sets)
 
+    elif isinstance(layer, (nn.BatchNorm1d, nn.BatchNorm2d)):
+        return batchnorm_reach.batchnorm_zono(layer, input_sets)
+
+    elif isinstance(layer, _PAD_TYPES):
+        return pad_reach.pad_zono(layer, input_sets)
+
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
@@ -193,6 +210,9 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
 
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_box(layer, input_sets)
+
+    elif isinstance(layer, (nn.BatchNorm1d, nn.BatchNorm2d)):
+        return batchnorm_reach.batchnorm_box(layer, input_sets)
 
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
@@ -225,6 +245,14 @@ def _reach_layer_hexatope(layer: nn.Module, input_sets: List, method: str, **kwa
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_hexatope(layer, input_sets)
 
+    elif isinstance(layer, (nn.BatchNorm1d, nn.BatchNorm2d)):
+        scale, shift = batchnorm_reach._get_bn_params(layer)
+        dummy = nn.Linear(len(scale), len(scale), bias=True)
+        with torch.no_grad():
+            dummy.weight.copy_(torch.from_numpy(np.diag(scale)).float())
+            dummy.bias.copy_(torch.from_numpy(shift).float())
+        return linear_reach.linear_hexatope(dummy, input_sets)
+
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
@@ -255,6 +283,14 @@ def _reach_layer_octatope(layer: nn.Module, input_sets: List, method: str, **kwa
 
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_octatope(layer, input_sets)
+
+    elif isinstance(layer, (nn.BatchNorm1d, nn.BatchNorm2d)):
+        scale, shift = batchnorm_reach._get_bn_params(layer)
+        dummy = nn.Linear(len(scale), len(scale), bias=True)
+        with torch.no_grad():
+            dummy.weight.copy_(torch.from_numpy(np.diag(scale)).float())
+            dummy.bias.copy_(torch.from_numpy(shift).float())
+        return linear_reach.linear_octatope(dummy, input_sets)
 
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
