@@ -21,6 +21,7 @@ from . import maxpool2d_reach, avgpool2d_reach, global_avgpool_reach
 from . import batchnorm_reach
 from . import pad_reach
 from .pad_reach import _PAD_TYPES
+from . import reduce_reach
 
 # ONNX GlobalAveragePool types (optional — onnx2torch may not be installed)
 try:
@@ -31,6 +32,16 @@ try:
     _ONNX_GAP_TYPES = (nn.AdaptiveAvgPool2d, OnnxGlobalAveragePool, OnnxGlobalAveragePoolWithKnownInputShape)
 except ImportError:
     _ONNX_GAP_TYPES = (nn.AdaptiveAvgPool2d,)
+
+# ONNX Reduce types (optional — onnx2torch may not be installed)
+try:
+    from onnx2torch.node_converters.reduce import (
+        OnnxReduceStaticAxes,
+        OnnxReduceSumStaticAxes,
+    )
+    _ONNX_REDUCE_TYPES = (OnnxReduceStaticAxes, OnnxReduceSumStaticAxes)
+except ImportError:
+    _ONNX_REDUCE_TYPES = ()
 
 
 def reach_layer(
@@ -138,6 +149,9 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, _PAD_TYPES):
         return pad_reach.pad_star(layer, input_sets)
 
+    elif _ONNX_REDUCE_TYPES and isinstance(layer, _ONNX_REDUCE_TYPES):
+        return reduce_reach.reduce_star(layer, input_sets)
+
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
@@ -184,6 +198,9 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, _PAD_TYPES):
         return pad_reach.pad_zono(layer, input_sets)
 
+    elif _ONNX_REDUCE_TYPES and isinstance(layer, _ONNX_REDUCE_TYPES):
+        return reduce_reach.reduce_zono(layer, input_sets)
+
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
@@ -213,6 +230,9 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
 
     elif isinstance(layer, (nn.BatchNorm1d, nn.BatchNorm2d)):
         return batchnorm_reach.batchnorm_box(layer, input_sets)
+
+    elif _ONNX_REDUCE_TYPES and isinstance(layer, _ONNX_REDUCE_TYPES):
+        return reduce_reach.reduce_box(layer, input_sets)
 
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets

@@ -6,6 +6,8 @@ computation based on set type and handles both standard PyTorch models
 and ONNX GraphModules.
 """
 
+import operator
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -30,6 +32,30 @@ try:
     from onnx2torch.node_converters.reshape import OnnxReshape
 except ImportError:
     OnnxReshape = None
+
+# ONNX Concat type (optional — onnx2torch may not be installed)
+try:
+    from onnx2torch.node_converters.concat import OnnxConcat
+except ImportError:
+    OnnxConcat = None
+
+# ONNX Slice types (optional — onnx2torch may not be installed)
+try:
+    from onnx2torch.node_converters.slice import OnnxSlice
+except ImportError:
+    OnnxSlice = None
+
+try:
+    from onnx2torch.node_converters.slice import OnnxSliceV9
+except ImportError:
+    OnnxSliceV9 = None
+
+# ONNX Split types (optional — onnx2torch may not be installed)
+try:
+    from onnx2torch.node_converters.split import OnnxSplit, OnnxSplit13
+except ImportError:
+    OnnxSplit = None
+    OnnxSplit13 = None
 
 
 def reach_pytorch_model(
@@ -236,6 +262,32 @@ def _handle_graphmodule(
                 current_sets = result_sets
                 continue
 
+            # Handle OnnxConcat
+            if OnnxConcat is not None and isinstance(module, OnnxConcat):
+                result_sets = _handle_onnx_concat(module, node, node_values)
+                if result_sets is not None:
+                    node_values[node.name] = result_sets
+                    current_sets = result_sets
+                    continue
+
+            # Handle OnnxSlice
+            if ((OnnxSlice is not None and isinstance(module, OnnxSlice)) or
+                    (OnnxSliceV9 is not None and isinstance(module, OnnxSliceV9))):
+                result_sets = _handle_onnx_slice(module, node, node_values, graph_module)
+                if result_sets is not None:
+                    node_values[node.name] = result_sets
+                    current_sets = result_sets
+                    continue
+
+            # Handle OnnxSplit / OnnxSplit13
+            if ((OnnxSplit is not None and isinstance(module, OnnxSplit)) or
+                    (OnnxSplit13 is not None and isinstance(module, OnnxSplit13))):
+                result = _handle_onnx_split(module, node, node_values, graph_module)
+                if result is not None:
+                    node_values[node.name] = result
+                    # Don't set current_sets — outputs are extracted by getitem
+                    continue
+
             # Handle ONNX-specific operations
             if module_type == 'OnnxBinaryMathOperation':
                 current_sets = _handle_onnx_binary_op(
@@ -261,6 +313,21 @@ def _handle_graphmodule(
                     output_sets = reach_layer(module, input_sets_op, method, **kwargs)
                     node_values[node.name] = output_sets
                     current_sets = output_sets
+
+        elif node.op == 'call_function':
+            # Handle operator.getitem for multi-output ops (e.g., Split)
+            if node.target is operator.getitem:
+                args = node.args
+                if len(args) >= 2:
+                    src_node = args[0]
+                    index = args[1]
+                    if hasattr(src_node, 'name') and src_node.name in node_values:
+                        src_val = node_values[src_node.name]
+                        # Multi-output: list-of-lists from Split
+                        if (isinstance(src_val, list) and len(src_val) > 0
+                                and isinstance(src_val[0], list)):
+                            node_values[node.name] = src_val[index]
+                            current_sets = src_val[index]
 
         elif node.op == 'output':
             # Output node - extract final result
@@ -460,6 +527,13 @@ def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):
         if not hasattr(module, 'math_op_function'):
             return None
         op_name = module.math_op_function.__name__
+
+        if op_name in ('mul', '_onnx_div'):
+            raise NotImplementedError(
+                f"Element-wise {op_name} of two computed sets is not supported. "
+                f"Only Mul/Div by constant is implemented."
+            )
+
         return _add_sets(sets_a, sets_b, op_name)
 
     # Case 2: Second input is a parameter (bias/constant)
@@ -485,7 +559,11 @@ def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):
 
     op_name = module.math_op_function.__name__
 
-    if 'add' in op_name:
+    if op_name == 'mul':
+        return _mul_sets_by_constant(input_sets_op, param_value)
+    elif op_name == '_onnx_div':
+        return _mul_sets_by_constant(input_sets_op, 1.0 / param_value)
+    elif 'add' in op_name:
         bias = param_value
     elif 'sub' in op_name:
         bias = -param_value
@@ -707,6 +785,662 @@ def _add_sets(sets_a, sets_b, op_name):
             )
 
     return output_sets
+
+
+def _mul_sets_by_constant(input_sets, scale):
+    """
+    Element-wise multiplication of sets by a constant scale vector.
+
+    Used for ONNX Mul/Div operations where one operand is a frozen parameter
+    (constant). Division is handled by the caller passing 1/constant.
+
+    For Star/ImageStar: V_out = diag(scale) * V. Constraints (C, d,
+    predicate_lb, predicate_ub) are unchanged because the predicate
+    variables alpha are not affected by scaling the output space.
+
+    For Zono/ImageZono: c_out = scale * c, V_out = scale * V (element-wise
+    across the dimension axis). Zonotope alpha variables satisfy -1 <= alpha_i <= 1
+    regardless of scaling.
+
+    For Box: new_lb = min(scale*lb, scale*ub), new_ub = max(scale*lb, scale*ub).
+    This correctly handles negative scale factors that swap bounds.
+
+    Args:
+        input_sets: List of input sets
+        scale: Scale vector as numpy array (will be broadcast appropriately)
+
+    Returns:
+        List of scaled output sets
+    """
+    scale = np.asarray(scale, dtype=np.float64).flatten()
+
+    output_sets = []
+
+    for s in input_sets:
+        if isinstance(s, ImageStar):
+            # ImageStar V shape: (H, W, C, nVar+1)
+            h, w, c, n_cols = s.V.shape
+            total = h * w * c
+
+            if scale.size == c:
+                # Channel-wise scale: reshape to (1, 1, C, 1)
+                scale_4d = scale.reshape(1, 1, c, 1)
+            elif scale.size == total:
+                # Full spatial scale: reshape to (H, W, C, 1)
+                scale_4d = scale.reshape(h, w, c, 1)
+            else:
+                raise ValueError(
+                    f"Scale size {scale.size} does not match ImageStar "
+                    f"channels ({c}) or total dims ({total})"
+                )
+
+            new_V = s.V * scale_4d
+            out = ImageStar(
+                new_V, s.C, s.d, s.predicate_lb, s.predicate_ub,
+                h, w, c
+            )
+            output_sets.append(out)
+
+        elif isinstance(s, Star):
+            # Star V shape: (dim, nVar+1)
+            scale_col = scale.reshape(-1, 1)
+            new_V = s.V * scale_col
+            out = Star(new_V, s.C, s.d, s.predicate_lb, s.predicate_ub)
+            output_sets.append(out)
+
+        elif isinstance(s, ImageZono):
+            # ImageZono stores flat: c (H*W*C, 1), V (H*W*C, n_gen)
+            # Scale is per-channel; tile across H*W pixels
+            h, w, c_ch = s.height, s.width, s.num_channels
+            total = h * w * c_ch
+
+            if scale.size == c_ch:
+                # Channel-wise: tile to H*W*C in HWC order
+                scale_flat = np.tile(scale, h * w).reshape(-1, 1)
+            elif scale.size == total:
+                scale_flat = scale.reshape(-1, 1)
+            else:
+                raise ValueError(
+                    f"Scale size {scale.size} does not match ImageZono "
+                    f"channels ({c_ch}) or total dims ({total})"
+                )
+
+            new_c = s.c * scale_flat
+            new_V = s.V * scale_flat
+            out = ImageZono(new_c, new_V, h, w, c_ch)
+            output_sets.append(out)
+
+        elif isinstance(s, Zono):
+            # Zono: c (dim, 1), V (dim, n_gen)
+            scale_col = scale.reshape(-1, 1)
+            new_c = s.c * scale_col
+            new_V = s.V * scale_col
+            out = Zono(new_c, new_V)
+            output_sets.append(out)
+
+        elif isinstance(s, Box):
+            # Box: handle negative scale by taking min/max
+            scale_col = scale.reshape(-1, 1)
+            prod_lb = scale_col * s.lb
+            prod_ub = scale_col * s.ub
+            new_lb = np.minimum(prod_lb, prod_ub)
+            new_ub = np.maximum(prod_lb, prod_ub)
+            out = Box(new_lb, new_ub)
+            output_sets.append(out)
+
+        else:
+            raise NotImplementedError(
+                f"Mul by constant not supported for {type(s).__name__}"
+            )
+
+    return output_sets
+
+
+def _concat_sets(set_lists, axis):
+    """
+    Concatenate multiple lists of sets along a specified axis.
+
+    All branches in a single reachability pass share the same predicate
+    variables (same C, d, pred bounds). Concat is just vertical stacking
+    of V matrices -- no Minkowski sum needed.
+
+    Args:
+        set_lists: List of lists of sets, one list per concat input,
+                   e.g. [[s1_a, s1_b], [s2_a, s2_b]]
+        axis: Concatenation axis (0 for feature dim of flat sets,
+              2 for channel dim of ImageStar HWC)
+
+    Returns:
+        List of concatenated output sets
+    """
+    if not set_lists or not any(set_lists):
+        return []
+
+    # Determine max length across input lists for broadcasting
+    max_len = max(len(sl) for sl in set_lists)
+
+    # Broadcast: if a list has length 1 and others have length N, repeat it
+    broadcast_lists = []
+    for sl in set_lists:
+        if len(sl) == 1 and max_len > 1:
+            broadcast_lists.append(sl * max_len)
+        else:
+            broadcast_lists.append(sl)
+
+    output_sets = []
+
+    for idx in range(max_len):
+        # Collect one set from each broadcast list at this index
+        sets_to_concat = [bl[idx] for bl in broadcast_lists]
+
+        first = sets_to_concat[0]
+
+        if isinstance(first, ImageStar):
+            # ImageStar: np.concatenate V tensors along the specified axis
+            # V shape: (H, W, C, nVar+1)
+            # Pad V matrices to match on nVar+1 dimension if they differ
+            V_list = [s.V for s in sets_to_concat]
+            max_cols = max(v.shape[3] for v in V_list)
+            padded_V = []
+            for v in V_list:
+                if v.shape[3] < max_cols:
+                    pad_width = [(0, 0)] * 3 + [(0, max_cols - v.shape[3])]
+                    v = np.pad(v, pad_width, mode='constant', constant_values=0.0)
+                padded_V.append(v)
+
+            V_out = np.concatenate(padded_V, axis=axis)
+
+            # Update spatial dims from result shape
+            h_out = V_out.shape[0]
+            w_out = V_out.shape[1]
+            c_out = V_out.shape[2]
+
+            # Merge constraints: use the set with the most predicates
+            ref = max(sets_to_concat, key=lambda s: s.V.shape[3])
+            out = ImageStar(
+                V_out, ref.C, ref.d,
+                ref.predicate_lb, ref.predicate_ub,
+                h_out, w_out, c_out
+            )
+            output_sets.append(out)
+
+        elif isinstance(first, Star):
+            # Star: vstack V matrices (only axis=0 makes sense for flat sets)
+            # Pad V matrices to match on nVar+1 dimension if they differ
+            V_list = [s.V for s in sets_to_concat]
+            max_cols = max(v.shape[1] for v in V_list)
+            padded_V = []
+            for v in V_list:
+                if v.shape[1] < max_cols:
+                    pad_width = [(0, 0), (0, max_cols - v.shape[1])]
+                    v = np.pad(v, pad_width, mode='constant', constant_values=0.0)
+                padded_V.append(v)
+
+            V_out = np.vstack(padded_V)
+
+            # Merge constraints: use the set with the most predicates
+            ref = max(sets_to_concat, key=lambda s: s.V.shape[1])
+            out = Star(V_out, ref.C, ref.d,
+                       ref.predicate_lb, ref.predicate_ub)
+            output_sets.append(out)
+
+        elif isinstance(first, ImageZono):
+            # ImageZono: reshape to image, concatenate along axis, flatten back
+            # ImageZono stores flat: c (H*W*C, 1), V (H*W*C, n_gen)
+            img_c_list = []
+            img_V_list = []
+            total_channels = 0
+
+            # Find max generators for padding
+            max_gen = max(s.V.shape[1] for s in sets_to_concat)
+
+            for s in sets_to_concat:
+                h, w, c_ch = s.height, s.width, s.num_channels
+                n_gen = s.V.shape[1]
+
+                V_padded = s.V
+                if n_gen < max_gen:
+                    V_padded = np.pad(s.V, [(0, 0), (0, max_gen - n_gen)],
+                                      mode='constant', constant_values=0.0)
+
+                c_img = s.c.reshape(h, w, c_ch)
+                V_img = V_padded.reshape(h, w, c_ch, max_gen)
+
+                img_c_list.append(c_img)
+                img_V_list.append(V_img)
+                total_channels += c_ch
+
+            c_cat = np.concatenate(img_c_list, axis=axis)
+            V_cat = np.concatenate(img_V_list, axis=axis)
+
+            h_out = c_cat.shape[0]
+            w_out = c_cat.shape[1]
+            c_out = c_cat.shape[2]
+
+            c_flat = c_cat.reshape(-1, 1)
+            V_flat = V_cat.reshape(-1, V_cat.shape[-1])
+
+            out = ImageZono(c_flat, V_flat, h_out, w_out, c_out)
+            output_sets.append(out)
+
+        elif isinstance(first, Zono):
+            # Zono: vstack c and V, pad generators if they differ
+            c_list = [s.c for s in sets_to_concat]
+            V_list = [s.V for s in sets_to_concat]
+
+            max_gen = max(v.shape[1] for v in V_list)
+            padded_V = []
+            for v in V_list:
+                if v.shape[1] < max_gen:
+                    v = np.pad(v, [(0, 0), (0, max_gen - v.shape[1])],
+                               mode='constant', constant_values=0.0)
+                padded_V.append(v)
+
+            c_out = np.vstack(c_list)
+            V_out = np.vstack(padded_V)
+
+            out = Zono(c_out, V_out)
+            output_sets.append(out)
+
+        elif isinstance(first, Box):
+            # Box: vstack lb and ub
+            lb_list = [s.lb for s in sets_to_concat]
+            ub_list = [s.ub for s in sets_to_concat]
+            lb_out = np.vstack(lb_list)
+            ub_out = np.vstack(ub_list)
+
+            out = Box(lb_out, ub_out)
+            output_sets.append(out)
+
+        else:
+            raise NotImplementedError(
+                f"Concat not supported for {type(first).__name__}"
+            )
+
+    return output_sets
+
+
+def _handle_onnx_concat(module, node, node_values):
+    """
+    Handle ONNX Concat operations.
+
+    Collects sets from all input nodes, maps the ONNX axis (which includes
+    the batch dimension) to the set axis, and calls _concat_sets.
+
+    Args:
+        module: OnnxConcat module (has .axis attribute)
+        node: Graph node
+        node_values: Dict mapping node names to lists of sets
+
+    Returns:
+        List of concatenated output sets, or None if inputs not found
+    """
+    onnx_axis = module.axis
+
+    # Collect set lists from all input arguments
+    set_lists = []
+    first_set = None
+    for arg in node.args:
+        if hasattr(arg, 'name') and arg.name in node_values:
+            sl = node_values[arg.name]
+            set_lists.append(sl)
+            if first_set is None and len(sl) > 0:
+                first_set = sl[0]
+
+    if not set_lists or first_set is None:
+        return None
+
+    # Map ONNX axis (with batch dim) to set axis
+    if isinstance(first_set, (ImageStar, ImageZono)):
+        # ONNX uses NCHW: axis 0=N, 1=C, 2=H, 3=W
+        # ImageStar uses HWC: axis 0=H, 1=W, 2=C
+        onnx_to_hwc = {1: 2, 2: 0, 3: 1}
+        set_axis = onnx_to_hwc.get(onnx_axis, onnx_axis)
+    else:
+        # Flat sets: strip batch dimension
+        set_axis = onnx_axis - 1
+
+    return _concat_sets(set_lists, set_axis)
+
+
+def _slice_set(s, slices_by_axis):
+    """
+    Slice a set along specified axes.
+
+    Slicing is a linear operation — it selects rows/elements from the
+    basis matrix V. Constraints are unchanged because the predicate
+    variables alpha are not affected.
+
+    Args:
+        s: Input set (Star, ImageStar, Zono, Box)
+        slices_by_axis: Dict mapping axis (int) to Python slice object.
+            For flat sets (Star, Zono, Box), axis 0 is the dimension axis.
+            For ImageStar, axes are in HWC format: 0=H, 1=W, 2=C.
+
+    Returns:
+        New set of the same type with sliced dimensions
+    """
+    if isinstance(s, ImageStar):
+        # V is (H, W, C, nVar+1) — build index for first 3 dims
+        idx = [slice(None)] * 4  # default: select all along each axis
+        for ax, sl in slices_by_axis.items():
+            if ax < 3:
+                idx[ax] = sl
+        V_out = s.V[tuple(idx)]
+        h_out = V_out.shape[0]
+        w_out = V_out.shape[1]
+        c_out = V_out.shape[2]
+        return ImageStar(
+            V_out, s.C, s.d, s.predicate_lb, s.predicate_ub,
+            h_out, w_out, c_out
+        )
+
+    elif isinstance(s, Star):
+        # V is (dim, nVar+1) — slice along dimension axis (axis 0)
+        sl = slices_by_axis.get(0, slice(None))
+        V_out = s.V[sl, :]
+        return Star(V_out, s.C, s.d, s.predicate_lb, s.predicate_ub)
+
+    elif isinstance(s, Zono):
+        # c is (dim, 1), V is (dim, n_gen)
+        sl = slices_by_axis.get(0, slice(None))
+        c_out = s.c[sl, :]
+        V_out = s.V[sl, :]
+        return Zono(c_out, V_out)
+
+    elif isinstance(s, Box):
+        # lb, ub are (dim, 1)
+        sl = slices_by_axis.get(0, slice(None))
+        lb_out = s.lb[sl, :]
+        ub_out = s.ub[sl, :]
+        return Box(lb_out, ub_out)
+
+    else:
+        raise NotImplementedError(
+            f"Slice not supported for {type(s).__name__}"
+        )
+
+
+def _handle_onnx_slice(module, node, node_values, graph_module):
+    """
+    Handle ONNX Slice operations.
+
+    Supports two ONNX opset versions:
+    - OnnxSlice (v10+): starts, ends, axes, steps from node args
+    - OnnxSliceV9: slice info stored in module._pos_axes_slices
+
+    Args:
+        module: OnnxSlice or OnnxSliceV9 module
+        node: Graph node
+        node_values: Dict mapping node names to lists of sets
+        graph_module: Parent graph module (for parameter extraction)
+
+    Returns:
+        List of sliced output sets, or None if inputs not found
+    """
+    # Get input sets
+    first_arg = node.args[0]
+    if hasattr(first_arg, 'name') and first_arg.name in node_values:
+        input_sets = node_values[first_arg.name]
+    else:
+        return None
+
+    first_set = input_sets[0] if input_sets else None
+    if first_set is None:
+        return None
+
+    slices_by_axis = {}
+
+    if OnnxSliceV9 is not None and isinstance(module, OnnxSliceV9):
+        # V9: module._pos_axes_slices is a list of slice objects per axis
+        # Skip axis 0 (batch dim), shift remaining by -1
+        for ax, sl in enumerate(module._pos_axes_slices):
+            if ax == 0:
+                continue  # skip batch dimension
+            set_ax = ax - 1
+            slices_by_axis[set_ax] = sl
+
+    elif OnnxSlice is not None and isinstance(module, OnnxSlice):
+        # V10+: extract starts, ends, axes, steps from node args
+        # node.args = [input, starts, ends, axes, steps] (axes and steps optional)
+        starts_tensor = _get_parameter(graph_module, node.args[1])
+        ends_tensor = _get_parameter(graph_module, node.args[2])
+        starts = starts_tensor.numpy().astype(int).flatten()
+        ends = ends_tensor.numpy().astype(int).flatten()
+
+        if len(node.args) > 3:
+            axes_tensor = _get_parameter(graph_module, node.args[3])
+            axes = axes_tensor.numpy().astype(int).flatten()
+        else:
+            axes = np.arange(len(starts))
+
+        if len(node.args) > 4:
+            steps_tensor = _get_parameter(graph_module, node.args[4])
+            steps = steps_tensor.numpy().astype(int).flatten()
+        else:
+            steps = np.ones(len(starts), dtype=int)
+
+        for i in range(len(starts)):
+            ax = int(axes[i])
+            if ax == 0:
+                continue  # skip batch dimension
+            set_ax = ax - 1  # remove batch dim
+
+            start_val = int(starts[i])
+            end_val = int(ends[i])
+            step_val = int(steps[i])
+
+            # ONNX uses very large numbers (e.g., 2^63-1) for "to end"
+            if end_val > 2**30:
+                end_val = None
+
+            slices_by_axis[set_ax] = slice(start_val, end_val, step_val)
+
+    else:
+        return None
+
+    # For ImageStar/ImageZono inputs, map ONNX axes (after batch removal)
+    # from NCHW (0=C, 1=H, 2=W) to HWC (0=H, 1=W, 2=C)
+    if isinstance(first_set, (ImageStar, ImageZono)):
+        nchw_to_hwc = {0: 2, 1: 0, 2: 1}
+        remapped = {}
+        for ax, sl in slices_by_axis.items():
+            hwc_ax = nchw_to_hwc.get(ax, ax)
+            remapped[hwc_ax] = sl
+        slices_by_axis = remapped
+
+    # Apply slice to each set
+    output_sets = []
+    for s in input_sets:
+        output_sets.append(_slice_set(s, slices_by_axis))
+
+    return output_sets
+
+
+def _split_set(s, split_sizes, axis):
+    """
+    Split a set into chunks along a given axis.
+
+    Splitting is a linear operation — it partitions rows/elements of the
+    basis matrix. Constraints are unchanged because the predicate variables
+    alpha are not affected.
+
+    Args:
+        s: Input set (Star, ImageStar, Zono, ImageZono, Box)
+        split_sizes: List of ints giving the size of each chunk along axis
+        axis: Axis to split along.
+            For flat sets (Star, Zono, Box), axis 0 is the dimension axis.
+            For ImageStar/ImageZono, axes are in HWC format: 0=H, 1=W, 2=C.
+
+    Returns:
+        List of sets, one per chunk
+    """
+    chunks = []
+    offset = 0
+
+    if isinstance(s, ImageStar):
+        # V is (H, W, C, nVar+1) — split along the specified HWC axis
+        for size in split_sizes:
+            idx = [slice(None)] * 4
+            idx[axis] = slice(offset, offset + size)
+            V_chunk = s.V[tuple(idx)]
+            h_out = V_chunk.shape[0]
+            w_out = V_chunk.shape[1]
+            c_out = V_chunk.shape[2]
+            chunk = ImageStar(
+                V_chunk, s.C, s.d, s.predicate_lb, s.predicate_ub,
+                h_out, w_out, c_out
+            )
+            chunks.append(chunk)
+            offset += size
+
+    elif isinstance(s, Star):
+        # V is (dim, nVar+1) — split along rows (axis 0)
+        for size in split_sizes:
+            V_chunk = s.V[offset:offset + size, :]
+            chunk = Star(V_chunk, s.C, s.d, s.predicate_lb, s.predicate_ub)
+            chunks.append(chunk)
+            offset += size
+
+    elif isinstance(s, ImageZono):
+        # Reshape to image, split, flatten back
+        h, w, c_ch = s.height, s.width, s.num_channels
+        n_gen = s.V.shape[1]
+        c_img = s.c.reshape(h, w, c_ch)
+        V_img = s.V.reshape(h, w, c_ch, n_gen)
+
+        for size in split_sizes:
+            idx = [slice(None)] * 4
+            idx[axis] = slice(offset, offset + size)
+            c_chunk = c_img[tuple(idx[:3])]
+            V_chunk = V_img[tuple(idx)]
+            h_out = c_chunk.shape[0]
+            w_out = c_chunk.shape[1]
+            c_out = c_chunk.shape[2]
+            chunk = ImageZono(
+                c_chunk.reshape(-1, 1),
+                V_chunk.reshape(-1, n_gen),
+                h_out, w_out, c_out
+            )
+            chunks.append(chunk)
+            offset += size
+
+    elif isinstance(s, Zono):
+        # c is (dim, 1), V is (dim, n_gen) — split along rows
+        for size in split_sizes:
+            c_chunk = s.c[offset:offset + size, :]
+            V_chunk = s.V[offset:offset + size, :]
+            chunk = Zono(c_chunk, V_chunk)
+            chunks.append(chunk)
+            offset += size
+
+    elif isinstance(s, Box):
+        # lb, ub are (dim, 1) — split along rows
+        for size in split_sizes:
+            lb_chunk = s.lb[offset:offset + size, :]
+            ub_chunk = s.ub[offset:offset + size, :]
+            chunk = Box(lb_chunk, ub_chunk)
+            chunks.append(chunk)
+            offset += size
+
+    else:
+        raise NotImplementedError(
+            f"Split not supported for {type(s).__name__}"
+        )
+
+    return chunks
+
+
+def _handle_onnx_split(module, node, node_values, graph_module):
+    """
+    Handle ONNX Split operations.
+
+    Supports OnnxSplit (v2/v11) and OnnxSplit13.
+
+    Args:
+        module: OnnxSplit or OnnxSplit13 module
+        node: Graph node
+        node_values: Dict mapping node names to lists of sets
+        graph_module: Parent graph module (for parameter extraction)
+
+    Returns:
+        List of lists: [[chunk0_sets], [chunk1_sets], ...] — one list per
+        split output — or None if inputs not found
+    """
+    # Get input sets
+    first_arg = node.args[0]
+    if hasattr(first_arg, 'name') and first_arg.name in node_values:
+        input_sets = node_values[first_arg.name]
+    else:
+        return None
+
+    first_set = input_sets[0] if input_sets else None
+    if first_set is None:
+        return None
+
+    # Determine split sizes
+    split_sizes = None
+    onnx_axis = module.axis
+
+    if OnnxSplit13 is not None and isinstance(module, OnnxSplit13):
+        # OnnxSplit13: split sizes from second argument (dynamic) or even division
+        if len(node.args) > 1:
+            split_tensor = _get_parameter(graph_module, node.args[1])
+            split_sizes = split_tensor.numpy().astype(int).tolist()
+        else:
+            # Even division by num_splits
+            split_sizes = None  # handled below
+
+    elif OnnxSplit is not None and isinstance(module, OnnxSplit):
+        # OnnxSplit: split sizes from module.split attribute
+        if module.split is not None:
+            split_sizes = list(module.split)
+        else:
+            split_sizes = None  # handled below
+
+    # Map ONNX axis (with batch dim) to set axis
+    if isinstance(first_set, (ImageStar, ImageZono)):
+        # ONNX uses NCHW: axis 0=N, 1=C, 2=H, 3=W
+        # ImageStar uses HWC: axis 0=H, 1=W, 2=C
+        onnx_to_hwc = {1: 2, 2: 0, 3: 1}
+        set_axis = onnx_to_hwc.get(onnx_axis, onnx_axis)
+    else:
+        # Flat sets: strip batch dimension
+        set_axis = onnx_axis - 1
+
+    # If split_sizes not specified, use even division
+    if split_sizes is None:
+        num_splits = module.num_splits
+        # Determine dimension size along set_axis
+        if isinstance(first_set, ImageStar):
+            axis_sizes = [first_set.V.shape[0], first_set.V.shape[1],
+                          first_set.V.shape[2]]
+            dim_size = axis_sizes[set_axis]
+        elif isinstance(first_set, ImageZono):
+            axis_sizes = [first_set.height, first_set.width,
+                          first_set.num_channels]
+            dim_size = axis_sizes[set_axis]
+        elif isinstance(first_set, Star):
+            dim_size = first_set.dim
+        elif isinstance(first_set, Zono):
+            dim_size = first_set.dim
+        elif isinstance(first_set, Box):
+            dim_size = first_set.dim
+        else:
+            return None
+        split_sizes = [dim_size // num_splits] * num_splits
+
+    # Apply split to each set, producing list-of-lists
+    num_chunks = len(split_sizes)
+    # result[i] = list of chunk-i sets across all input sets
+    result = [[] for _ in range(num_chunks)]
+
+    for s in input_sets:
+        chunks = _split_set(s, split_sizes, set_axis)
+        for i, chunk in enumerate(chunks):
+            result[i].append(chunk)
+
+    return result
 
 
 def _reach_probabilistic(model, input_set, **kwargs):
