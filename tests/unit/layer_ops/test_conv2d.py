@@ -66,4 +66,18 @@ class TestConv2DReach:
         assert len(result) == 1
         assert result[0].num_channels == 2
 
+    def test_conv2d_zono_dispatch(self, simple_image_zono):
+        """Test Conv2D with ImageZono via dispatcher."""
+        from n2v.nn.layer_ops.dispatcher import reach_layer
+        layer = nn.Conv2d(1, 2, kernel_size=3, padding=1)
+        layer.eval()
+
+        result = reach_layer(layer, [simple_image_zono], method='approx')
+
+        assert len(result) == 1
+        assert isinstance(result[0], ImageZono)
+        assert result[0].num_channels == 2
+        assert result[0].height == 4
+        assert result[0].width == 4
+
 

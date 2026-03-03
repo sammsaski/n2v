@@ -14,17 +14,19 @@ from typing import List, Union, Optional
 # Import set types
 from n2v.sets import Star, Zono, Box, Hexatope, Octatope
 from n2v.sets.image_star import ImageStar
+from n2v.sets.image_zono import ImageZono
 
 # Import layer ops
 from n2v.nn.layer_ops.dispatcher import reach_layer
 from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
 
-# Optional torch.fx import for ONNX support
+import torch.fx as fx
+
+# ONNX Reshape type (optional — onnx2torch may not be installed)
 try:
-    import torch.fx as fx
-    HAS_TORCH_FX = True
+    from onnx2torch.node_converters.reshape import OnnxReshape
 except ImportError:
-    HAS_TORCH_FX = False
+    OnnxReshape = None
 
 
 def reach_pytorch_model(
@@ -108,12 +110,8 @@ def reach_pytorch_model(
         )
 
     # Check if model is a GraphModule (from torch.fx / onnx2torch)
-    try:
-        import torch.fx as fx
-        if isinstance(model, fx.GraphModule):
-            return _handle_graphmodule(model, [input_set], method, **kwargs)
-    except ImportError:
-        pass
+    if isinstance(model, fx.GraphModule):
+        return _handle_graphmodule(model, [input_set], method, **kwargs)
 
     # Standard sequential model processing
     return _reach_sequential(model, [input_set], method, **kwargs)
@@ -212,6 +210,24 @@ def _handle_graphmodule(
             if verbose:
                 print(f'  Processing: {node.target} ({module_type})')
 
+            # Handle OnnxReshape
+            if OnnxReshape is not None and isinstance(module, OnnxReshape):
+                first_arg = node.args[0]
+                if hasattr(first_arg, 'name') and first_arg.name in node_values:
+                    input_sets_op = node_values[first_arg.name]
+                else:
+                    input_sets_op = current_sets
+
+                # Get target shape from second argument (frozen parameter)
+                shape_node = node.args[1]
+                shape_tensor = _get_parameter(graph_module, shape_node)
+                target_shape = tuple(shape_tensor.numpy().astype(int))
+
+                result_sets = _handle_reshape(input_sets_op, target_shape)
+                node_values[node.name] = result_sets
+                current_sets = result_sets
+                continue
+
             # Handle ONNX-specific operations
             if module_type == 'OnnxBinaryMathOperation':
                 current_sets = _handle_onnx_binary_op(
@@ -246,6 +262,177 @@ def _handle_graphmodule(
                     current_sets = node_values[output_node.name]
 
     return current_sets
+
+
+def _get_parameter(graph_module, node):
+    """Extract a parameter tensor from a get_attr node."""
+    param_path = node.target.split('.')
+    param_module = graph_module
+    for attr in param_path:
+        param_module = getattr(param_module, attr)
+    return param_module.detach().cpu()
+
+
+def _handle_reshape(input_sets: List, target_shape: tuple) -> List:
+    """
+    Reshape sets to a new shape.
+
+    Handles ONNX Reshape operations by reordering the V matrix.
+    ONNX uses NCHW format; ImageStar stores HWC internally.
+
+    Args:
+        input_sets: List of input sets
+        target_shape: Target shape tuple from ONNX (includes batch dim)
+
+    Returns:
+        List of reshaped sets
+    """
+    output_sets = []
+
+    # Strip batch dimension from target shape
+    if len(target_shape) >= 2:
+        spatial_shape = target_shape[1:]  # Remove batch dim
+    else:
+        spatial_shape = target_shape
+
+    for s in input_sets:
+        if isinstance(s, ImageStar):
+            output_sets.append(_reshape_imagestar(s, spatial_shape))
+        elif isinstance(s, ImageZono):
+            output_sets.append(_reshape_imagezono(s, spatial_shape))
+        elif isinstance(s, Star):
+            output_sets.append(_reshape_star(s, spatial_shape))
+        elif isinstance(s, Zono):
+            output_sets.append(_reshape_zono(s, spatial_shape))
+        elif isinstance(s, Box):
+            output_sets.append(_reshape_box(s, spatial_shape))
+        else:
+            # For Hexatope/Octatope, reshape is just reinterpretation
+            output_sets.append(s)
+
+    return output_sets
+
+
+def _resolve_shape(shape: tuple, total_size: int) -> tuple:
+    """Resolve -1 in a shape tuple given total element count."""
+    if -1 not in shape:
+        return shape
+    known = 1
+    neg_idx = -1
+    for i, s in enumerate(shape):
+        if s == -1:
+            neg_idx = i
+        else:
+            known *= s
+    resolved = list(shape)
+    resolved[neg_idx] = total_size // known
+    return tuple(resolved)
+
+
+def _reshape_imagestar(star: 'ImageStar', spatial_shape: tuple) -> 'Star':
+    """
+    Reshape ImageStar. ONNX target is in CHW format.
+
+    If result is flat (1D), return plain Star.
+    If result is spatial (3D like C,H,W), return ImageStar.
+    """
+    V = star.V  # (H, W, C, nVar+1)
+    h, w, c, n_cols = V.shape
+    total = h * w * c
+
+    resolved = _resolve_shape(spatial_shape, total)
+
+    # Transpose V from HWC to CHW for ONNX compatibility
+    V_chw = np.transpose(V, (2, 0, 1, 3))  # (C, H, W, nVar+1)
+    V_flat = V_chw.reshape(total, n_cols)   # (C*H*W, nVar+1)
+
+    if len(resolved) == 1 or (len(resolved) == 1 and resolved[0] == total):
+        # Flat output -> plain Star
+        return Star(V_flat, star.C, star.d, star.predicate_lb, star.predicate_ub)
+
+    if len(resolved) == 3:
+        # 3D output (C, H', W') -> ImageStar
+        c_out, h_out, w_out = resolved
+        V_chw_new = V_flat.reshape(c_out, h_out, w_out, n_cols)
+        V_hwc = np.transpose(V_chw_new, (1, 2, 0, 3))  # (H', W', C, nVar+1)
+        return ImageStar(
+            V_hwc, star.C, star.d, star.predicate_lb, star.predicate_ub,
+            h_out, w_out, c_out
+        )
+
+    # Default: flatten
+    return Star(V_flat, star.C, star.d, star.predicate_lb, star.predicate_ub)
+
+
+def _reshape_imagezono(zono: 'ImageZono', spatial_shape: tuple) -> 'Zono':
+    """Reshape ImageZono. Returns plain Zono if flattened."""
+    h, w, c_ch = zono.height, zono.width, zono.num_channels
+    n_gen = zono.V.shape[1]
+    total = h * w * c_ch
+
+    resolved = _resolve_shape(spatial_shape, total)
+
+    # Reshape center and generators to image format, then CHW
+    c_img = zono.c.reshape(h, w, c_ch)
+    V_img = zono.V.reshape(h, w, c_ch, n_gen)
+
+    c_chw = np.transpose(c_img, (2, 0, 1))       # (C, H, W)
+    V_chw = np.transpose(V_img, (2, 0, 1, 3))     # (C, H, W, n_gen)
+
+    c_flat = c_chw.reshape(-1, 1)
+    V_flat = V_chw.reshape(-1, n_gen)
+
+    if len(resolved) == 3:
+        c_out, h_out, w_out = resolved
+        c_new = c_flat.reshape(c_out, h_out, w_out).transpose(1, 2, 0).reshape(-1, 1)
+        V_new = V_flat.reshape(c_out, h_out, w_out, n_gen).transpose(1, 2, 0, 3).reshape(-1, n_gen)
+        return ImageZono(c_new, V_new, h_out, w_out, c_out)
+
+    # Flat output
+    return Zono(c_flat, V_flat)
+
+
+def _reshape_star(star: 'Star', spatial_shape: tuple) -> 'Star':
+    """Reshape plain Star — V is already flat, just validate dims."""
+    total = star.dim
+    resolved = _resolve_shape(spatial_shape, total)
+    product = 1
+    for s in resolved:
+        product *= s
+    if product != total:
+        raise ValueError(
+            f"Cannot reshape Star of dim {total} to shape {resolved}"
+        )
+    # Plain Star has no spatial structure, reshape is a noop
+    return star
+
+
+def _reshape_zono(zono: 'Zono', spatial_shape: tuple) -> 'Zono':
+    """Reshape plain Zono — already flat, validate dims."""
+    total = zono.dim
+    resolved = _resolve_shape(spatial_shape, total)
+    product = 1
+    for s in resolved:
+        product *= s
+    if product != total:
+        raise ValueError(
+            f"Cannot reshape Zono of dim {total} to shape {resolved}"
+        )
+    return zono
+
+
+def _reshape_box(box: 'Box', spatial_shape: tuple) -> 'Box':
+    """Reshape Box — already flat, validate dims."""
+    total = box.dim
+    resolved = _resolve_shape(spatial_shape, total)
+    product = 1
+    for s in resolved:
+        product *= s
+    if product != total:
+        raise ValueError(
+            f"Cannot reshape Box of dim {total} to shape {resolved}"
+        )
+    return box
 
 
 def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):

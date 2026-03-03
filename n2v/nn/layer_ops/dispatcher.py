@@ -15,7 +15,17 @@ from n2v.sets.image_zono import ImageZono
 
 # Import layer-specific reach functions
 from . import linear_reach, relu_reach, conv2d_reach, flatten_reach
-from . import maxpool2d_reach, avgpool2d_reach
+from . import maxpool2d_reach, avgpool2d_reach, global_avgpool_reach
+
+# ONNX GlobalAveragePool types (optional — onnx2torch may not be installed)
+try:
+    from onnx2torch.node_converters.global_average_pool import (
+        OnnxGlobalAveragePool,
+        OnnxGlobalAveragePoolWithKnownInputShape,
+    )
+    _ONNX_GAP_TYPES = (nn.AdaptiveAvgPool2d, OnnxGlobalAveragePool, OnnxGlobalAveragePoolWithKnownInputShape)
+except ImportError:
+    _ONNX_GAP_TYPES = (nn.AdaptiveAvgPool2d,)
 
 
 def reach_layer(
@@ -111,10 +121,13 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, nn.AvgPool2d):
         return avgpool2d_reach.avgpool2d_star(layer, input_sets, **kwargs)
 
+    elif isinstance(layer, _ONNX_GAP_TYPES):
+        return global_avgpool_reach.global_avgpool_star(input_sets)
+
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_star(layer, input_sets)
 
-    elif isinstance(layer, nn.Identity):
+    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):
@@ -139,16 +152,22 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, nn.ReLU):
         return relu_reach.relu_zono_approx(input_sets)
 
+    elif isinstance(layer, nn.Conv2d):
+        return conv2d_reach.conv2d_zono(layer, input_sets)
+
     elif isinstance(layer, nn.MaxPool2d):
         return maxpool2d_reach.maxpool2d_zono(layer, input_sets)
 
     elif isinstance(layer, nn.AvgPool2d):
         return avgpool2d_reach.avgpool2d_zono(layer, input_sets)
 
+    elif isinstance(layer, _ONNX_GAP_TYPES):
+        return global_avgpool_reach.global_avgpool_zono(input_sets)
+
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_zono(layer, input_sets)
 
-    elif isinstance(layer, nn.Identity):
+    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):
@@ -175,7 +194,7 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_box(layer, input_sets)
 
-    elif isinstance(layer, nn.Identity):
+    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):
@@ -206,7 +225,7 @@ def _reach_layer_hexatope(layer: nn.Module, input_sets: List, method: str, **kwa
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_hexatope(layer, input_sets)
 
-    elif isinstance(layer, nn.Identity):
+    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):
@@ -237,7 +256,7 @@ def _reach_layer_octatope(layer: nn.Module, input_sets: List, method: str, **kwa
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_octatope(layer, input_sets)
 
-    elif isinstance(layer, nn.Identity):
+    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):

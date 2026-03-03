@@ -259,9 +259,131 @@ class TestConv2DImageStarSoundness:
         assert out_star.width == 3
 
 
-# NOTE: ImageZono tests skipped for now - conv2d_zono implementation needs investigation
-# The convolution seems to zero out generators, returning only the center values
-# TODO: Debug conv2d_zono implementation
+class TestConv2DImageZonoSoundness:
+    """Soundness tests for Conv2D with ImageZono sets."""
+
+    def test_identity_convolution(self):
+        """Test Conv2D with identity kernel on ImageZono."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=False)
+        layer.weight.data = torch.ones(1, 1, 1, 1)
+
+        lb = np.zeros((3, 3, 1))
+        ub = np.ones((3, 3, 1))
+        input_zono = ImageZono.from_bounds(lb, ub, height=3, width=3, num_channels=1)
+
+        output_zonos = conv2d_zono(layer, [input_zono])
+
+        assert len(output_zonos) == 1
+        out_zono = output_zonos[0]
+        assert out_zono.height == 3
+        assert out_zono.width == 3
+        assert out_zono.num_channels == 1
+
+        lb_out, ub_out = out_zono.get_bounds()
+        assert np.allclose(lb_out, 0.0, atol=1e-6)
+        assert np.allclose(ub_out, 1.0, atol=1e-6)
+
+    def test_scaling_convolution(self):
+        """Test Conv2D with scaling kernel on ImageZono."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=False)
+        layer.weight.data = torch.tensor([[[[3.0]]]])
+
+        lb = np.ones((2, 2, 1))
+        ub = np.ones((2, 2, 1)) * 2
+        input_zono = ImageZono.from_bounds(lb, ub, height=2, width=2, num_channels=1)
+
+        output_zonos = conv2d_zono(layer, [input_zono])
+
+        assert len(output_zonos) == 1
+        out_zono = output_zonos[0]
+        lb_out, ub_out = out_zono.get_bounds()
+        assert np.allclose(lb_out, 3.0, atol=1e-6)
+        assert np.allclose(ub_out, 6.0, atol=1e-6)
+
+    def test_bias_addition(self):
+        """Test Conv2D with bias on ImageZono."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=1, padding=0, bias=True)
+        layer.weight.data = torch.ones(1, 1, 1, 1)
+        layer.bias.data = torch.tensor([5.0])
+
+        lb = np.zeros((2, 2, 1))
+        ub = np.ones((2, 2, 1))
+        input_zono = ImageZono.from_bounds(lb, ub, height=2, width=2, num_channels=1)
+
+        output_zonos = conv2d_zono(layer, [input_zono])
+
+        assert len(output_zonos) == 1
+        out_zono = output_zonos[0]
+        lb_out, ub_out = out_zono.get_bounds()
+        assert np.allclose(lb_out, 5.0, atol=1e-6)
+        assert np.allclose(ub_out, 6.0, atol=1e-6)
+
+    def test_multi_channel_output(self):
+        """Test Conv2D with multi-channel output on ImageZono."""
+        layer = nn.Conv2d(1, 2, kernel_size=1, stride=1, padding=0, bias=False)
+        layer.weight.data = torch.tensor([[[[2.0]]], [[[3.0]]]])
+
+        lb = np.ones((2, 2, 1))
+        ub = np.ones((2, 2, 1)) * 2
+        input_zono = ImageZono.from_bounds(lb, ub, height=2, width=2, num_channels=1)
+
+        output_zonos = conv2d_zono(layer, [input_zono])
+
+        assert len(output_zonos) == 1
+        out_zono = output_zonos[0]
+        assert out_zono.num_channels == 2
+        assert out_zono.height == 2
+        assert out_zono.width == 2
+
+    def test_stride_2_convolution(self):
+        """Test Conv2D with stride=2 on ImageZono."""
+        layer = nn.Conv2d(1, 1, kernel_size=1, stride=2, padding=0, bias=False)
+        layer.weight.data = torch.ones(1, 1, 1, 1)
+
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        input_zono = ImageZono.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        output_zonos = conv2d_zono(layer, [input_zono])
+
+        assert len(output_zonos) == 1
+        out_zono = output_zonos[0]
+        assert out_zono.height == 2
+        assert out_zono.width == 2
+
+    def test_pointwise_soundness(self):
+        """Soundness: sample points, forward through PyTorch, verify containment."""
+        layer = nn.Conv2d(1, 2, kernel_size=3, stride=1, padding=1, bias=True)
+        layer.eval()
+
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        input_zono = ImageZono.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        output_zonos = conv2d_zono(layer, [input_zono])
+        out_zono = output_zonos[0]
+        lb_out, ub_out = out_zono.get_bounds()
+
+        # Reshape bounds from HWC (ImageZono internal) to compare with PyTorch
+        h_out, w_out, c_out = out_zono.height, out_zono.width, out_zono.num_channels
+        lb_hwc = lb_out.reshape(h_out, w_out, c_out)
+        ub_hwc = ub_out.reshape(h_out, w_out, c_out)
+
+        # Sample random points from input
+        np.random.seed(42)
+        for _ in range(50):
+            point = np.random.uniform(lb.flatten(), ub.flatten())
+            # Forward through PyTorch (NCHW format)
+            pt_input = torch.tensor(point.reshape(1, 1, 4, 4), dtype=torch.float32)
+            with torch.no_grad():
+                # PyTorch output is (1, C_out, H_out, W_out), convert to HWC
+                pt_output = layer(pt_input).squeeze(0).permute(1, 2, 0).numpy()
+
+            # Verify containment in HWC format
+            assert np.all(pt_output >= lb_hwc - 1e-6), \
+                f"Point below lower bound"
+            assert np.all(pt_output <= ub_hwc + 1e-6), \
+                f"Point above upper bound"
 
 
 class TestConv2DEdgeCases:
