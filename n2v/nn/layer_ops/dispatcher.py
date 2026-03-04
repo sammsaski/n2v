@@ -5,6 +5,7 @@ Dispatches reachability computation for a single layer based on PyTorch layer ty
 and input set type, without requiring custom layer wrapper classes.
 """
 
+import warnings
 import torch
 import torch.nn as nn
 import numpy as np
@@ -22,6 +23,9 @@ from . import batchnorm_reach
 from . import pad_reach
 from .pad_reach import _PAD_TYPES
 from . import reduce_reach
+from . import leakyrelu_reach
+from . import sigmoid_reach
+from . import tanh_reach
 
 # ONNX GlobalAveragePool types (optional — onnx2torch may not be installed)
 try:
@@ -123,6 +127,31 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
                 input_sets, relax_factor, lp_solver, relax_method
             )
 
+    elif isinstance(layer, nn.LeakyReLU):
+        gamma = layer.negative_slope
+        lp_solver = kwargs.get('lp_solver', 'default')
+        verbose = kwargs.get('verbose', False)
+        if method == 'exact':
+            return leakyrelu_reach.leakyrelu_star_exact(
+                input_sets, gamma=gamma, lp_solver=lp_solver, verbose=verbose
+            )
+        else:
+            return leakyrelu_reach.leakyrelu_star_approx(
+                input_sets, gamma=gamma, lp_solver=lp_solver
+            )
+
+    elif isinstance(layer, nn.Sigmoid):
+        lp_solver = kwargs.get('lp_solver', 'default')
+        if method == 'exact':
+            warnings.warn("Sigmoid does not support exact method; using approx.")
+        return sigmoid_reach.sigmoid_star_approx(input_sets, lp_solver=lp_solver)
+
+    elif isinstance(layer, nn.Tanh):
+        lp_solver = kwargs.get('lp_solver', 'default')
+        if method == 'exact':
+            warnings.warn("Tanh does not support exact method; using approx.")
+        return tanh_reach.tanh_star_approx(input_sets, lp_solver=lp_solver)
+
     elif isinstance(layer, nn.Conv2d):
         return conv2d_reach.conv2d_star(layer, input_sets, method=method, **kwargs)
 
@@ -177,6 +206,15 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, nn.ReLU):
         return relu_reach.relu_zono_approx(input_sets)
 
+    elif isinstance(layer, nn.LeakyReLU):
+        return leakyrelu_reach.leakyrelu_zono_approx(input_sets, gamma=layer.negative_slope)
+
+    elif isinstance(layer, nn.Sigmoid):
+        return sigmoid_reach.sigmoid_zono_approx(input_sets)
+
+    elif isinstance(layer, nn.Tanh):
+        return tanh_reach.tanh_zono_approx(input_sets)
+
     elif isinstance(layer, nn.Conv2d):
         return conv2d_reach.conv2d_zono(layer, input_sets)
 
@@ -224,6 +262,15 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
 
     elif isinstance(layer, nn.ReLU):
         return relu_reach.relu_box(input_sets)
+
+    elif isinstance(layer, nn.LeakyReLU):
+        return leakyrelu_reach.leakyrelu_box(input_sets, gamma=layer.negative_slope)
+
+    elif isinstance(layer, nn.Sigmoid):
+        return sigmoid_reach.sigmoid_box(input_sets)
+
+    elif isinstance(layer, nn.Tanh):
+        return tanh_reach.tanh_box(input_sets)
 
     elif isinstance(layer, nn.Flatten):
         return flatten_reach.flatten_box(layer, input_sets)

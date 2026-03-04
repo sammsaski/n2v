@@ -18,6 +18,9 @@ from n2v.nn.layer_ops import global_avgpool_reach
 from n2v.nn.layer_ops import batchnorm_reach
 from n2v.nn.layer_ops import pad_reach
 from n2v.nn.layer_ops import reduce_reach
+from n2v.nn.layer_ops import leakyrelu_reach
+from n2v.nn.layer_ops import sigmoid_reach
+from n2v.nn.layer_ops import tanh_reach
 from n2v.nn.layer_ops.dispatcher import reach_layer
 
 __all__ = [
@@ -31,5 +34,8 @@ __all__ = [
     "batchnorm_reach",
     "pad_reach",
     "reduce_reach",
+    "leakyrelu_reach",
+    "sigmoid_reach",
+    "tanh_reach",
     "reach_layer",
 ]
