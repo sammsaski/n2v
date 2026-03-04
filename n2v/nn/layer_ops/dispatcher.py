@@ -114,30 +114,36 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
         verbose = kwargs.get('verbose', False)
         parallel = kwargs.get('parallel', None)
         n_workers = kwargs.get('n_workers', None)
+        precomputed_bounds = kwargs.get('precomputed_bounds', None)
 
         if method == 'exact':
             return relu_reach.relu_star_exact(
                 input_sets, lp_solver=lp_solver, verbose=verbose,
-                parallel=parallel, n_workers=n_workers
+                parallel=parallel, n_workers=n_workers,
+                precomputed_bounds=precomputed_bounds,
             )
         else:  # approx
             relax_factor = kwargs.get('relax_factor', 0.5)
             relax_method = kwargs.get('relax_method', 'standard')
             return relu_reach.relu_star_approx(
-                input_sets, relax_factor, lp_solver, relax_method
+                input_sets, relax_factor, lp_solver, relax_method,
+                precomputed_bounds=precomputed_bounds,
             )
 
     elif isinstance(layer, nn.LeakyReLU):
         gamma = layer.negative_slope
         lp_solver = kwargs.get('lp_solver', 'default')
         verbose = kwargs.get('verbose', False)
+        precomputed_bounds = kwargs.get('precomputed_bounds', None)
         if method == 'exact':
             return leakyrelu_reach.leakyrelu_star_exact(
-                input_sets, gamma=gamma, lp_solver=lp_solver, verbose=verbose
+                input_sets, gamma=gamma, lp_solver=lp_solver, verbose=verbose,
+                precomputed_bounds=precomputed_bounds,
             )
         else:
             return leakyrelu_reach.leakyrelu_star_approx(
-                input_sets, gamma=gamma, lp_solver=lp_solver
+                input_sets, gamma=gamma, lp_solver=lp_solver,
+                precomputed_bounds=precomputed_bounds,
             )
 
     elif isinstance(layer, nn.Sigmoid):

@@ -31,6 +31,7 @@ def leakyrelu_star_exact(
     gamma: float = 0.01,
     lp_solver: str = 'default',
     verbose: bool = False,
+    precomputed_bounds: tuple = None,
 ) -> List[Star]:
     """
     Exact reachability for LeakyReLU using Star sets.
@@ -40,6 +41,7 @@ def leakyrelu_star_exact(
         gamma: Negative slope parameter
         lp_solver: LP solver to use
         verbose: Display progress
+        precomputed_bounds: Optional (lb, ub) from Zono pre-pass
 
     Returns:
         List of output Star sets (may be more than input due to splitting)
@@ -47,7 +49,7 @@ def leakyrelu_star_exact(
     output_stars = []
     for star in input_stars:
         star_2d = star.to_star() if isinstance(star, ImageStar) else star
-        result = _leakyrelu_single_star_exact(star_2d, gamma, lp_solver, verbose)
+        result = _leakyrelu_single_star_exact(star_2d, gamma, lp_solver, verbose, precomputed_bounds)
         result = [_preserve_imagestar_type(star, s) for s in result]
         output_stars.extend(result)
     return output_stars
@@ -58,6 +60,7 @@ def _leakyrelu_single_star_exact(
     gamma: float,
     lp_solver: str = 'default',
     verbose: bool = False,
+    precomputed_bounds: tuple = None,
 ) -> List[Star]:
     """Exact LeakyReLU for a single Star. Split on crossing neurons."""
     if I is None or I.dim == 0:
@@ -66,6 +69,12 @@ def _leakyrelu_single_star_exact(
     lb, ub = I.estimate_ranges()
     if lb is None or ub is None:
         return []
+
+    # Refine bounds with precomputed Zono pre-pass bounds if available
+    if precomputed_bounds is not None:
+        pre_lb, pre_ub = precomputed_bounds
+        lb = np.maximum(lb, pre_lb.reshape(lb.shape))
+        ub = np.minimum(ub, pre_ub.reshape(ub.shape))
 
     # Scale neurons that are always inactive (ub <= 0)
     inactive_map = np.where(ub.flatten() <= 0)[0]
@@ -158,6 +167,7 @@ def leakyrelu_star_approx(
     input_stars: List[Star],
     gamma: float = 0.01,
     lp_solver: str = 'default',
+    precomputed_bounds: tuple = None,
 ) -> List[Star]:
     """
     Approximate LeakyReLU reachability using modified triangle relaxation.
@@ -171,6 +181,7 @@ def leakyrelu_star_approx(
         input_stars: List of input Stars
         gamma: Negative slope
         lp_solver: LP solver
+        precomputed_bounds: Optional (lb, ub) from Zono pre-pass
 
     Returns:
         List of output Stars (no splitting, same count as input)
@@ -178,7 +189,7 @@ def leakyrelu_star_approx(
     output_stars = []
     for star in input_stars:
         star_2d = star.to_star() if isinstance(star, ImageStar) else star
-        result = _leakyrelu_single_star_approx(star_2d, gamma, lp_solver)
+        result = _leakyrelu_single_star_approx(star_2d, gamma, lp_solver, precomputed_bounds)
         if result is not None:
             result = _preserve_imagestar_type(star, result)
             output_stars.append(result)
@@ -189,6 +200,7 @@ def _leakyrelu_single_star_approx(
     I: Star,
     gamma: float,
     lp_solver: str = 'default',
+    precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """Approximate LeakyReLU for a single Star."""
     if I is None or I.dim == 0:
@@ -200,6 +212,12 @@ def _leakyrelu_single_star_approx(
 
     lb_est = lb_est.flatten()
     ub_est = ub_est.flatten()
+
+    # Refine bounds with precomputed Zono pre-pass bounds if available
+    if precomputed_bounds is not None:
+        pre_lb, pre_ub = precomputed_bounds
+        lb_est = np.maximum(lb_est, pre_lb.flatten())
+        ub_est = np.minimum(ub_est, pre_ub.flatten())
 
     # Scale definitely inactive neurons (ub <= 0)
     inactive_map = np.where(ub_est <= 0)[0]

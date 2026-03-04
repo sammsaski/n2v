@@ -164,13 +164,23 @@ def _reach_sequential(
         model: PyTorch model
         input_sets: List of input sets (all same type)
         method: Reachability method
-        **kwargs: Additional arguments
+        **kwargs: Additional arguments. Special keys:
+            - precompute_bounds (bool): If True, run Zono pre-pass first
+            - _precomputed_layer_bounds (dict): Internal -- pre-computed bounds dict
 
     Returns:
         List of output sets
     """
     current_sets = input_sets
     verbose = kwargs.get('verbose', False)
+
+    # Handle precompute_bounds option
+    precompute = kwargs.pop('precompute_bounds', False)
+    layer_bounds = kwargs.pop('_precomputed_layer_bounds', None)
+
+    if precompute and layer_bounds is None:
+        from n2v.utils.bounds_precomputation import compute_intermediate_bounds
+        layer_bounds = compute_intermediate_bounds(model, input_sets[0])
 
     # Get all layers from the model
     layers = list(model.children())
@@ -184,7 +194,14 @@ def _reach_sequential(
             set_type = type(current_sets[0]).__name__
             print(f'Layer {i+1}/{len(layers)}: {type(layer).__name__}')
 
-        current_sets = reach_layer(layer, current_sets, method, **kwargs)
+        # Build per-layer kwargs with precomputed bounds if available
+        layer_kwargs = dict(kwargs)
+        if layer_bounds is not None and i in layer_bounds:
+            layer_kwargs['precomputed_bounds'] = layer_bounds[i]
+        else:
+            layer_kwargs.pop('precomputed_bounds', None)
+
+        current_sets = reach_layer(layer, current_sets, method, **layer_kwargs)
 
         if verbose:
             print(f'  Output: {len(current_sets)} {set_type} sets')
@@ -213,6 +230,14 @@ def _handle_graphmodule(
     Returns:
         List of output sets
     """
+    # Handle precompute_bounds option
+    precompute = kwargs.pop('precompute_bounds', False)
+    layer_bounds = kwargs.pop('_precomputed_layer_bounds', None)
+
+    if precompute and layer_bounds is None:
+        from n2v.utils.bounds_precomputation import compute_intermediate_bounds
+        layer_bounds = compute_intermediate_bounds(graph_module, input_sets[0])
+
     # Get the set type from the first input
     set_type = type(input_sets[0])
 
@@ -310,7 +335,12 @@ def _handle_graphmodule(
                 first_arg = node.args[0]
                 if hasattr(first_arg, 'name') and first_arg.name in node_values:
                     input_sets_op = node_values[first_arg.name]
-                    output_sets = reach_layer(module, input_sets_op, method, **kwargs)
+                    layer_kwargs = dict(kwargs)
+                    if layer_bounds is not None and node.name in layer_bounds:
+                        layer_kwargs['precomputed_bounds'] = layer_bounds[node.name]
+                    else:
+                        layer_kwargs.pop('precomputed_bounds', None)
+                    output_sets = reach_layer(module, input_sets_op, method, **layer_kwargs)
                     node_values[node.name] = output_sets
                     current_sets = output_sets
 

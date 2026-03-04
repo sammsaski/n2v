@@ -71,6 +71,8 @@ def verify_instance(
     pgd_restarts: int = 10,
     pgd_steps: int = 50,
     workers: int = None,
+    parallel_regions: bool = False,
+    precompute_bounds: bool = False,
 ) -> dict:
     """
     Verify a single instance using 3-stage strategy.
@@ -86,6 +88,8 @@ def verify_instance(
         pgd_restarts: Number of PGD restarts
         pgd_steps: Number of PGD steps per restart
         workers: Number of parallel workers (None = CPU count)
+        parallel_regions: Verify disjunctive input regions in parallel
+        precompute_bounds: Enable Zono pre-pass for dead neuron elimination
 
     Returns:
         Dictionary with keys:
@@ -151,71 +155,132 @@ def verify_instance(
 
         # Stage 2: Approximate reachability
         if not no_approx:
-            all_unsat = True
-            for lb_region, ub_region in zip(lb_list, ub_list):
-                input_set = create_input_set(lb_region, ub_region, input_shape)
-                try:
-                    reach_sets = net.reach(input_set, method='approx')
-                    verdict = verify_specification(reach_sets, property_spec)
+            # Parallel path for multiple disjunctive regions
+            if parallel_regions and len(lb_list) > 1:
+                from n2v.utils.vnncomp import verify_regions_parallel
+                parallel_result = verify_regions_parallel(
+                    model, list(zip(lb_list, ub_list)), property_spec,
+                    method='approx', n_workers=workers,
+                    precompute_bounds=precompute_bounds,
+                )
+                if parallel_result['result'] == 'sat':
+                    return {
+                        'result': RESULT_SAT,
+                        'time': time.time() - t_start,
+                        'method': 'approx',
+                        'counterexample': None,
+                    }
+                elif parallel_result['result'] == 'unsat':
+                    return {
+                        'result': RESULT_UNSAT,
+                        'time': time.time() - t_start,
+                        'method': 'approx',
+                        'counterexample': None,
+                    }
+                else:
+                    # Some regions unknown — fall through to exact
+                    unknown_regions = [
+                        (lb_list[i], ub_list[i])
+                        for i, r in enumerate(parallel_result['per_region'])
+                        if r['result'] != 1
+                    ]
+            else:
+                # Sequential path
+                all_unsat = True
+                for lb_region, ub_region in zip(lb_list, ub_list):
+                    input_set = create_input_set(lb_region, ub_region, input_shape)
+                    try:
+                        reach_sets = net.reach(
+                            input_set, method='approx',
+                            precompute_bounds=precompute_bounds,
+                        )
+                        verdict = verify_specification(reach_sets, property_spec)
 
-                    if verdict == 0:
-                        # SAT — property violated
-                        return {
-                            'result': RESULT_SAT,
-                            'time': time.time() - t_start,
-                            'method': 'approx',
-                            'counterexample': None,
-                        }
-                    elif verdict == 1:
-                        # UNSAT for this region
-                        continue
-                    else:
-                        # UNKNOWN — need exact for this region
+                        if verdict == 0:
+                            # SAT — property violated
+                            return {
+                                'result': RESULT_SAT,
+                                'time': time.time() - t_start,
+                                'method': 'approx',
+                                'counterexample': None,
+                            }
+                        elif verdict == 1:
+                            # UNSAT for this region
+                            continue
+                        else:
+                            # UNKNOWN — need exact for this region
+                            all_unsat = False
+                            unknown_regions.append((lb_region, ub_region))
+                    except Exception:
                         all_unsat = False
                         unknown_regions.append((lb_region, ub_region))
-                except Exception:
-                    all_unsat = False
-                    unknown_regions.append((lb_region, ub_region))
 
-            if all_unsat:
-                return {
-                    'result': RESULT_UNSAT,
-                    'time': time.time() - t_start,
-                    'method': 'approx',
-                    'counterexample': None,
-                }
+                if all_unsat:
+                    return {
+                        'result': RESULT_UNSAT,
+                        'time': time.time() - t_start,
+                        'method': 'approx',
+                        'counterexample': None,
+                    }
         else:
             # If skipping approx, all regions need exact
             unknown_regions = list(zip(lb_list, ub_list))
 
         # Stage 3: Exact reachability
         if not no_exact and unknown_regions:
-            all_unsat = True
-            for lb_region, ub_region in unknown_regions:
-                input_set = create_input_set(lb_region, ub_region, input_shape)
-                try:
-                    reach_sets = net.reach(input_set, method='exact')
-                    verdict = verify_specification(reach_sets, property_spec)
+            # Parallel path for exact
+            if parallel_regions and len(unknown_regions) > 1:
+                from n2v.utils.vnncomp import verify_regions_parallel
+                parallel_result = verify_regions_parallel(
+                    model, unknown_regions, property_spec,
+                    method='exact', n_workers=workers,
+                    precompute_bounds=precompute_bounds,
+                )
+                if parallel_result['result'] == 'sat':
+                    return {
+                        'result': RESULT_SAT,
+                        'time': time.time() - t_start,
+                        'method': 'exact',
+                        'counterexample': None,
+                    }
+                elif parallel_result['result'] == 'unsat':
+                    return {
+                        'result': RESULT_UNSAT,
+                        'time': time.time() - t_start,
+                        'method': 'exact',
+                        'counterexample': None,
+                    }
+            else:
+                # Sequential path
+                all_unsat = True
+                for lb_region, ub_region in unknown_regions:
+                    input_set = create_input_set(lb_region, ub_region, input_shape)
+                    try:
+                        reach_sets = net.reach(
+                            input_set, method='exact',
+                            precompute_bounds=precompute_bounds,
+                        )
+                        verdict = verify_specification(reach_sets, property_spec)
 
-                    if verdict == 0:
-                        return {
-                            'result': RESULT_SAT,
-                            'time': time.time() - t_start,
-                            'method': 'exact',
-                            'counterexample': None,
-                        }
-                    elif verdict != 1:
+                        if verdict == 0:
+                            return {
+                                'result': RESULT_SAT,
+                                'time': time.time() - t_start,
+                                'method': 'exact',
+                                'counterexample': None,
+                            }
+                        elif verdict != 1:
+                            all_unsat = False
+                    except Exception:
                         all_unsat = False
-                except Exception:
-                    all_unsat = False
 
-            if all_unsat:
-                return {
-                    'result': RESULT_UNSAT,
-                    'time': time.time() - t_start,
-                    'method': 'exact',
-                    'counterexample': None,
-                }
+                if all_unsat:
+                    return {
+                        'result': RESULT_UNSAT,
+                        'time': time.time() - t_start,
+                        'method': 'exact',
+                        'counterexample': None,
+                    }
 
         return {
             'result': RESULT_UNKNOWN,
@@ -257,6 +322,12 @@ def main():
                         help='Number of PGD restarts')
     parser.add_argument('--pgd-steps', type=int, default=50,
                         help='Number of PGD steps per restart')
+    parser.add_argument('--parallel-regions', action='store_true',
+                        help='Verify input regions in parallel')
+    parser.add_argument('--category', type=str, default=None,
+                        help='Benchmark category for per-benchmark config')
+    parser.add_argument('--precompute-bounds', action='store_true',
+                        help='Enable Zono pre-pass for dead neuron elimination')
     args = parser.parse_args()
 
     result = verify_instance(
@@ -270,6 +341,8 @@ def main():
         pgd_restarts=args.pgd_restarts,
         pgd_steps=args.pgd_steps,
         workers=args.workers,
+        parallel_regions=args.parallel_regions,
+        precompute_bounds=args.precompute_bounds,
     )
 
     # Print VNN-COMP compliant output

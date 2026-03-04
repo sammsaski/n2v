@@ -42,7 +42,8 @@ def relu_star_exact(
     lp_solver: str = 'default',
     verbose: bool = False,
     parallel: bool = None,
-    n_workers: int = None
+    n_workers: int = None,
+    precomputed_bounds: tuple = None,
 ) -> List[Star]:
     """
     Exact reachability for ReLU using Star sets.
@@ -61,7 +62,7 @@ def relu_star_exact(
     use_parallel = _should_use_star_parallel(len(input_stars), parallel, n_workers)
 
     if use_parallel:
-        return _relu_star_exact_parallel(input_stars, lp_solver, verbose, n_workers)
+        return _relu_star_exact_parallel(input_stars, lp_solver, verbose, n_workers, precomputed_bounds)
     else:
         # Sequential processing
         output_stars = []
@@ -69,7 +70,7 @@ def relu_star_exact(
             # Convert ImageStar to Star for 2D ReLU processing
             star_2d = star.to_star() if isinstance(star, ImageStar) else star
             # Process each star through exact ReLU
-            result = _relu_single_star_exact(star_2d, lp_solver, verbose)
+            result = _relu_single_star_exact(star_2d, lp_solver, verbose, precomputed_bounds)
             # Preserve ImageStar type for each output star
             result = [_preserve_imagestar_type(star, s) for s in result]
             output_stars.extend(result)
@@ -79,7 +80,8 @@ def relu_star_exact(
 def _relu_single_star_exact(
     I: Star,
     lp_solver: str = 'default',
-    verbose: bool = False
+    verbose: bool = False,
+    precomputed_bounds: tuple = None,
 ) -> List[Star]:
     """
     Exact ReLU reachability for a single Star set.
@@ -105,6 +107,13 @@ def _relu_single_star_exact(
 
     if lb is None or ub is None:
         return []
+
+    # Refine bounds with precomputed Zono pre-pass bounds if available
+    if precomputed_bounds is not None:
+        pre_lb, pre_ub = precomputed_bounds
+        # Intersect: take the tighter of the two bounds
+        lb = np.maximum(lb, pre_lb.reshape(lb.shape))
+        ub = np.minimum(ub, pre_ub.reshape(ub.shape))
 
     # Neurons always inactive (ub <= 0) - reset to 0
     reset_map = np.where(ub.flatten() <= 0)[0]
@@ -214,7 +223,8 @@ def relu_star_approx(
     input_stars: List[Star],
     relax_factor: float = 0.5,
     lp_solver: str = 'default',
-    relax_method: str = 'standard'
+    relax_method: str = 'standard',
+    precomputed_bounds: tuple = None,
 ) -> List[Star]:
     """
     Approximate reachability for ReLU using triangle relaxation.
@@ -232,7 +242,7 @@ def relu_star_approx(
         List of output Stars (no splitting, same count as input)
     """
     if relax_factor == 0.0:
-        return relu_star_exact(input_stars, lp_solver)
+        return relu_star_exact(input_stars, lp_solver, precomputed_bounds=precomputed_bounds)
 
     output_stars = []
 
@@ -242,13 +252,13 @@ def relu_star_approx(
 
         # Process each star through approximate ReLU with specified method
         if relax_method == 'range':
-            result = _relu_single_star_relax_range(star_2d, relax_factor, lp_solver)
+            result = _relu_single_star_relax_range(star_2d, relax_factor, lp_solver, precomputed_bounds)
         elif relax_method == 'area':
-            result = _relu_single_star_relax_area(star_2d, relax_factor, lp_solver)
+            result = _relu_single_star_relax_area(star_2d, relax_factor, lp_solver, precomputed_bounds)
         elif relax_method == 'bound':
-            result = _relu_single_star_relax_bound(star_2d, relax_factor, lp_solver)
+            result = _relu_single_star_relax_bound(star_2d, relax_factor, lp_solver, precomputed_bounds)
         else:  # 'standard'
-            result = _relu_single_star_approx(star_2d, lp_solver)
+            result = _relu_single_star_approx(star_2d, lp_solver, precomputed_bounds)
 
         if result is not None:
             # Preserve ImageStar type if input was ImageStar
@@ -260,7 +270,8 @@ def relu_star_approx(
 
 def _relu_single_star_approx(
     I: Star,
-    lp_solver: str = 'default'
+    lp_solver: str = 'default',
+    precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """
     Approximate ReLU reachability for a single Star using triangle relaxation.
@@ -299,6 +310,12 @@ def _relu_single_star_approx(
 
     lb_est = lb_est.flatten()
     ub_est = ub_est.flatten()
+
+    # Refine bounds with precomputed Zono pre-pass bounds if available
+    if precomputed_bounds is not None:
+        pre_lb, pre_ub = precomputed_bounds
+        lb_est = np.maximum(lb_est, pre_lb.flatten())
+        ub_est = np.minimum(ub_est, pre_ub.flatten())
 
     # Find neurons definitely inactive (ub <= 0 from estimate)
     reset_map = np.where(ub_est <= 0)[0]
@@ -565,7 +582,8 @@ def relu_box(input_boxes: List) -> List:
 def _relu_single_star_relax_range(
     I: Star,
     relax_factor: float,
-    lp_solver: str = 'default'
+    lp_solver: str = 'default',
+    precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """
     Relaxed ReLU reachability prioritizing neurons by range width (ub - lb).
@@ -599,6 +617,12 @@ def _relu_single_star_relax_range(
 
     lb = lb.flatten()
     ub = ub.flatten()
+
+    # Refine bounds with precomputed Zono pre-pass bounds if available
+    if precomputed_bounds is not None:
+        pre_lb, pre_ub = precomputed_bounds
+        lb = np.maximum(lb, pre_lb.flatten())
+        ub = np.minimum(ub, pre_ub.flatten())
 
     # Step 2: Find and reset neurons with ub <= 0
     map1 = np.where(ub <= 0)[0]
@@ -673,7 +697,8 @@ def _relu_single_star_relax_range(
 def _relu_single_star_relax_area(
     I: Star,
     relax_factor: float,
-    lp_solver: str = 'default'
+    lp_solver: str = 'default',
+    precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """
     Relaxed ReLU reachability prioritizing neurons by triangle area.
@@ -701,6 +726,12 @@ def _relu_single_star_relax_area(
 
     lb = lb.flatten()
     ub = ub.flatten()
+
+    # Refine bounds with precomputed Zono pre-pass bounds if available
+    if precomputed_bounds is not None:
+        pre_lb, pre_ub = precomputed_bounds
+        lb = np.maximum(lb, pre_lb.flatten())
+        ub = np.minimum(ub, pre_ub.flatten())
 
     # Reset neurons with ub <= 0
     map1 = np.where(ub <= 0)[0]
@@ -770,7 +801,8 @@ def _relu_single_star_relax_area(
 def _relu_single_star_relax_bound(
     I: Star,
     relax_factor: float,
-    lp_solver: str = 'default'
+    lp_solver: str = 'default',
+    precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """
     Relaxed ReLU reachability prioritizing by individual bound magnitudes.
@@ -798,6 +830,12 @@ def _relu_single_star_relax_bound(
 
     lb = lb.flatten()
     ub = ub.flatten()
+
+    # Refine bounds with precomputed Zono pre-pass bounds if available
+    if precomputed_bounds is not None:
+        pre_lb, pre_ub = precomputed_bounds
+        lb = np.maximum(lb, pre_lb.flatten())
+        ub = np.minimum(ub, pre_ub.flatten())
 
     # Reset neurons with ub <= 0
     map1 = np.where(ub <= 0)[0]
@@ -1107,7 +1145,8 @@ def _relu_star_exact_parallel(
     input_stars: List[Star],
     lp_solver: str = 'default',
     verbose: bool = False,
-    n_workers: int = None
+    n_workers: int = None,
+    precomputed_bounds: tuple = None,
 ) -> List[Star]:
     """
     Process multiple Stars through exact ReLU in parallel.
@@ -1119,6 +1158,7 @@ def _relu_star_exact_parallel(
         lp_solver: LP solver
         verbose: Display option
         n_workers: Number of workers
+        precomputed_bounds: Optional precomputed (lb, ub) from Zono pre-pass
 
     Returns:
         List of output Stars
@@ -1131,7 +1171,7 @@ def _relu_star_exact_parallel(
         for star in input_stars:
             # Convert ImageStar to Star for 2D ReLU processing
             star_2d = star.to_star() if isinstance(star, ImageStar) else star
-            result = _relu_single_star_exact(star_2d, lp_solver, verbose)
+            result = _relu_single_star_exact(star_2d, lp_solver, verbose, precomputed_bounds)
             # Preserve ImageStar type for each output star
             result = [_preserve_imagestar_type(star, s) for s in result]
             output_stars.extend(result)
@@ -1148,7 +1188,7 @@ def _relu_star_exact_parallel(
     with ProcessPoolExecutor(max_workers=workers) as executor:
         # Submit all Stars for processing, track original star for type preservation
         future_to_orig = {
-            executor.submit(_relu_single_star_exact, star_2d, lp_solver, None): orig_star
+            executor.submit(_relu_single_star_exact, star_2d, lp_solver, None, precomputed_bounds): orig_star
             for star_2d, orig_star in zip(stars_2d, input_stars)
         }
 
