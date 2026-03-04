@@ -54,6 +54,7 @@ def falsify(
     **kwargs
 ) -> FalsifyResult:
     """
+    TODO: Should take expected input shape, using [lb, ub] restricts to 1D
     Attempt to find a counterexample using the specified falsification method.
 
     Note:
