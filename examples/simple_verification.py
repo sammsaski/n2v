@@ -1,7 +1,7 @@
 """
 Simple neural network verification example.
 
-Demonstrates basic usage of NNV-Python for verifying a small feedforward network.
+Demonstrates basic usage of n2v for verifying a small feedforward network.
 """
 
 import torch
@@ -199,7 +199,7 @@ def example_set_operations():
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
-    print("NNV-Python: Neural Network Verification Examples")
+    print("n2v: Neural Network Verification Examples")
     print("=" * 60 + "\n")
 
     # Run examples

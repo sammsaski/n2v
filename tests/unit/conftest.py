@@ -1,5 +1,5 @@
 """
-Pytest configuration and shared fixtures for NNV-Python tests.
+Pytest configuration and shared fixtures for n2v tests.
 """
 
 import pytest

@@ -1,6 +1,6 @@
 # MNIST Classification and Verification Examples
 
-Complete workflow for training and formally verifying MNIST classifiers using NNV-Python.
+Complete workflow for training and formally verifying MNIST classifiers using n2v.
 
 ---
 
@@ -466,7 +466,7 @@ On a typical laptop (CPU):
 
 ## References
 
-### NNV-Python Documentation
+### n2v Documentation
 - Main README: `../../README.md`
 
 ### Key Papers

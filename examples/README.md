@@ -1,6 +1,6 @@
-# NNV-Python Examples
+# n2v Examples
 
-Complete examples demonstrating neural network verification with NNV-Python.
+Complete examples demonstrating neural network verification with n2v.
 
 ---
 

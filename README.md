@@ -1,4 +1,4 @@
-# NNV-Python
+# n2v
 
 Python toolbox for neural network verification.
 

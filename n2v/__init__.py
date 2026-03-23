@@ -1,5 +1,5 @@
 """
-NNV-Python: Neural Network Verification Tool for Python/PyTorch
+n2v: Neural Network Verification Tool for Python/PyTorch
 
 A formal verification tool for deep learning models, supporting reachability
 analysis and robustness verification using set-based methods.
@@ -7,7 +7,7 @@ analysis and robustness verification using set-based methods.
 Translated from the original MATLAB NNV tool by the VeriVital research group.
 """
 
-__version__ = "2.0.0"
+__version__ = "0.1.0"
 __author__ = "NNV Team"
 
 from n2v.sets import Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope, HalfSpace, ProbabilisticBox

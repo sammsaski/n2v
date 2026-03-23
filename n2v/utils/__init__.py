@@ -1,5 +1,5 @@
 """
-Utility functions for NNV-Python.
+Utility functions for n2v.
 
 This module provides helper functions for model loading, LP solving,
 conversions, verification, falsification, and other utilities.

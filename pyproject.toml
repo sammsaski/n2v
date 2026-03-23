@@ -4,26 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "n2v"
-version = "2.0.0"
-description = "Python Neural Network Verification Tool - Formal verification for deep learning models"
+version = "0.1.0"
+description = "Neural network verification using set-based reachability analysis and probabilistic verification"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
 authors = [
-    {name = "NNV Team", email = "diego.manzanas.lopez@vanderbilt.edu"}
+    {name = "VeriVITAL Team", email = "samuel.sasaki@vanderbilt.edu"}
 ]
 keywords = ["neural networks", "verification", "reachability", "formal methods", "pytorch"]
-classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
 
 dependencies = [
     "numpy>=1.20.0",
@@ -36,26 +24,11 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=3.0.0",
-    "black>=22.0.0",
-    "flake8>=4.0.0",
-    "mypy>=0.950",
 ]
 
 [project.urls]
-Homepage = "https://github.com/verivital/nnv"
-Documentation = "https://github.com/verivital/nnv"
-Repository = "https://github.com/verivital/nnv"
+Repository = "https://github.com/sammsaski/n2v"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["n2v*"]
-
-[tool.black]
-line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311']
-
-[tool.mypy]
-python_version = "3.8"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false

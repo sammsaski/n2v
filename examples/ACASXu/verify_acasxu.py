@@ -3,7 +3,7 @@
 ACAS Xu Verification Example - Generalized for All Set Types
 
 This script demonstrates verification of ACAS Xu neural network properties
-using the NNV-Python toolkit with support for all set representations:
+using n2v with support for all set representations:
 - Box: Interval arithmetic (fastest, least precise)
 - Zono: Zonotopes (fast, good precision)
 - Star: Star sets (precise, slower)

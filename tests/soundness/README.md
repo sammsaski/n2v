@@ -1,6 +1,6 @@
 # Soundness Tests
 
-This directory contains soundness tests for the NNV-Python verification tool. These tests verify that the tool produces **correct** results, not just that the code runs without errors.
+This directory contains soundness tests for the n2v verification tool. These tests verify that the tool produces **correct** results, not just that the code runs without errors.
 
 ## Purpose
 
