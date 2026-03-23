@@ -6,12 +6,13 @@ computation based on set type and handles both standard PyTorch models
 and ONNX GraphModules.
 """
 
+import logging
 import operator
 
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import List, Union, Optional
+from typing import Dict, List, Tuple, Type, Union, Optional, Any
 
 # Import set types
 from n2v.sets import Star, Zono, Box, Hexatope, Octatope
@@ -57,6 +58,8 @@ except ImportError:
     OnnxSplit = None
     OnnxSplit13 = None
 
+logger = logging.getLogger(__name__)
+
 
 def reach_pytorch_model(
     model: nn.Module,
@@ -74,8 +77,7 @@ def reach_pytorch_model(
         model: PyTorch model (nn.Module or torch.fx.GraphModule)
         input_set: Input specification (Star, Zono, Box, Hexatope, or Octatope)
         method: Reachability method:
-            - 'exact': Exact reachability (Star, Hexatope, Octatope)
-            - 'exact-differentiable': Exact with differentiable solver (Hexatope, Octatope)
+            - 'exact': Exact reachability (Star only)
             - 'approx': Over-approximate reachability (all set types)
             - 'probabilistic': Model-agnostic probabilistic verification (any input set -> ProbabilisticBox)
             - 'hybrid': Deterministic until threshold, then probabilistic
@@ -133,9 +135,9 @@ def reach_pytorch_model(
         if method != 'approx':
             raise ValueError(f"Box only supports 'approx', got '{method}'")
     elif isinstance(input_set, (Hexatope, Octatope)):
-        if method not in ('exact', 'exact-differentiable', 'approx'):
+        if method != 'approx':
             raise ValueError(
-                f"{type(input_set).__name__} supports 'exact', 'exact-differentiable', or 'approx', got '{method}'"
+                f"{type(input_set).__name__} only supports 'approx', got '{method}'"
             )
     else:
         raise TypeError(
@@ -174,13 +176,14 @@ def _reach_sequential(
     current_sets = input_sets
     verbose = kwargs.get('verbose', False)
 
-    # Handle precompute_bounds option
+    # Handle precompute_bounds option ('ibp', 'zono', True, or False)
     precompute = kwargs.pop('precompute_bounds', False)
     layer_bounds = kwargs.pop('_precomputed_layer_bounds', None)
 
     if precompute and layer_bounds is None:
         from n2v.utils.bounds_precomputation import compute_intermediate_bounds
-        layer_bounds = compute_intermediate_bounds(model, input_sets[0])
+        precompute_method = precompute if isinstance(precompute, str) else 'ibp'
+        layer_bounds = compute_intermediate_bounds(model, input_sets[0], method=precompute_method)
 
     # Get all layers from the model
     layers = list(model.children())
@@ -192,7 +195,7 @@ def _reach_sequential(
     for i, layer in enumerate(layers):
         if verbose:
             set_type = type(current_sets[0]).__name__
-            print(f'Layer {i+1}/{len(layers)}: {type(layer).__name__}')
+            logger.info(f'Layer {i+1}/{len(layers)}: {type(layer).__name__}')
 
         # Build per-layer kwargs with precomputed bounds if available
         layer_kwargs = dict(kwargs)
@@ -204,16 +207,16 @@ def _reach_sequential(
         current_sets = reach_layer(layer, current_sets, method, **layer_kwargs)
 
         if verbose:
-            print(f'  Output: {len(current_sets)} {set_type} sets')
+            logger.debug(f'  Output: {len(current_sets)} {set_type} sets')
 
     return current_sets
 
 
 def _handle_graphmodule(
-    graph_module,
+    graph_module: fx.GraphModule,
     input_sets: List,
     method: str,
-    **kwargs
+    **kwargs: Any
 ) -> List:
     """
     Handle reachability for torch.fx.GraphModule (e.g., from onnx2torch).
@@ -230,13 +233,14 @@ def _handle_graphmodule(
     Returns:
         List of output sets
     """
-    # Handle precompute_bounds option
+    # Handle precompute_bounds option ('ibp', 'zono', True, or False)
     precompute = kwargs.pop('precompute_bounds', False)
     layer_bounds = kwargs.pop('_precomputed_layer_bounds', None)
 
     if precompute and layer_bounds is None:
         from n2v.utils.bounds_precomputation import compute_intermediate_bounds
-        layer_bounds = compute_intermediate_bounds(graph_module, input_sets[0])
+        precompute_method = precompute if isinstance(precompute, str) else 'ibp'
+        layer_bounds = compute_intermediate_bounds(graph_module, input_sets[0], method=precompute_method)
 
     # Get the set type from the first input
     set_type = type(input_sets[0])
@@ -267,7 +271,7 @@ def _handle_graphmodule(
             module_type = type(module).__name__
 
             if verbose:
-                print(f'  Processing: {node.target} ({module_type})')
+                logger.debug(f'  Processing: {node.target} ({module_type})')
 
             # Handle OnnxReshape
             if OnnxReshape is not None and isinstance(module, OnnxReshape):
@@ -369,8 +373,13 @@ def _handle_graphmodule(
     return current_sets
 
 
-def _get_parameter(graph_module, node):
-    """Extract a parameter tensor from a get_attr node."""
+def _get_parameter(graph_module: fx.GraphModule, node: Any) -> torch.Tensor:
+    """Extract a parameter tensor from a get_attr node or OnnxConstant call_module."""
+    if node.op == 'call_module':
+        # Handle OnnxConstant modules that produce constant tensors
+        module = dict(graph_module.named_modules()).get(node.target)
+        if module is not None and hasattr(module, 'value'):
+            return module.value.detach().cpu()
     param_path = node.target.split('.')
     param_module = graph_module
     for attr in param_path:
@@ -418,7 +427,7 @@ def _handle_reshape(input_sets: List, target_shape: tuple) -> List:
     return output_sets
 
 
-def _resolve_shape(shape: tuple, total_size: int) -> tuple:
+def _resolve_shape(shape: Tuple[int, ...], total_size: int) -> Tuple[int, ...]:
     """Resolve -1 in a shape tuple given total element count."""
     if -1 not in shape:
         return shape
@@ -434,7 +443,7 @@ def _resolve_shape(shape: tuple, total_size: int) -> tuple:
     return tuple(resolved)
 
 
-def _reshape_imagestar(star: 'ImageStar', spatial_shape: tuple) -> 'Star':
+def _reshape_imagestar(star: 'ImageStar', spatial_shape: Tuple[int, ...]) -> Union['Star', 'ImageStar']:
     """
     Reshape ImageStar. ONNX target is in CHW format.
 
@@ -469,7 +478,7 @@ def _reshape_imagestar(star: 'ImageStar', spatial_shape: tuple) -> 'Star':
     return Star(V_flat, star.C, star.d, star.predicate_lb, star.predicate_ub)
 
 
-def _reshape_imagezono(zono: 'ImageZono', spatial_shape: tuple) -> 'Zono':
+def _reshape_imagezono(zono: 'ImageZono', spatial_shape: Tuple[int, ...]) -> Union['Zono', 'ImageZono']:
     """Reshape ImageZono. Returns plain Zono if flattened."""
     h, w, c_ch = zono.height, zono.width, zono.num_channels
     n_gen = zono.V.shape[1]
@@ -497,7 +506,7 @@ def _reshape_imagezono(zono: 'ImageZono', spatial_shape: tuple) -> 'Zono':
     return Zono(c_flat, V_flat)
 
 
-def _reshape_star(star: 'Star', spatial_shape: tuple) -> 'Star':
+def _reshape_star(star: 'Star', spatial_shape: Tuple[int, ...]) -> 'Star':
     """Reshape plain Star — V is already flat, just validate dims."""
     total = star.dim
     resolved = _resolve_shape(spatial_shape, total)
@@ -512,7 +521,7 @@ def _reshape_star(star: 'Star', spatial_shape: tuple) -> 'Star':
     return star
 
 
-def _reshape_zono(zono: 'Zono', spatial_shape: tuple) -> 'Zono':
+def _reshape_zono(zono: 'Zono', spatial_shape: Tuple[int, ...]) -> 'Zono':
     """Reshape plain Zono — already flat, validate dims."""
     total = zono.dim
     resolved = _resolve_shape(spatial_shape, total)
@@ -526,7 +535,7 @@ def _reshape_zono(zono: 'Zono', spatial_shape: tuple) -> 'Zono':
     return zono
 
 
-def _reshape_box(box: 'Box', spatial_shape: tuple) -> 'Box':
+def _reshape_box(box: 'Box', spatial_shape: Tuple[int, ...]) -> 'Box':
     """Reshape Box — already flat, validate dims."""
     total = box.dim
     resolved = _resolve_shape(spatial_shape, total)
@@ -540,7 +549,7 @@ def _reshape_box(box: 'Box', spatial_shape: tuple) -> 'Box':
     return box
 
 
-def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):
+def _handle_onnx_binary_op(module: Any, node: Any, node_values: Dict[str, List], graph_module: fx.GraphModule, set_type: Type) -> Optional[List]:
     """Handle ONNX binary math operations (Add, Sub, etc.)."""
     input_nodes = node.args
     if len(input_nodes) != 2:
@@ -558,10 +567,12 @@ def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):
             return None
         op_name = module.math_op_function.__name__
 
-        if op_name in ('mul', '_onnx_div'):
+        if op_name == 'mul':
+            return _mul_sets(sets_a, sets_b)
+        elif op_name == '_onnx_div':
             raise NotImplementedError(
-                f"Element-wise {op_name} of two computed sets is not supported. "
-                f"Only Mul/Div by constant is implemented."
+                f"Element-wise division of two computed sets is not supported. "
+                f"Only Div by constant is implemented."
             )
 
         return _add_sets(sets_a, sets_b, op_name)
@@ -630,13 +641,39 @@ def _handle_onnx_binary_op(module, node, node_values, graph_module, set_type):
 
         return output_sets
 
+    elif set_type in (Zono, ImageZono):
+        output_sets = []
+        bias_reshaped = bias.reshape(-1, 1)
+        for s in input_sets_op:
+            if isinstance(s, ImageZono):
+                h, w, c_ch = s.height, s.width, s.num_channels
+                if bias_reshaped.size == c_ch:
+                    bias_flat = np.tile(bias.flatten(), h * w).reshape(-1, 1)
+                else:
+                    bias_flat = bias_reshaped
+                new_c = s.c + bias_flat
+                out = ImageZono(new_c, s.V, h, w, c_ch)
+            else:
+                new_c = s.c + bias_reshaped
+                out = Zono(new_c, s.V)
+            output_sets.append(out)
+        return output_sets
+
+    elif set_type == Box:
+        output_sets = []
+        bias_reshaped = bias.reshape(-1, 1)
+        for s in input_sets_op:
+            out = Box(s.lb + bias_reshaped, s.ub + bias_reshaped)
+            output_sets.append(out)
+        return output_sets
+
     else:
         raise NotImplementedError(
             f"ONNX binary operations not supported for {set_type.__name__}"
         )
 
 
-def _handle_onnx_matmul(module, node, node_values, graph_module, set_type):
+def _handle_onnx_matmul(module: Any, node: Any, node_values: Dict[str, List], graph_module: fx.GraphModule, set_type: Type) -> Optional[List]:
     """Handle ONNX MatMul operations."""
     input_nodes = node.args
     if len(input_nodes) != 2:
@@ -681,13 +718,27 @@ def _handle_onnx_matmul(module, node, node_values, graph_module, set_type):
 
         return output_sets
 
+    elif set_type in (Zono, ImageZono):
+        output_sets = []
+        for s in input_sets_op:
+            output_set = s.affine_map(weight_matrix.T)
+            output_sets.append(output_set)
+        return output_sets
+
+    elif set_type == Box:
+        output_sets = []
+        for s in input_sets_op:
+            output_set = s.affine_map(weight_matrix.T)
+            output_sets.append(output_set)
+        return output_sets
+
     else:
         raise NotImplementedError(
             f"ONNX MatMul not supported for {set_type.__name__}"
         )
 
 
-def _coerce_set_types(sa, sb):
+def _coerce_set_types(sa: Any, sb: Any) -> Tuple[Any, Any]:
     """
     Coerce mismatched set types for element-wise operations.
 
@@ -712,7 +763,7 @@ def _coerce_set_types(sa, sb):
     return sa, sb
 
 
-def _add_sets(sets_a, sets_b, op_name):
+def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
     """
     Element-wise addition or subtraction of two lists of sets.
 
@@ -817,7 +868,254 @@ def _add_sets(sets_a, sets_b, op_name):
     return output_sets
 
 
-def _mul_sets_by_constant(input_sets, scale):
+def _mul_sets(sets_a: List, sets_b: List) -> List:
+    """
+    Element-wise multiplication of two lists of computed sets.
+
+    For Box: standard interval arithmetic.
+    For Zono: extract bounds, compute interval product, build new Zono.
+    For Star: McCormick relaxation (tightest convex relaxation of bilinear terms).
+
+    Args:
+        sets_a: List of sets from the first operand
+        sets_b: List of sets from the second operand
+
+    Returns:
+        List of output sets
+    """
+    if len(sets_a) != len(sets_b):
+        raise ValueError(
+            f"Cannot multiply set lists of different lengths: "
+            f"{len(sets_a)} vs {len(sets_b)}"
+        )
+
+    output_sets = []
+
+    for sa, sb in zip(sets_a, sets_b):
+        # Coerce mismatched types (e.g., ImageStar * Star)
+        sa, sb = _coerce_set_types(sa, sb)
+
+        if isinstance(sa, Box) and isinstance(sb, Box):
+            output_sets.append(_mul_boxes(sa, sb))
+        elif isinstance(sa, Zono) and isinstance(sb, Zono):
+            output_sets.append(_mul_zonos(sa, sb))
+        elif isinstance(sa, Star) and isinstance(sb, Star):
+            output_sets.append(_mul_stars_mccormick(sa, sb))
+        else:
+            raise NotImplementedError(
+                f"Element-wise mul not supported for "
+                f"{type(sa).__name__} and {type(sb).__name__}"
+            )
+
+    return output_sets
+
+
+def _mul_boxes(a: 'Box', b: 'Box') -> 'Box':
+    """Element-wise multiplication of two Boxes via interval arithmetic."""
+    products = np.stack([a.lb * b.lb, a.lb * b.ub, a.ub * b.lb, a.ub * b.ub])
+    return Box(products.min(axis=0), products.max(axis=0))
+
+
+def _mul_zonos(a: 'Zono', b: 'Zono') -> 'Zono':
+    """Element-wise multiplication of two Zonos via interval arithmetic.
+
+    Since Zonos don't track shared generators, we fall back to
+    interval bounds, compute the product interval, and construct
+    a new Zono from the resulting bounds.
+    """
+    lb_a, ub_a = a.get_bounds()
+    lb_b, ub_b = b.get_bounds()
+    products = np.stack([lb_a * lb_b, lb_a * ub_b, ub_a * lb_b, ub_a * ub_b])
+    out_lb = products.min(axis=0)
+    out_ub = products.max(axis=0)
+    return Zono.from_bounds(out_lb, out_ub)
+
+
+def _mul_stars_mccormick(sa: 'Star', sb: 'Star', lp_solver: str = 'default') -> 'Star':
+    """
+    Element-wise multiplication of two Stars using McCormick relaxation.
+
+    Both Stars must share the same predicate variables (originating from
+    the same input set through different branches of the graph).
+
+    For z_i = x_i * y_i with x_i in [a_i, b_i], y_i in [c_i, d_i]:
+      z >= a*y + c*x - a*c   (lower envelope 1)
+      z >= b*y + d*x - b*d   (lower envelope 2)
+      z <= a*y + d*x - a*d   (upper envelope 1)
+      z <= b*y + c*x - b*c   (upper envelope 2)
+
+    New predicate variables z_i are introduced for each output dimension.
+    """
+    N = sa.dim
+    n_a = sa.nVar
+    n_b = sb.nVar
+
+    # Handle case where Stars have different numbers of predicate variables
+    # by padding the smaller one's V and C matrices with zero columns.
+    n = max(n_a, n_b)
+    if n_a < n:
+        pad_V = np.zeros((sa.V.shape[0], n - n_a))
+        sa_V = np.hstack([sa.V, pad_V])
+        if sa.C.size > 0:
+            pad_C = np.zeros((sa.C.shape[0], n - n_a))
+            sa_C = np.hstack([sa.C, pad_C])
+        else:
+            sa_C = sa.C
+        if sa.predicate_lb is not None:
+            sa_pred_lb = np.vstack([sa.predicate_lb, np.zeros((n - n_a, 1))])
+            sa_pred_ub = np.vstack([sa.predicate_ub, np.zeros((n - n_a, 1))])
+        else:
+            sa_pred_lb = sa.predicate_lb
+            sa_pred_ub = sa.predicate_ub
+    else:
+        sa_V = sa.V
+        sa_C = sa.C
+        sa_pred_lb = sa.predicate_lb
+        sa_pred_ub = sa.predicate_ub
+
+    if n_b < n:
+        pad_V = np.zeros((sb.V.shape[0], n - n_b))
+        sb_V = np.hstack([sb.V, pad_V])
+        if sb.C.size > 0:
+            pad_C = np.zeros((sb.C.shape[0], n - n_b))
+            sb_C = np.hstack([sb.C, pad_C])
+        else:
+            sb_C = sb.C
+        if sb.predicate_lb is not None:
+            sb_pred_lb = np.vstack([sb.predicate_lb, np.zeros((n - n_b, 1))])
+            sb_pred_ub = np.vstack([sb.predicate_ub, np.zeros((n - n_b, 1))])
+        else:
+            sb_pred_lb = sb.predicate_lb
+            sb_pred_ub = sb.predicate_ub
+    else:
+        sb_V = sb.V
+        sb_C = sb.C
+        sb_pred_lb = sb.predicate_lb
+        sb_pred_ub = sb.predicate_ub
+
+    # Get bounds for both operands via LP
+    lbs_a = np.zeros(N)
+    ubs_a = np.zeros(N)
+    lbs_b = np.zeros(N)
+    ubs_b = np.zeros(N)
+
+    for i in range(N):
+        lb_val, ub_val = sa.get_range(i, lp_solver)
+        if lb_val is None or ub_val is None:
+            raise ValueError(
+                f"LP solver returned None for dimension {i} of first operand. "
+                f"Star may be infeasible."
+            )
+        lbs_a[i] = lb_val
+        ubs_a[i] = ub_val
+
+        lb_val, ub_val = sb.get_range(i, lp_solver)
+        if lb_val is None or ub_val is None:
+            raise ValueError(
+                f"LP solver returned None for dimension {i} of second operand. "
+                f"Star may be infeasible."
+            )
+        lbs_b[i] = lb_val
+        ubs_b[i] = ub_val
+
+    a, b = lbs_a, ubs_a  # bounds on x
+    c, d = lbs_b, ubs_b  # bounds on y
+
+    # Interval arithmetic for z predicate bounds
+    products = np.stack([a * c, a * d, b * c, b * d])
+    z_lb = products.min(axis=0)
+    z_ub = products.max(axis=0)
+
+    # Build new V matrix: [constant_col | old_pred_cols | new_z_cols]
+    # The output is z_i, so V maps the new z predicate variables to output.
+    V1 = np.zeros((N, n + 1))  # zero contribution from old predicates
+    V2 = np.eye(N)             # identity for new z variables
+    new_V = np.hstack([V1, V2])
+
+    # Carry forward constraints from both operands, padded with zeros for new z vars
+    constraint_blocks_C = []
+    constraint_blocks_d = []
+
+    if sa_C.size > 0:
+        C_sa_padded = np.hstack([sa_C, np.zeros((sa_C.shape[0], N))])
+        constraint_blocks_C.append(C_sa_padded)
+        constraint_blocks_d.append(sa.d)
+
+    if sb_C.size > 0:
+        C_sb_padded = np.hstack([sb_C, np.zeros((sb_C.shape[0], N))])
+        constraint_blocks_C.append(C_sb_padded)
+        constraint_blocks_d.append(sb.d)
+
+    # Extract V coefficients for x and y in terms of shared predicates
+    Vx = sa_V[:, 1:n + 1]  # (N, n)
+    cx = sa_V[:, 0]         # (N,)
+    Vy = sb_V[:, 1:n + 1]  # (N, n)
+    cy = sb_V[:, 0]         # (N,)
+
+    # McCormick envelope constraints
+    C_rows = []
+    d_rows = []
+
+    for i in range(N):
+        # Lower 1: z_i >= a_i*y_i + c_i*x_i - a_i*c_i
+        # Rewrite: -(z_i) + a_i*(Vy_i @ alpha + cy_i) + c_i*(Vx_i @ alpha + cx_i) <= a_i*c_i
+        # => (a_i*Vy_i + c_i*Vx_i) @ alpha - z_i <= a_i*c_i - a_i*cy_i - c_i*cx_i
+        row = np.zeros(n + N)
+        row[:n] = a[i] * Vy[i] + c[i] * Vx[i]
+        row[n + i] = -1
+        rhs = a[i] * c[i] - a[i] * cy[i] - c[i] * cx[i]
+        C_rows.append(row)
+        d_rows.append(rhs)
+
+        # Lower 2: z_i >= b_i*y_i + d_i*x_i - b_i*d_i
+        row = np.zeros(n + N)
+        row[:n] = b[i] * Vy[i] + d[i] * Vx[i]
+        row[n + i] = -1
+        rhs = b[i] * d[i] - b[i] * cy[i] - d[i] * cx[i]
+        C_rows.append(row)
+        d_rows.append(rhs)
+
+        # Upper 1: z_i <= a_i*y_i + d_i*x_i - a_i*d_i
+        row = np.zeros(n + N)
+        row[:n] = -(a[i] * Vy[i] + d[i] * Vx[i])
+        row[n + i] = 1
+        rhs = -a[i] * d[i] + a[i] * cy[i] + d[i] * cx[i]
+        C_rows.append(row)
+        d_rows.append(rhs)
+
+        # Upper 2: z_i <= b_i*y_i + c_i*x_i - b_i*c_i
+        row = np.zeros(n + N)
+        row[:n] = -(b[i] * Vy[i] + c[i] * Vx[i])
+        row[n + i] = 1
+        rhs = -b[i] * c[i] + b[i] * cy[i] + c[i] * cx[i]
+        C_rows.append(row)
+        d_rows.append(rhs)
+
+    C_mc = np.array(C_rows)
+    d_mc = np.array(d_rows).reshape(-1, 1)
+
+    constraint_blocks_C.append(C_mc)
+    constraint_blocks_d.append(d_mc)
+
+    new_C = np.vstack(constraint_blocks_C)
+    new_d = np.vstack(constraint_blocks_d)
+
+    # Predicate bounds: old predicates + new z variables
+    if sa_pred_lb is not None:
+        new_pred_lb = np.vstack([sa_pred_lb, z_lb.reshape(-1, 1)])
+        new_pred_ub = np.vstack([sa_pred_ub, z_ub.reshape(-1, 1)])
+    elif sb_pred_lb is not None:
+        new_pred_lb = np.vstack([sb_pred_lb, z_lb.reshape(-1, 1)])
+        new_pred_ub = np.vstack([sb_pred_ub, z_ub.reshape(-1, 1)])
+    else:
+        # Even with no original predicate bounds, z variables need bounds
+        new_pred_lb = np.vstack([np.full((n, 1), -np.inf), z_lb.reshape(-1, 1)])
+        new_pred_ub = np.vstack([np.full((n, 1), np.inf), z_ub.reshape(-1, 1)])
+
+    return Star(new_V, new_C, new_d, new_pred_lb, new_pred_ub)
+
+
+def _mul_sets_by_constant(input_sets: List, scale: np.ndarray) -> List:
     """
     Element-wise multiplication of sets by a constant scale vector.
 
@@ -926,7 +1224,7 @@ def _mul_sets_by_constant(input_sets, scale):
     return output_sets
 
 
-def _concat_sets(set_lists, axis):
+def _concat_sets(set_lists: List[List], axis: int) -> List:
     """
     Concatenate multiple lists of sets along a specified axis.
 
@@ -1090,7 +1388,7 @@ def _concat_sets(set_lists, axis):
     return output_sets
 
 
-def _handle_onnx_concat(module, node, node_values):
+def _handle_onnx_concat(module: Any, node: Any, node_values: Dict[str, List]) -> Optional[List]:
     """
     Handle ONNX Concat operations.
 
@@ -1133,7 +1431,7 @@ def _handle_onnx_concat(module, node, node_values):
     return _concat_sets(set_lists, set_axis)
 
 
-def _slice_set(s, slices_by_axis):
+def _slice_set(s: Any, slices_by_axis: Dict[int, slice]) -> Any:
     """
     Slice a set along specified axes.
 
@@ -1191,7 +1489,7 @@ def _slice_set(s, slices_by_axis):
         )
 
 
-def _handle_onnx_slice(module, node, node_values, graph_module):
+def _handle_onnx_slice(module: Any, node: Any, node_values: Dict[str, List], graph_module: fx.GraphModule) -> Optional[List]:
     """
     Handle ONNX Slice operations.
 
@@ -1287,7 +1585,7 @@ def _handle_onnx_slice(module, node, node_values, graph_module):
     return output_sets
 
 
-def _split_set(s, split_sizes, axis):
+def _split_set(s: Any, split_sizes: List[int], axis: int) -> List:
     """
     Split a set into chunks along a given axis.
 
@@ -1381,7 +1679,7 @@ def _split_set(s, split_sizes, axis):
     return chunks
 
 
-def _handle_onnx_split(module, node, node_values, graph_module):
+def _handle_onnx_split(module: Any, node: Any, node_values: Dict[str, List], graph_module: fx.GraphModule) -> Optional[List[List]]:
     """
     Handle ONNX Split operations.
 
@@ -1473,7 +1771,7 @@ def _handle_onnx_split(module, node, node_values, graph_module):
     return result
 
 
-def _reach_probabilistic(model, input_set, **kwargs):
+def _reach_probabilistic(model: nn.Module, input_set: Any, **kwargs: Any) -> List:
     """
     Probabilistic reachability using conformal inference.
 
@@ -1493,10 +1791,23 @@ def _reach_probabilistic(model, input_set, **kwargs):
     else:
         raise TypeError(f"Cannot convert {type(input_set)} to Box for probabilistic verification")
 
+    # Determine input shape for reshaping flat samples
+    # (needed for models that expect spatial input, e.g. NHWC or NCHW)
+    input_shape = kwargs.get('input_shape', None)
+    if input_shape is None:
+        if isinstance(input_set, ImageStar):
+            input_shape = (input_set.num_channels, input_set.height, input_set.width)
+        elif isinstance(input_set, ImageZono):
+            input_shape = (input_set.num_channels, input_set.height, input_set.width)
+
     # Create model wrapper for numpy interface
     def model_fn(x):
+        """Wrap PyTorch model as numpy-in/numpy-out callable."""
         with torch.no_grad():
             x_tensor = torch.tensor(x, dtype=torch.float32)
+            if input_shape is not None and len(input_shape) > 1:
+                batch = x_tensor.shape[0]
+                x_tensor = x_tensor.reshape(batch, *input_shape)
             output = model(x_tensor)
             return output.numpy()
 
@@ -1518,7 +1829,7 @@ def _reach_probabilistic(model, input_set, **kwargs):
     return [result]
 
 
-def _reach_hybrid(model, input_set, **kwargs):
+def _reach_hybrid(model: nn.Module, input_set: Any, **kwargs: Any) -> List:
     """
     Hybrid reachability: deterministic until threshold, then probabilistic.
 
@@ -1541,7 +1852,7 @@ def _reach_hybrid(model, input_set, **kwargs):
 
     for i, layer in enumerate(layers):
         if verbose:
-            print(f"Layer {i+1}/{len(layers)}: {type(layer).__name__}")
+            logger.info(f"Layer {i+1}/{len(layers)}: {type(layer).__name__}")
 
         start_time = time.time()
 
@@ -1553,12 +1864,12 @@ def _reach_hybrid(model, input_set, **kwargs):
             # Check thresholds
             if len(next_sets) > max_stars:
                 if verbose:
-                    print(f"  Exceeded {max_stars} stars, switching to probabilistic")
+                    logger.info(f"  Exceeded {max_stars} stars, switching to probabilistic")
                 raise _SwitchToProbabilistic()
 
             if elapsed > timeout_per_layer:
                 if verbose:
-                    print(f"  Exceeded {timeout_per_layer}s timeout, switching to probabilistic")
+                    logger.info(f"  Exceeded {timeout_per_layer}s timeout, switching to probabilistic")
                 raise _SwitchToProbabilistic()
 
             current_sets = next_sets

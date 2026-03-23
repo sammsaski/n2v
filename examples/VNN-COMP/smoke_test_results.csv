@@ -1,0 +1,27 @@
+benchmark,onnx,vnnlib,result,time,error
+acasxu_2023,ACASXU_run2a_2_1_batch_2000.onnx,prop_2.vnnlib,sat,3.9, 
+cctsdb_yolo_2023,patch-1.onnx,spec_onnx_patch-1_idx_00559_0.vnnlib,error,4.0,error 
+cersyve,lane_keep_pretrain_inv.onnx,prop_lane_keep.vnnlib,sat,7.2, 
+cgan_2023,cGAN_imgSz32_nCh_1.onnx,cGAN_imgSz32_nCh_1_prop_0_input_eps_0.010_output_eps_0.015.vnnlib,sat,4.3, 
+cifar100_2024,CIFAR100_resnet_medium.onnx,CIFAR100_resnet_medium_prop_idx_7641_sidx_1041_eps_0.0039.vnnlib,unsat,7.9, 
+collins_aerospace_benchmark,yolov5nano_LRelu_640.onnx,img_14421_perturbed_bbox_3_delta_0.001.vnnlib,sat,14.3, 
+collins_rul_cnn_2022,NN_rul_small_window_20.onnx,robustness_2perturbations_delta5_epsilon10_w20.vnnlib,sat,3.8, 
+cora_2024,mnist-set.onnx,mnist-img0.vnnlib,unsat,16.1, 
+dist_shift_2023,mnist_concat.onnx,index6323_delta0.13.vnnlib,unsat,129.3, 
+linearizenn_2024,AllInOne_10_10.onnx,prop_10_10.vnnlib,sat,11.1, 
+lsnc_relu,relu_quadrotor2d_state.onnx,quadrotor2d_state_0.vnnlib,timeout,25,exceeded 25s 
+malbeware,malware_malimg_family_scaled_linear-25.onnx,malbeware_family-Obfuscator.AD_label-17_eps-1_idx-89.vnnlib,unsat,21.4, 
+metaroom_2023,6cnn_tz_35_5_no_custom_OP.onnx,spec_idx_176_eps_0.00001000.vnnlib,unsat,22.8, 
+ml4acopf_2024,118_ieee_ml4acopf.onnx,118_ieee_prop2.vnnlib,unsat,13.4, 
+nn4sys,pensieve_big_parallel.onnx,pensieve_parallel_71.vnnlib,unsat,4.5, 
+relusplitter,mnist_fc_vnncomp2022_mnist-net_256x4.onnx,mnist_fc_vnncomp2022_prop_1_0.05.vnnlib,sat,7.3, 
+safenlp_2024,perturbations_0.onnx,hyperrectangle_2839.vnnlib,unsat,7.6, 
+sat_relu,sat_v65_c187.onnx,sat_v65_c187.vnnlib,sat,7.0, 
+soundnessbench,model.onnx,model_0.vnnlib,timeout,150,exceeded 150s 
+test,test_nano.onnx,test_nano.vnnlib,unsat,7.1, 
+tinyimagenet_2024,TinyImageNet_resnet_medium.onnx,TinyImageNet_resnet_medium_prop_idx_9262_sidx_880_eps_0.0039.vnnlib,sat,4.2, 
+tllverifybench_2023,tllBench_n=2_N=M=8_m=1_instance_0_3.onnx,property_N=8_3.vnnlib,sat,4.0, 
+traffic_signs_recognition_2023,3_30_30_QConv_16_3_QConv_32_2_Dense_43_ep_30.onnx,model_30_idx_7573_eps_1.00000.vnnlib,unsat,17.3, 
+vggnet16_2022,vgg16-7.onnx,spec0_suit.vnnlib,error,0,missing onnx: onnx/vgg16-7.onnx
+vit_2023,pgd_2_3_16.onnx,pgd_2_3_16_2446.vnnlib,error,3.8,error 
+yolo_2023,TinyYOLO.onnx,TinyYOLO_prop_000005_eps_1_255.vnnlib,unsat,19.1, 

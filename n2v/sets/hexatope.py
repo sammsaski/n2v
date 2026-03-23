@@ -15,6 +15,8 @@ Reference: Bak et al., "The hexatope and octatope abstract domains for neural
 network verification", Formal Methods in System Design (2024) 64:178–199
 """
 
+import logging
+
 import numpy as np
 import networkx as nx
 from typing import Tuple, Optional, List, TYPE_CHECKING
@@ -27,15 +29,10 @@ if TYPE_CHECKING:
     from n2v.sets.box import Box
     from n2v.sets.star import Star
 
-# Optional differentiable solver import
-try:
-    from n2v.utils.lpsolver import solve_dcs_differentiable
-    HAS_DIFFERENTIABLE_SOLVER = True
-except ImportError:
-    HAS_DIFFERENTIABLE_SOLVER = False
-
 # NOTE: Runtime imports of n2v.sets.* modules are kept inline in methods
 # to avoid circular dependencies (hexatope <-> star <-> box)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -54,6 +51,17 @@ class DifferenceConstraintSystem:
     """
 
     def __init__(self, num_vars: int):
+        """Initialize a Difference Constraint System.
+
+        Creates an empty DCS over the given number of variables.
+        Constraints of the form x_i - x_j <= b can be added
+        via add_constraint().
+
+        See Section 3.1 of [Bak et al., FMSD 2024].
+
+        Args:
+            num_vars: Number of variables in the system.
+        """
         self.num_vars = num_vars
         self.constraints: List[DifferenceConstraint] = []
 
@@ -89,17 +97,21 @@ class DifferenceConstraintSystem:
         return G
 
     def is_feasible(self) -> bool:
-        """Check if the DCS is feasible (no negative cycles)"""
+        """Check if the DCS is feasible (no negative cycles in any component)"""
         G = self.to_constraint_graph()
 
-        # Check for negative cycles using Bellman-Ford
+        # Must check all connected components — a negative cycle may not
+        # be reachable from node 0
         try:
-            # Try to find shortest paths from v_0
-            nx.single_source_bellman_ford_path_length(G, 0, weight='cost')
+            return not nx.negative_edge_cycle(G, weight='cost')
+        except Exception:
+            # Fallback: try Bellman-Ford from each node
+            for source in G.nodes():
+                try:
+                    nx.single_source_bellman_ford_path_length(G, source, weight='cost')
+                except nx.NetworkXUnbounded:
+                    return False
             return True
-        except nx.NetworkXUnbounded:
-            # Negative cycle detected
-            return False
 
     def to_matrix_form(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -190,6 +202,7 @@ class Hexatope:
         return self.generators.shape[1]
 
     def __repr__(self) -> str:
+        """Return string representation of the Hexatope."""
         return (f"Hexatope(dim={self.dim}, nVar={self.nVar}, "
                 f"nConstraints={len(self.dcs.constraints)})")
 
@@ -294,7 +307,7 @@ class Hexatope:
 
     # ======================== Bounds Computation ========================
 
-    def get_range(self, index: int, use_mcf: bool = True) -> Tuple[float, float]:
+    def get_range(self, index: int, solver: str) -> Tuple[float, float]:
         """
         Compute exact range at specific dimension
 
@@ -303,7 +316,7 @@ class Hexatope:
 
         Args:
             index: Dimension index (0-based)
-            use_mcf: If True, use min-cost flow; else use LP
+            solver: Solver to use: 'lp' or 'mcf'
 
         Returns:
             Tuple of (min, max) values
@@ -316,21 +329,21 @@ class Hexatope:
         objective[index] = 1.0
 
         # Minimize and maximize
-        xmin = self.optimize_linear(objective, maximize=False, use_mcf=use_mcf)
-        xmax = self.optimize_linear(objective, maximize=True, use_mcf=use_mcf)
+        xmin = self.optimize_linear(objective, maximize=False, solver=solver)
+        xmax = self.optimize_linear(objective, maximize=True, solver=solver)
 
         if xmin is None or xmax is None:
             return None, None
 
         return xmin, xmax
 
-    def get_ranges(self, use_mcf: bool = True, parallel: bool = False,
+    def get_ranges(self, solver: str, parallel: bool = False,
                    n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute exact ranges for all dimensions
 
         Args:
-            use_mcf: If True, use min-cost flow; else use LP (LP is more reliable)
+            solver: Solver to use: 'lp' or 'mcf'
             parallel: If True, use parallel computation
             n_workers: Number of parallel workers
 
@@ -341,44 +354,49 @@ class Hexatope:
         ub = np.zeros((self.dim, 1))
 
         if parallel and self.dim > 1:
-            return self._get_ranges_parallel(use_mcf, n_workers)
+            return self._get_ranges_parallel(solver=solver, n_workers=n_workers)
 
-        # Sequential version - use MCF by default with LP fallback
+        # Sequential version with LP fallback
         for i in range(self.dim):
-            lb_i, ub_i = self.get_range(i, use_mcf=use_mcf)
-            if lb_i is None or ub_i is None:
-                # Try LP fallback if MCF failed
-                if use_mcf:
-                    lb_i, ub_i = self.get_range(i, use_mcf=False)
+            lb_i, ub_i = self.get_range(i, solver=solver)
+            if (lb_i is None or ub_i is None
+                    or not (np.isfinite(lb_i) and np.isfinite(ub_i))
+                    or lb_i > ub_i + 1e-10):
+                # Try LP fallback if solver failed, returned non-finite, or lb > ub
+                if solver != 'lp':
+                    lb_i, ub_i = self.get_range(i, solver='lp')
                 # Final fallback to estimation if both failed
-                if lb_i is None or ub_i is None:
+                if (lb_i is None or ub_i is None
+                        or not (np.isfinite(lb_i) and np.isfinite(ub_i))
+                        or lb_i > ub_i + 1e-10):
                     lb_i, ub_i = self.estimate_range(i)
             lb[i] = lb_i
             ub[i] = ub_i
 
         return lb, ub
 
-    def get_bounds(self, use_mcf: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+    def get_bounds(self, solver: str) -> Tuple[np.ndarray, np.ndarray]:
         """
         Alias for get_ranges() for API consistency with other set types.
 
         Args:
-            use_mcf: If True, use min-cost flow; else use LP (default: MCF)
+            solver: Solver to use: 'lp' or 'mcf'
 
         Returns:
             Tuple of (lb, ub) arrays
         """
-        return self.get_ranges(use_mcf=use_mcf)
+        return self.get_ranges(solver=solver)
 
-    def _get_ranges_parallel(self, use_mcf: bool = True,
+    def _get_ranges_parallel(self, solver: str,
                             n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
         """Compute ranges in parallel"""
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
         def compute_range(i):
+            """Compute range for dimension i, returning (i, (lb, ub))."""
             try:
-                return i, self.get_range(i, use_mcf)
+                return i, self.get_range(i, solver=solver)
             except Exception:
                 return i, (None, None)
 
@@ -387,7 +405,8 @@ class Hexatope:
 
             for future in futures:
                 i, (lb_i, ub_i) = future.result()
-                if lb_i is not None and ub_i is not None:
+                if (lb_i is not None and ub_i is not None
+                        and np.isfinite(lb_i) and np.isfinite(ub_i)):
                     lb[i] = lb_i
                     ub[i] = ub_i
                 else:
@@ -429,23 +448,23 @@ class Hexatope:
 
         return lb, ub
 
-    def get_box(self, use_mcf: bool = True) -> 'Box':
+    def get_box(self, solver: str) -> 'Box':
         """
         Compute exact bounding box
 
         Args:
-            use_mcf: If True, use min-cost flow; else use LP
+            solver: Solver to use: 'lp' or 'mcf'
 
         Returns:
             Box object
         """
         from n2v.sets.box import Box
 
-        lb, ub = self.get_ranges(use_mcf=use_mcf)
+        lb, ub = self.get_ranges(solver=solver)
         return Box(lb, ub)
 
     def optimize_linear(self, objective: np.ndarray, maximize: bool = True,
-                       use_mcf: bool = True, use_differentiable: bool = False) -> Optional[float]:
+                       solver: str = None) -> Optional[float]:
         """
         Optimize linear objective over hexatope
 
@@ -458,12 +477,14 @@ class Hexatope:
         Args:
             objective: Objective vector f ∈ ℝⁿ
             maximize: If True, maximize; else minimize
-            use_mcf: If True, use min-cost flow; else use LP
-            use_differentiable: If True, use differentiable solver (MCF or LP)
+            solver: Solver to use: 'lp' or 'mcf'
 
         Returns:
             Optimal value, or None if infeasible
         """
+        if solver not in ('lp', 'mcf'):
+            raise ValueError(f"Unknown solver '{solver}'. Must be 'lp' or 'mcf'.")
+
         objective = np.asarray(objective, dtype=np.float64).flatten()
 
         if objective.shape[0] != self.dim:
@@ -475,27 +496,25 @@ class Hexatope:
         constant_term = objective @ self.center  # f^T c
 
         # Now optimize w^T x over DCS
-        if use_mcf:
-            result = self._optimize_dcs_mcf(composed_obj, constant_term, maximize, use_differentiable)
-        else:
-            result = self._optimize_dcs_lp(composed_obj, constant_term, maximize, use_differentiable)
+        if solver == 'mcf':
+            result = self._optimize_dcs_mcf(composed_obj, constant_term, maximize)
+        else:  # solver == 'lp'
+            result = self._optimize_dcs_lp(composed_obj, constant_term, maximize)
 
         return result
 
     def _optimize_dcs_mcf(self, w: np.ndarray, constant: float,
-                          maximize: bool, use_differentiable: bool = False) -> Optional[float]:
+                          maximize: bool) -> Optional[float]:
         """
         Optimize linear objective w^T x + constant over DCS using min-cost flow
 
-        Reduces to minimum cost flow problem on constraint graph.
-        Can use either NetworkX's network_simplex (traditional) or
-        differentiable DCS solver (gradient-based).
+        Reduces to minimum cost flow problem on constraint graph using
+        NetworkX's network_simplex.
 
         Args:
             w: Objective coefficients
             constant: Constant term
             maximize: If True, maximize; else minimize
-            use_differentiable: If True, use differentiable solver
 
         Returns:
             Optimal value, or None if infeasible
@@ -503,82 +522,89 @@ class Hexatope:
         # Build constraint graph
         G = self.dcs.to_constraint_graph()
 
-        if use_differentiable:
-            # Use differentiable DCS solver
-            if not HAS_DIFFERENTIABLE_SOLVER:
-                print("Differentiable DCS solver not available, falling back to network_simplex")
-                use_differentiable = False
-            else:
-                try:
-                    optimal_value, info = solve_dcs_differentiable(
-                    constraint_graph=G,
-                    objective_coef=w,
-                    constant_term=constant,
-                    maximize=maximize,
-                    num_epochs=100,
-                    batch_size=32,
-                    verbose=False
+        # Use traditional network simplex (NetworkX)
+        # MCF with demands=w computes max w^T x (dual objective = primal max)
+        # To compute min: feed -w and negate result
+        # To compute max: feed +w directly
+        if maximize:
+            w_adj = w
+            constant_adj = constant
+            sgn = +1
+        else:
+            w_adj = -w
+            constant_adj = -constant
+            sgn = -1
+
+        # Set demands as node attributes based on objective coefficients
+        # Balance total demand at node 0. For hexatopes with an anchor,
+        # d[0] is already 0 so this is a no-op for node 0's demand.
+        # For octatopes (no anchor), node 0 absorbs the imbalance as a
+        # slack node — this is a standard MCF technique that works for
+        # any choice of slack node.
+        d = w_adj.astype(float).copy()
+        d[0] -= d.sum()  # Soak imbalance into anchor; now sum(d) = 0
+
+        for i in range(self.dcs.num_vars):
+            G.nodes[i]['demand'] = float(d[i])
+
+        # Verify total demand is zero (required for MCF feasibility)
+        total_demand = sum(G.nodes[n]['demand'] for n in G.nodes())
+        if not np.isclose(total_demand, 0):
+            return None
+
+        # NetworkX network_simplex can hang with negative-cost edges
+        # and float demands (infinite cycling due to floating-point
+        # degeneracy). Fix: shift all edge costs to be non-negative.
+        # The optimal flow is unchanged; only the total cost shifts by
+        # delta * (total flow on all edges), which we correct afterward.
+        min_cost = min(data['cost'] for _, _, data in G.edges(data=True))
+        cost_shift = 0.0
+        if min_cost < 0:
+            cost_shift = abs(min_cost) + 1e-10
+            for u, v in G.edges():
+                G[u][v]['cost'] += cost_shift
+
+        # Set finite edge capacities to prevent unbounded flow.
+        n_nodes = G.number_of_nodes()
+        total_abs_demand = sum(abs(float(d[i])) for i in range(len(d)))
+        finite_cap = n_nodes * total_abs_demand + 1.0
+        for u, v in G.edges():
+            G[u][v]['capacity'] = finite_cap
+
+        try:
+            # Solve minimum cost flow using network simplex
+            flow_cost, flow_dict = nx.network_simplex(G, demand='demand', weight='cost')
+
+            # Guard against inf flow_cost
+            if not np.isfinite(flow_cost):
+                return None
+
+            # Correct for cost shift: subtract shift * total_flow_on_edges
+            if cost_shift > 0:
+                total_flow = sum(
+                    flow_dict[u][v]
+                    for u in flow_dict for v in flow_dict[u]
                 )
+                flow_cost -= cost_shift * total_flow
 
-                    return optimal_value
+            # The optimal value with correct sign
+            optimal_value = sgn * (flow_cost + constant_adj)
 
-                except Exception as e:
-                    # Fall back to NetworkX if differentiable solver fails
-                    print(f"Differentiable DCS solver failed: {e}, falling back to network_simplex")
-                    use_differentiable = False
+            return optimal_value
 
-        if not use_differentiable:
-            # Use traditional network simplex (NetworkX)
-            # MCF with demands=w computes max w^T x (dual objective = primal max)
-            # To compute min: feed -w and negate result
-            # To compute max: feed +w directly
-            if maximize:
-                w_adj = w
-                constant_adj = constant
-                sgn = +1
-            else:
-                w_adj = -w
-                constant_adj = -constant
-                sgn = -1
-
-            # Set demands as node attributes based on objective coefficients
-            # Balance total demand at the anchor node (x_0, node 0)
-            # This is the dual analogue of the primal constraint x_0 = 0
-            d = w_adj.astype(float).copy()
-            d[0] -= d.sum()  # Soak imbalance into anchor; now sum(d) = 0
-
-            for i in range(self.dcs.num_vars):
-                G.nodes[i]['demand'] = float(d[i])
-
-            # Verify total demand is zero (required for MCF feasibility)
-            total_demand = sum(G.nodes[n]['demand'] for n in G.nodes())
-            if not np.isclose(total_demand, 0):
-                return None
-
-            try:
-                # Solve minimum cost flow using network simplex
-                flow_cost, flow_dict = nx.network_simplex(G, demand='demand', weight='cost')
-
-                # The optimal value with correct sign
-                optimal_value = sgn * (flow_cost + constant_adj)
-
-                return optimal_value
-
-            except nx.NetworkXUnfeasible:
-                # DCS constraints are infeasible
-                return None
-            except nx.NetworkXUnbounded:
-                # DCS is unbounded in objective direction
-                # This should not happen with proper anchor constraints
-                # but handle gracefully by returning None
-                return None
-            except Exception as e:
-                # Catch any other MCF solver errors and fall back
-                print(f"MCF solver error: {e}, returning None")
-                return None
+        except nx.NetworkXUnfeasible:
+            # DCS constraints are infeasible
+            return None
+        except nx.NetworkXUnbounded:
+            # DCS is unbounded in objective direction
+            return None
+        except Exception as e:
+            # Catch any other MCF solver errors and fall back
+            logger.warning(f"MCF solver error: {e}, returning None")
+            return None
 
     def _optimize_dcs_lp(self, w: np.ndarray, constant: float,
-                         maximize: bool, use_differentiable: bool = False) -> Optional[float]:
+                         maximize: bool) -> Optional[float]:
         """
         Optimize linear objective w^T x + constant over DCS using LP
 
@@ -589,35 +615,8 @@ class Hexatope:
             w: Objective coefficients
             constant: Constant term
             maximize: If True, maximize; else minimize
-            use_differentiable: If True, use differentiable Gumbel-Softmax solver
         """
         A, b = self.dcs.to_matrix_form()
-
-        # Use differentiable DCS solver if requested
-        if use_differentiable:
-            if not HAS_DIFFERENTIABLE_SOLVER:
-                print("Differentiable DCS solver not available, falling back to CVXPY")
-            else:
-                try:
-                    # Build constraint graph
-                    G = self.dcs.to_constraint_graph()
-
-                    # Solve using differentiable DCS solver
-                    optimal_value, info = solve_dcs_differentiable(
-                    constraint_graph=G,
-                    objective_coef=w,
-                    constant_term=constant,
-                    maximize=maximize,
-                    num_epochs=50,
-                    batch_size=16,
-                    verbose=False
-                )
-
-                    return optimal_value
-                except Exception as e:
-                    # Fall back to standard LP if differentiable solver fails
-                    print(f"Differentiable DCS solver failed: {e}, falling back to CVXPY")
-                    pass
 
         # Standard CVXPY solver
         x = cp.Variable(self.dcs.num_vars)
@@ -651,7 +650,7 @@ class Hexatope:
 
     # ======================== Set Operations ========================
 
-    def intersect_half_space(self, H: np.ndarray, g: np.ndarray) -> 'Hexatope':
+    def intersect_half_space(self, H: np.ndarray, g: np.ndarray, solver=None) -> 'Hexatope':
         """
         Intersect hexatope with half-space: H*x <= g
 
@@ -673,6 +672,7 @@ class Hexatope:
         Args:
             H: Half-space matrix (m × n)
             g: Half-space vector (m × 1)
+            solver: Optional solver method (currently unused, reserved for future use).
 
         Returns:
             New Hexatope (over-approximation of intersection, DCS-only)
@@ -866,7 +866,7 @@ class Hexatope:
 
             # Use MCF to optimize
             try:
-                result = temp_hex._optimize_dcs_mcf(obj, 0.0, maximize, use_differentiable=False)
+                result = temp_hex._optimize_dcs_mcf(obj, 0.0, maximize)
                 if result is not None:
                     return result
             except Exception:
@@ -1041,6 +1041,38 @@ class Hexatope:
         except Exception:
             return False
 
+    def sample(self, n_samples: int = 1) -> np.ndarray:
+        """
+        Sample points from the Hexatope using rejection sampling.
+
+        Samples alpha vectors uniformly from [-1, 1]^nVar and rejects those
+        that violate DCS constraints. Maps accepted alphas to state space.
+
+        Args:
+            n_samples: Number of samples to generate
+
+        Returns:
+            Array of shape (n_samples, dim) with points in state space
+        """
+        A, b_vec = self.dcs.to_matrix_form()
+        samples = []
+        max_attempts = n_samples * 200
+
+        for _ in range(max_attempts):
+            if len(samples) >= n_samples:
+                break
+            alpha = np.random.uniform(-1, 1, self.nVar)
+            # Check DCS constraints
+            if A.shape[0] == 0 or np.all(A @ alpha <= b_vec + 1e-10):
+                point = self.generators @ alpha + self.center.flatten()
+                samples.append(point)
+
+        # If rejection sampling didn't produce enough, fill with center
+        while len(samples) < n_samples:
+            samples.append(self.center.flatten())
+
+        return np.array(samples)
+
     # ======================== Conversion Methods ========================
 
     def to_star(self) -> 'Star':
@@ -1113,5 +1145,3 @@ class Hexatope:
     #     input_hex = Hexatope.from_bounds(lb, ub)
     #     # Standard exact method with CVXPY
     #     output_hexes = net.reach(input_hex, method='exact')
-    #     # Exact method with differentiable solver
-    #     output_hexes = net.reach(input_hex, method='exact-differentiable')

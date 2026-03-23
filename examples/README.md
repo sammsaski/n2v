@@ -429,7 +429,6 @@ See main [README.md](../README.md) for API details and advanced usage.
 ## Additional Resources
 
 - **Main README**: [../README.md](../README.md)
-- **Development History**: [../CHANGELOG.md](../CHANGELOG.md)
 - **MATLAB NNV**: https://github.com/verivital/nnv
 
 ---

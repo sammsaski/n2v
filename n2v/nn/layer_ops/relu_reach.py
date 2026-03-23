@@ -9,6 +9,8 @@ ImageStar inputs are converted to Star (via to_star()), processed through ReLU,
 and converted back to ImageStar (via _preserve_imagestar_type()).
 """
 
+import logging
+
 import numpy as np
 from typing import List, Optional, TYPE_CHECKING
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -18,6 +20,8 @@ from n2v.sets.image_star import ImageStar
 # TYPE_CHECKING import for Box (used in one function)
 if TYPE_CHECKING:
     from n2v.sets import Box
+
+logger = logging.getLogger(__name__)
 
 
 def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
@@ -139,7 +143,7 @@ def _relu_single_star_exact(
     # Recursively split each uncertain neuron
     for i, neuron_idx in enumerate(split_map):
         if verbose:
-            print(f'Exact ReLU_{neuron_idx} ({i+1}/{len(split_map)})')
+            logger.debug(f'Exact ReLU_{neuron_idx} ({i+1}/{len(split_map)})')
 
         new_stars = []
         for star in current_stars:
@@ -1183,7 +1187,7 @@ def _relu_star_exact_parallel(
     output_stars = []
 
     if verbose:
-        print(f'  ⚡ Processing {len(input_stars)} Stars in parallel ({workers} workers)')
+        logger.info(f'  Processing {len(input_stars)} Stars in parallel ({workers} workers)')
 
     with ProcessPoolExecutor(max_workers=workers) as executor:
         # Submit all Stars for processing, track original star for type preservation
@@ -1202,421 +1206,183 @@ def _relu_star_exact_parallel(
                 output_stars.extend(result)
             except Exception as e:
                 if verbose:
-                    print(f'  Error processing Star: {e}')
+                    logger.error(f'  Error processing Star: {e}')
                 # Continue with other Stars
 
     return output_stars
 
 
-def _relu_single_hexatope(I: Hexatope) -> Hexatope:
+def _relu_single_hexatope(I: Hexatope, solver: str = None) -> List[Hexatope]:
     """
-    Approximate ReLU for a single Hexatope.
+    Sound approximate ReLU for a single Hexatope.
 
-    Uses interval arithmetic over-approximation. For each dimension:
-    - If ub <= 0: set to zero
-    - If lb >= 0: keep unchanged
-    - If crosses zero: use box over-approximation [0, max(0, ub)]
+    For each crossing neuron, splits into active (x_i >= 0) and inactive
+    (x_i <= 0, then zero out) regions. Both are kept as separate sets.
+    This produces up to 2^k sets where k = number of crossing neurons.
+
+    Each intersect_half_space call uses Algorithm 5.1 (DCS bounding box)
+    which is an over-approximation, so the result is always a sound
+    over-approximation of the true ReLU output.
 
     Args:
         I: Input Hexatope
+        solver: Optional solver method ('lp' or 'mcf').
 
     Returns:
-        Output Hexatope (over-approximation)
+        List of Hexatope sets (sound over-approximation of ReLU output)
     """
-    # Get bounds
-    lb, ub = I.estimate_ranges()
+    if solver is not None:
+        lb, ub = I.get_ranges(solver=solver)
+    else:
+        lb, ub = I.estimate_ranges()
+    n = I.dim
 
-    # Apply ReLU element-wise
-    new_lb = np.maximum(lb, 0)
-    new_ub = np.maximum(ub, 0)
+    # Step 1: Zero out always-inactive neurons via affine map
+    inactive = np.where(ub.flatten() <= 0)[0]
+    if len(inactive) > 0:
+        W = np.eye(n, dtype=np.float64)
+        for idx in inactive:
+            W[idx, idx] = 0.0
+        b = np.zeros((n, 1), dtype=np.float64)
+        I = I.affine_map(W, b)
 
-    # Create new hexatope from bounds
-    return Hexatope.from_bounds(new_lb, new_ub)
+    # Step 2: Split crossing neurons
+    crossing = np.where((lb.flatten() < 0) & (ub.flatten() > 0))[0]
+
+    if len(crossing) == 0:
+        return [I]
+
+    current_sets = [I]
+    for idx in crossing:
+        new_sets = []
+        for s in current_sets:
+            # Active case: x_i >= 0 (identity pass-through)
+            H_active = np.zeros((1, n))
+            H_active[0, idx] = -1.0  # -x_i <= 0 means x_i >= 0
+            g_active = np.array([[0.0]])
+            active = s.intersect_half_space(H_active, g_active, solver=solver)
+
+            # Inactive case: x_i <= 0, then zero out dimension i
+            H_inactive = np.zeros((1, n))
+            H_inactive[0, idx] = 1.0  # x_i <= 0
+            g_inactive = np.array([[0.0]])
+            inactive_set = s.intersect_half_space(H_inactive, g_inactive, solver=solver)
+            W = np.eye(n, dtype=np.float64)
+            W[idx, idx] = 0.0
+            b = np.zeros((n, 1), dtype=np.float64)
+            inactive_set = inactive_set.affine_map(W, b)
+
+            new_sets.append(active)
+            new_sets.append(inactive_set)
+        current_sets = new_sets
+
+    return current_sets
 
 
-def relu_hexatope(input_hexatopes: List[Hexatope]) -> List[Hexatope]:
+def relu_hexatope(input_hexatopes: List[Hexatope], solver: str = None) -> List[Hexatope]:
     """
-    ReLU for Hexatopes (approximate, interval-based).
+    ReLU for Hexatopes (sound over-approximation with splitting).
 
-    Uses interval arithmetic over-approximation. For each dimension:
-    - If ub <= 0: set to zero
-    - If lb >= 0: keep unchanged
-    - If crosses zero: use box over-approximation [0, max(0, ub)]
+    Splits crossing neurons into active + inactive regions using
+    intersect_half_space (Algorithm 5.1 DCS bounding box).
 
     Args:
-        input_hexatopes: List of input Hexatopes
-
-    Returns:
-        List of output Hexatopes (over-approximation)
+        input_hexatopes: List of input Hexatope sets
+        solver: Optional solver method ('lp' or 'mcf').
     """
     output_hexatopes = []
     for hexatope in input_hexatopes:
-        output_hexatopes.append(_relu_single_hexatope(hexatope))
+        output_hexatopes.extend(_relu_single_hexatope(hexatope, solver=solver))
     return output_hexatopes
 
 
 def relu_hexatope_approx(
     input_hexatopes: List[Hexatope],
-    verbose: bool = False
+    verbose: bool = False,
+    solver: str = None
 ) -> List[Hexatope]:
     """
     Approximate reachability for ReLU using Hexatope sets.
 
-    Uses interval arithmetic over-approximation without splitting. This is the
-    same as relu_hexatope but with consistent naming and signature.
-
-    Args:
-        input_hexatopes: List of input Hexatope sets
-        verbose: 'display' to show progress (not used for approx)
-
-    Returns:
-        List of output Hexatope sets (same count as input, no splitting)
+    Sound over-approximation: splits crossing neurons into active + inactive
+    regions. Each intersect_half_space uses Algorithm 5.1 (DCS bounding box).
     """
-    return relu_hexatope(input_hexatopes)
+    return relu_hexatope(input_hexatopes, solver=solver)
 
 
-def _relu_single_octatope(I: Octatope) -> Octatope:
+def _relu_single_octatope(I: Octatope, solver: str = None) -> List[Octatope]:
     """
-    Approximate ReLU for a single Octatope.
+    Sound approximate ReLU for a single Octatope.
 
-    Uses interval arithmetic over-approximation. For each dimension:
-    - If ub <= 0: set to zero
-    - If lb >= 0: keep unchanged
-    - If crosses zero: use box over-approximation [0, max(0, ub)]
+    Same algorithm as hexatope: splits crossing neurons into active + inactive
+    cases. Uses Algorithm 5.1 (UTVPI bounding box) for intersect_half_space.
 
     Args:
         I: Input Octatope
-
-    Returns:
-        Output Octatope (over-approximation)
+        solver: Optional solver method ('lp' or 'mcf').
     """
-    # Get bounds
-    lb, ub = I.estimate_ranges()
+    if solver is not None:
+        lb, ub = I.get_ranges(solver=solver)
+    else:
+        lb, ub = I.estimate_ranges()
+    n = I.dim
 
-    # Apply ReLU element-wise
-    new_lb = np.maximum(lb, 0)
-    new_ub = np.maximum(ub, 0)
+    inactive = np.where(ub.flatten() <= 0)[0]
+    if len(inactive) > 0:
+        W = np.eye(n, dtype=np.float64)
+        for idx in inactive:
+            W[idx, idx] = 0.0
+        b = np.zeros((n, 1), dtype=np.float64)
+        I = I.affine_map(W, b)
 
-    # Create new octatope from bounds
-    return Octatope.from_bounds(new_lb, new_ub)
+    crossing = np.where((lb.flatten() < 0) & (ub.flatten() > 0))[0]
+
+    if len(crossing) == 0:
+        return [I]
+
+    current_sets = [I]
+    for idx in crossing:
+        new_sets = []
+        for s in current_sets:
+            H_active = np.zeros((1, n))
+            H_active[0, idx] = -1.0
+            g_active = np.array([[0.0]])
+            active = s.intersect_half_space(H_active, g_active, solver=solver)
+
+            H_inactive = np.zeros((1, n))
+            H_inactive[0, idx] = 1.0
+            g_inactive = np.array([[0.0]])
+            inactive_set = s.intersect_half_space(H_inactive, g_inactive, solver=solver)
+            W = np.eye(n, dtype=np.float64)
+            W[idx, idx] = 0.0
+            b = np.zeros((n, 1), dtype=np.float64)
+            inactive_set = inactive_set.affine_map(W, b)
+
+            new_sets.append(active)
+            new_sets.append(inactive_set)
+        current_sets = new_sets
+
+    return current_sets
 
 
-def relu_octatope(input_octatopes: List[Octatope]) -> List[Octatope]:
+def relu_octatope(input_octatopes: List[Octatope], solver: str = None) -> List[Octatope]:
     """
-    ReLU for Octatopes (approximate, interval-based).
-
-    Uses interval arithmetic over-approximation. For each dimension:
-    - If ub <= 0: set to zero
-    - If lb >= 0: keep unchanged
-    - If crosses zero: use box over-approximation [0, max(0, ub)]
+    ReLU for Octatopes (sound over-approximation with splitting).
 
     Args:
-        input_octatopes: List of input Octatopes
-
-    Returns:
-        List of output Octatopes (over-approximation)
+        input_octatopes: List of input Octatope sets
+        solver: Optional solver method ('lp' or 'mcf').
     """
     output_octatopes = []
     for octatope in input_octatopes:
-        output_octatopes.append(_relu_single_octatope(octatope))
+        output_octatopes.extend(_relu_single_octatope(octatope, solver=solver))
     return output_octatopes
 
 
 def relu_octatope_approx(
     input_octatopes: List[Octatope],
-    verbose: bool = False
+    verbose: bool = False,
+    solver: str = None
 ) -> List[Octatope]:
-    """
-    Approximate reachability for ReLU using Octatope sets.
-
-    Uses interval arithmetic over-approximation without splitting. This is the
-    same as relu_octatope but with consistent naming and signature.
-
-    Args:
-        input_octatopes: List of input Octatope sets
-        verbose: 'display' to show progress (not used for approx)
-
-    Returns:
-        List of output Octatope sets (same count as input, no splitting)
-    """
-    return relu_octatope(input_octatopes)
-
-
-def relu_hexatope_exact(
-    input_hexatopes: List[Hexatope],
-    verbose: bool = False
-) -> List[Hexatope]:
-    """
-    Exact reachability for ReLU using Hexatope sets with splitting.
-
-    Similar to relu_star_exact but for Hexatopes. Splits on neurons crossing zero.
-
-    Args:
-        input_hexatopes: List of input Hexatope sets
-        verbose: 'display' to show progress
-
-    Returns:
-        List of output Hexatope sets (may be more than input due to splitting)
-    """
-    output_hexatopes = []
-    for hexatope in input_hexatopes:
-        result = _relu_single_hexatope_exact(hexatope, verbose)
-        output_hexatopes.extend(result)
-    return output_hexatopes
-
-
-def _relu_single_hexatope_exact(
-    I: Hexatope,
-    verbose: bool = False
-) -> List[Hexatope]:
-    """
-    Exact ReLU reachability for a single Hexatope set.
-
-    Algorithm:
-    1. Estimate ranges for all dimensions
-    2. Reset neurons that are always ≤ 0
-    3. Split neurons that cross 0 boundary
-
-    Args:
-        I: Input Hexatope
-        verbose: Display option
-
-    Returns:
-        List of output Hexatopes (with splitting)
-    """
-    if I is None or I.dim == 0:
-        return []
-
-    # Estimate ranges
-    lb, ub = I.estimate_ranges()
-
-    if lb is None or ub is None:
-        return []
-
-    # Neurons always inactive (ub <= 0) - reset to 0
-    reset_map = np.where(ub.flatten() <= 0)[0]
-
-    # Reset neurons using affine map to preserve constraints
-    if len(reset_map) > 0:
-        W = np.eye(I.dim, dtype=np.float64)
-        for idx in reset_map:
-            W[idx, idx] = 0  # Zero out inactive neurons
-        b = np.zeros((I.dim, 1), dtype=np.float64)
-        I = I.affine_map(W, b)
-
-    current_hexatopes = [I]
-
-    # Neurons crossing zero (lb < 0 and ub > 0) - need splitting
-    split_map = np.where((lb.flatten() < 0) & (ub.flatten() > 0))[0]
-
-    # Recursively split each uncertain neuron
-    for i, neuron_idx in enumerate(split_map):
-        if verbose:
-            print(f'Exact ReLU_{neuron_idx} ({i+1}/{len(split_map)})')
-
-        new_hexatopes = []
-        for hexatope in current_hexatopes:
-            split_result = _step_relu_hexatope(hexatope, neuron_idx)
-            new_hexatopes.extend(split_result)
-
-        current_hexatopes = new_hexatopes
-
-    return current_hexatopes
-
-
-def _step_relu_hexatope(I: Hexatope, index: int) -> List[Hexatope]:
-    """
-    Split a single neuron in ReLU for Hexatope (exact step reach).
-
-    Args:
-        I: Input Hexatope
-        index: Neuron index to split
-
-    Returns:
-        List of 1 or 2 Hexatope sets
-    """
-    # Get bounds of neuron
-    xmin, xmax = I.get_range(index, use_mcf=False)
-
-    if xmin is None or xmax is None:
-        return []
-
-    if xmin >= 0:
-        # Always active
-        return [I]
-
-    elif xmax <= 0:
-        # Always inactive - zero out this dimension
-        lb, ub = I.estimate_ranges()
-        new_lb = lb.copy()
-        new_ub = ub.copy()
-        new_lb[index] = 0
-        new_ub[index] = 0
-        return [Hexatope.from_bounds(new_lb, new_ub)]
-
-    else:
-        # Split into two cases
-        # Case 1: x[index] < 0 (inactive) - constrain to x[index] <= 0 and set output to 0
-        # Case 2: x[index] >= 0 (active) - constrain to x[index] >= 0 and keep as is
-
-        # Case 1: x[index] <= 0 (inactive region)
-        H1 = np.zeros((1, I.dim))
-        H1[0, index] = 1.0
-        g1 = np.array([[0.0]])
-        hex1 = I.intersect_half_space(H1, g1)
-
-        # Apply ReLU: zero out this dimension in output
-        # Do this by creating linear map that zeros dimension 'index'
-        W1 = np.eye(I.dim, dtype=np.float64)
-        W1[index, index] = 0
-        b1 = np.zeros((I.dim, 1), dtype=np.float64)
-        hex1_final = hex1.affine_map(W1, b1)
-
-        # Case 2: x[index] >= 0 (active region)
-        H2 = np.zeros((1, I.dim))
-        H2[0, index] = -1.0
-        g2 = np.array([[0.0]])
-        hex2 = I.intersect_half_space(H2, g2)
-        # No transformation needed - ReLU is identity here
-
-        return [hex1_final, hex2]
-
-
-def relu_octatope_exact(
-    input_octatopes: List[Octatope],
-    verbose: bool = False
-) -> List[Octatope]:
-    """
-    Exact reachability for ReLU using Octatope sets with splitting.
-
-    Similar to relu_star_exact but for Octatopes. Splits on neurons crossing zero.
-
-    Args:
-        input_octatopes: List of input Octatope sets
-        verbose: 'display' to show progress
-
-    Returns:
-        List of output Octatope sets (may be more than input due to splitting)
-    """
-    output_octatopes = []
-    for octatope in input_octatopes:
-        result = _relu_single_octatope_exact(octatope, verbose)
-        output_octatopes.extend(result)
-    return output_octatopes
-
-
-def _relu_single_octatope_exact(
-    I: Octatope,
-    verbose: bool = False
-) -> List[Octatope]:
-    """
-    Exact ReLU reachability for a single Octatope set.
-
-    Algorithm:
-    1. Estimate ranges for all dimensions
-    2. Reset neurons that are always ≤ 0
-    3. Split neurons that cross 0 boundary
-
-    Args:
-        I: Input Octatope
-        verbose: Display option
-
-    Returns:
-        List of output Octatopes (with splitting)
-    """
-    if I is None or I.dim == 0:
-        return []
-
-    # Estimate ranges
-    lb, ub = I.estimate_ranges()
-
-    if lb is None or ub is None:
-        return []
-
-    # Neurons always inactive (ub <= 0) - reset to 0
-    reset_map = np.where(ub.flatten() <= 0)[0]
-
-    # Reset neurons using affine map to preserve constraints
-    if len(reset_map) > 0:
-        W = np.eye(I.dim, dtype=np.float64)
-        for idx in reset_map:
-            W[idx, idx] = 0  # Zero out inactive neurons
-        b = np.zeros((I.dim, 1), dtype=np.float64)
-        I = I.affine_map(W, b)
-
-    current_octatopes = [I]
-
-    # Neurons crossing zero (lb < 0 and ub > 0) - need splitting
-    split_map = np.where((lb.flatten() < 0) & (ub.flatten() > 0))[0]
-
-    # Recursively split each uncertain neuron
-    for i, neuron_idx in enumerate(split_map):
-        if verbose:
-            print(f'Exact ReLU_{neuron_idx} ({i+1}/{len(split_map)})')
-
-        new_octatopes = []
-        for octatope in current_octatopes:
-            split_result = _step_relu_octatope(octatope, neuron_idx)
-            new_octatopes.extend(split_result)
-
-        current_octatopes = new_octatopes
-
-    return current_octatopes
-
-
-def _step_relu_octatope(I: Octatope, index: int) -> List[Octatope]:
-    """
-    Split a single neuron in ReLU for Octatope (exact step reach).
-
-    Args:
-        I: Input Octatope
-        index: Neuron index to split
-
-    Returns:
-        List of 1 or 2 Octatope sets
-    """
-    # Get bounds of neuron
-    xmin, xmax = I.get_range(index, use_mcf=False)
-
-    if xmin is None or xmax is None:
-        return []
-
-    if xmin >= 0:
-        # Always active
-        return [I]
-
-    elif xmax <= 0:
-        # Always inactive - zero out this dimension
-        lb, ub = I.estimate_ranges()
-        new_lb = lb.copy()
-        new_ub = ub.copy()
-        new_lb[index] = 0
-        new_ub[index] = 0
-        return [Octatope.from_bounds(new_lb, new_ub)]
-
-    else:
-        # Split into two cases
-        # Case 1: x[index] < 0 (inactive) - constrain to x[index] <= 0 and set output to 0
-        # Case 2: x[index] >= 0 (active) - constrain to x[index] >= 0 and keep as is
-
-        # Case 1: x[index] <= 0 (inactive region)
-        H1 = np.zeros((1, I.dim))
-        H1[0, index] = 1.0
-        g1 = np.array([[0.0]])
-        oct1 = I.intersect_half_space(H1, g1)
-
-        # Apply ReLU: zero out this dimension in output
-        # Do this by creating linear map that zeros dimension 'index'
-        W1 = np.eye(I.dim, dtype=np.float64)
-        W1[index, index] = 0
-        b1 = np.zeros((I.dim, 1), dtype=np.float64)
-        oct1_final = oct1.affine_map(W1, b1)
-
-        # Case 2: x[index] >= 0 (active region)
-        H2 = np.zeros((1, I.dim))
-        H2[0, index] = -1.0
-        g2 = np.array([[0.0]])
-        oct2 = I.intersect_half_space(H2, g2)
-        # No transformation needed - ReLU is identity here
-
-        return [oct1_final, oct2]
+    """Approximate reachability for ReLU using Octatope sets."""
+    return relu_octatope(input_octatopes, solver=solver)

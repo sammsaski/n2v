@@ -24,7 +24,7 @@ class NeuralNetwork:
         output_size: Output size
     """
 
-    def __init__(self, model: nn.Module, input_size: Optional[tuple] = None):
+    def __init__(self, model: nn.Module, input_size: Optional[tuple] = None) -> None:
         """
         Initialize NeuralNetwork wrapper.
 
@@ -76,7 +76,7 @@ class NeuralNetwork:
         extract_recursive(model)
         return layers
 
-    def _validate_input_size(self, input_size: tuple):
+    def _validate_input_size(self, input_size: tuple) -> None:
         """Validate input size by running a forward pass."""
         try:
             with torch.no_grad():
@@ -120,8 +120,6 @@ class NeuralNetwork:
                 For Box/Zono:
                     - 'approx': Over-approximate reachability (only option)
                 For Hexatope/Octatope:
-                    - 'exact': Exact reachability using CVXPY
-                    - 'exact-differentiable': Exact reachability using differentiable LP solver
                     - 'approx': Over-approximate reachability
             **kwargs: Additional method-specific arguments:
                 For Star 'exact':
@@ -133,8 +131,6 @@ class NeuralNetwork:
                     - relax_factor: Relaxation factor (0=exact, 1=max, default: 0.5)
                     - relax_method: Relaxation strategy (default: 'standard')
                     - lp_solver: LP solver to use
-                    - verbose: 'display' to show progress
-                For Hexatope/Octatope:
                     - verbose: 'display' to show progress
                 For Zono/Box:
                     - verbose: 'display' to show progress

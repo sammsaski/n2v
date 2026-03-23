@@ -54,7 +54,6 @@ def falsify(
     **kwargs
 ) -> FalsifyResult:
     """
-    TODO: Should take expected input shape, using [lb, ub] restricts to 1D
     Attempt to find a counterexample using the specified falsification method.
 
     Note:
@@ -62,10 +61,17 @@ def falsify(
         sets defined by general linear constraints (polytopes), the sampling
         and projection may not cover the true input region correctly.
 
+    Bounds can be any shape matching the model's expected input (excluding the
+    batch dimension). For example, pass lb/ub with shape (1, 28, 28) for a CNN
+    model that expects (batch, C, H, W) input. Samples are generated uniformly
+    in the flattened space, then reshaped to match the bounds' shape before
+    passing to the model.
+
     Args:
         model: PyTorch neural network model
-        lb: Lower bounds of input region (n,) or (n, 1). Defines hyperbox input set.
-        ub: Upper bounds of input region (n,) or (n, 1). Defines hyperbox input set.
+        lb: Lower bounds of input region. Shape should match model input
+            (excluding batch dim), e.g. (n,) for FC or (C, H, W) for CNN.
+        ub: Upper bounds of input region, same shape as lb.
         property: Property specification (unsafe region), can be:
                   - dict with 'Hg' field containing HalfSpace(s)
                   - list of dicts with 'Hg' field
@@ -145,8 +151,8 @@ def _falsify_random(
 
     Args:
         model: PyTorch neural network model
-        lb: Lower bounds of input region
-        ub: Upper bounds of input region
+        lb: Lower bounds of input region (any shape matching model input)
+        ub: Upper bounds of input region (same shape as lb)
         property: Property specification (unsafe region)
         n_samples: Number of random samples to try (default: 500)
         seed: Random seed for reproducibility
@@ -158,36 +164,38 @@ def _falsify_random(
     if seed is not None:
         np.random.seed(seed)
 
-    # Ensure lb, ub are 1D
-    lb = np.asarray(lb, dtype=np.float32).flatten()
-    ub = np.asarray(ub, dtype=np.float32).flatten()
+    lb = np.asarray(lb, dtype=np.float32)
+    ub = np.asarray(ub, dtype=np.float32)
 
-    if lb.shape != ub.shape:
+    # Remember original shape, flatten for sampling
+    orig_shape = lb.shape
+    lb_flat = lb.flatten()
+    ub_flat = ub.flatten()
+
+    if lb_flat.shape != ub_flat.shape:
         raise ValueError(f"lb and ub must have same shape, got {lb.shape} and {ub.shape}")
 
-    input_dim = lb.shape[0]
+    input_dim = lb_flat.shape[0]
 
-    # Process property to get list of HalfSpaces
-    halfspaces = _extract_halfspaces(property)
+    # Process property to get list of groups (AND of OR)
+    groups = _extract_halfspace_groups(property)
 
     # Generate random samples uniformly in [lb, ub]
-    samples = np.random.uniform(lb, ub, size=(n_samples, input_dim)).astype(np.float32)
+    samples = np.random.uniform(lb_flat, ub_flat, size=(n_samples, input_dim)).astype(np.float32)
 
     # Run model in eval mode without gradients
     model.eval()
     with torch.no_grad():
         for i in range(n_samples):
-            sample = samples[i:i+1]
-            sample_tensor = torch.from_numpy(sample)
+            sample_tensor = torch.from_numpy(samples[i]).reshape(1, *orig_shape)
 
             output = model(sample_tensor)
             output_np = output.numpy().flatten()
 
-            # Check if output violates property (is inside unsafe region)
-            for hs in halfspaces:
-                if hs.contains(output_np):
-                    counterexample = (samples[i], output_np)
-                    return 0, counterexample
+            # Check if output satisfies all property groups (AND of OR)
+            if _output_satisfies_property(output_np, groups):
+                counterexample = (samples[i], output_np)
+                return 0, counterexample
 
     return 2, None
 
@@ -212,8 +220,8 @@ def _falsify_pgd(
 
     Args:
         model: PyTorch neural network model
-        lb: Lower bounds of input region
-        ub: Upper bounds of input region
+        lb: Lower bounds of input region (any shape matching model input)
+        ub: Upper bounds of input region (same shape as lb)
         property: Property specification (unsafe region)
         n_restarts: Number of random restarts (default: 10)
         n_steps: Number of PGD steps per restart (default: 50)
@@ -228,57 +236,70 @@ def _falsify_pgd(
         np.random.seed(seed)
         torch.manual_seed(seed)
 
-    # Ensure lb, ub are 1D numpy arrays
-    lb = np.asarray(lb, dtype=np.float32).flatten()
-    ub = np.asarray(ub, dtype=np.float32).flatten()
+    lb = np.asarray(lb, dtype=np.float32)
+    ub = np.asarray(ub, dtype=np.float32)
 
-    if lb.shape != ub.shape:
+    # Remember original shape, flatten for sampling/clamping
+    orig_shape = lb.shape
+    lb_flat = lb.flatten()
+    ub_flat = ub.flatten()
+
+    if lb_flat.shape != ub_flat.shape:
         raise ValueError(f"lb and ub must have same shape, got {lb.shape} and {ub.shape}")
 
-    input_dim = lb.shape[0]
+    input_dim = lb_flat.shape[0]
 
-    # Convert bounds to tensors
-    lb_tensor = torch.from_numpy(lb)
-    ub_tensor = torch.from_numpy(ub)
+    # Convert bounds to tensors (flat for clamping)
+    lb_tensor = torch.from_numpy(lb_flat)
+    ub_tensor = torch.from_numpy(ub_flat)
 
     # Auto-compute step size if not provided (1% of input range)
     if step_size is None:
-        input_range = (ub - lb).max()
+        input_range = (ub_flat - lb_flat).max()
         step_size = input_range * 0.01
 
-    # Process property to get list of HalfSpaces
-    halfspaces = _extract_halfspaces(property)
+    # Process property to get list of groups (AND of OR)
+    groups = _extract_halfspace_groups(property)
 
-    # Convert HalfSpace constraints to tensors for gradient computation
-    hs_tensors = []
-    for hs in halfspaces:
-        G = torch.from_numpy(hs.G.astype(np.float32))
-        g = torch.from_numpy(hs.g.astype(np.float32).flatten())
-        hs_tensors.append((G, g))
+    # Convert all HalfSpace constraints to tensors for gradient computation
+    group_tensors = []
+    for group in groups:
+        tensors = []
+        for hs in group:
+            G = torch.from_numpy(hs.G.astype(np.float32))
+            g = torch.from_numpy(hs.g.astype(np.float32).flatten())
+            tensors.append((G, g))
+        group_tensors.append(tensors)
 
     # Put model in eval mode but we need gradients
     model.eval()
 
     for _ in range(n_restarts):
-        # Initialize with random input in [lb, ub]
+        # Initialize with random input in [lb, ub] (flat for gradient/clamping)
         x = torch.from_numpy(
-            np.random.uniform(lb, ub, size=(1, input_dim)).astype(np.float32)
+            np.random.uniform(lb_flat, ub_flat, size=(1, input_dim)).astype(np.float32)
         )
         x.requires_grad = True
 
         for _ in range(n_steps):
-            # Forward pass
-            output = model(x)
+            # Reshape for model forward pass
+            output = model(x.reshape(1, *orig_shape))
 
-            # Compute loss: minimize max(G @ y - g) to push into unsafe region
-            total_loss = torch.tensor(float('inf'))
+            # Compute loss: for AND of OR, we need all groups satisfied.
+            # For each group (OR): min over halfspaces of max_margin → want <= 0
+            # For all groups (AND): max over groups of that min → want <= 0
+            # Loss = max over groups of (min over hs in group of max(G @ y - g))
+            group_losses = []
+            for group_t in group_tensors:
+                best_in_group = torch.tensor(float('inf'))
+                for G, g in group_t:
+                    margins = G @ output.flatten() - g
+                    max_margin = margins.max()
+                    if max_margin < best_in_group:
+                        best_in_group = max_margin
+                group_losses.append(best_in_group)
 
-            for G, g in hs_tensors:
-                margins = G @ output.flatten() - g
-                max_margin = margins.max()
-
-                if max_margin < total_loss:
-                    total_loss = max_margin
+            total_loss = torch.stack(group_losses).max()
 
             # Check if we found a counterexample
             if total_loss.item() <= 0:
@@ -300,40 +321,68 @@ def _falsify_pgd(
 
         # Final check after all steps
         with torch.no_grad():
-            output = model(x)
+            output = model(x.reshape(1, *orig_shape))
             output_np = output.numpy().flatten()
 
-            for hs in halfspaces:
-                if hs.contains(output_np):
-                    input_np = x.numpy().flatten()
-                    return 0, (input_np, output_np)
+            if _output_satisfies_property(output_np, groups):
+                input_np = x.numpy().flatten()
+                return 0, (input_np, output_np)
 
     return 2, None
 
 
-def _extract_halfspaces(property: Union[dict, List[dict], 'HalfSpace', List['HalfSpace']]) -> List['HalfSpace']:
+def _extract_halfspace_groups(property: Union[dict, List[dict], 'HalfSpace', List['HalfSpace']]) -> List[List['HalfSpace']]:
     """
-    Extract list of HalfSpace objects from various property formats.
+    Extract property groups from various property formats.
+
+    VNN-LIB properties can have multiple groups (from separate top-level asserts)
+    that are ANDed together. Within each group, halfspaces are ORed.
+
+    A counterexample must satisfy ALL groups (AND), where satisfying a group
+    means satisfying ANY halfspace within it (OR).
 
     Args:
         property: Property specification in various formats
 
     Returns:
-        List of HalfSpace objects
+        List of groups, where each group is a list of HalfSpace objects (OR within group).
     """
     from n2v.sets import HalfSpace
 
-    # Handle list of dicts (from vnnlib)
+    # Handle list of dicts (from vnnlib) — each dict is a property group
     if isinstance(property, list) and len(property) > 0 and isinstance(property[0], dict):
-        property = property[0]
-        property = property['Hg']
+        groups = []
+        for p in property:
+            hg = p['Hg']
+            if isinstance(hg, HalfSpace):
+                groups.append([hg])
+            elif isinstance(hg, list):
+                groups.append(hg)
+            else:
+                raise TypeError(f"Property group 'Hg' must be HalfSpace or list, got {type(hg)}")
+        return groups
     elif isinstance(property, dict):
-        property = property['Hg']
+        hg = property['Hg']
+        if isinstance(hg, HalfSpace):
+            return [[hg]]
+        elif isinstance(hg, list):
+            return [hg]
+        else:
+            raise TypeError(f"Property 'Hg' must be HalfSpace or list, got {type(hg)}")
 
-    # Ensure we have a list
+    # Single HalfSpace or list of HalfSpace (OR)
     if isinstance(property, HalfSpace):
-        return [property]
+        return [[property]]
     elif isinstance(property, list):
-        return property
+        return [property]
     else:
         raise TypeError(f"Property must be HalfSpace, list of HalfSpace, or dict with 'Hg' field, got {type(property)}")
+
+
+def _output_satisfies_property(output_np: np.ndarray, groups: List[List['HalfSpace']]) -> bool:
+    """Check if an output satisfies all property groups (AND of OR)."""
+    for group in groups:
+        # Within each group, at least one halfspace must be satisfied (OR)
+        if not any(hs.contains(output_np) for hs in group):
+            return False
+    return True

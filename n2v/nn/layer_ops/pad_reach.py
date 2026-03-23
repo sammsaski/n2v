@@ -8,7 +8,7 @@ padded with zeros along the spatial axes.
 
 import numpy as np
 import torch.nn as nn
-from typing import List
+from typing import List, Tuple
 
 from n2v.sets.image_star import ImageStar
 from n2v.sets.image_zono import ImageZono
@@ -20,7 +20,7 @@ except ImportError:
     OnnxPad = None
 
 
-def _extract_padding(layer) -> tuple:
+def _extract_padding(layer: nn.Module) -> Tuple[int, int, int, int]:
     """
     Extract (left, right, top, bottom) padding from various layer types.
 

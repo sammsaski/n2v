@@ -89,7 +89,7 @@ class TestLinearReach:
         result = linear_reach.linear_hexatope(layer, [hexatope])[0]
 
         # Identity should preserve bounds
-        result_lb, result_ub = result.get_bounds()
+        result_lb, result_ub = result.get_bounds(solver='lp')
         np.testing.assert_allclose(result_lb, lb, atol=1e-5)
         np.testing.assert_allclose(result_ub, ub, atol=1e-5)
 
@@ -109,7 +109,7 @@ class TestLinearReach:
         result = linear_reach.linear_hexatope(layer, [hexatope])[0]
 
         assert result.dim == 2
-        result_lb, result_ub = result.get_bounds()
+        result_lb, result_ub = result.get_bounds(solver='lp')
         np.testing.assert_allclose(result_lb, np.array([[0.0], [1.0]]), atol=1e-5)
         np.testing.assert_allclose(result_ub, np.array([[1.0], [2.0]]), atol=1e-5)
 
@@ -138,7 +138,7 @@ class TestLinearReach:
         result = linear_reach.linear_octatope(layer, [octatope])[0]
 
         # Identity should preserve bounds
-        result_lb, result_ub = result.get_bounds()
+        result_lb, result_ub = result.get_bounds(solver='lp')
         np.testing.assert_allclose(result_lb, lb, atol=1e-5)
         np.testing.assert_allclose(result_ub, ub, atol=1e-5)
 
@@ -158,7 +158,7 @@ class TestLinearReach:
         result = linear_reach.linear_octatope(layer, [octatope])[0]
 
         assert result.dim == 2
-        result_lb, result_ub = result.get_bounds()
+        result_lb, result_ub = result.get_bounds(solver='lp')
         np.testing.assert_allclose(result_lb, np.array([[0.0], [1.0]]), atol=1e-5)
         np.testing.assert_allclose(result_ub, np.array([[1.0], [2.0]]), atol=1e-5)
 
@@ -176,7 +176,7 @@ class TestLinearReach:
         result = linear_reach.linear_octatope(layer, [octatope])[0]
 
         # Expected: [0, 1] + [1, 2] = [1, 2] to [2, 3]
-        result_lb, result_ub = result.get_bounds()
+        result_lb, result_ub = result.get_bounds(solver='lp')
         np.testing.assert_allclose(result_lb, np.array([[1.0], [2.0]]), atol=1e-5)
         np.testing.assert_allclose(result_ub, np.array([[2.0], [3.0]]), atol=1e-5)
 

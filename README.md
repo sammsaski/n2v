@@ -2,7 +2,7 @@
 
 Python implementation of the Neural Network Verification (NNV) tool, supporting formal verification and reachability analysis for PyTorch neural networks.
 
-**Translated from MATLAB NNV** | **PyTorch Native** | **Production Ready**
+**Translated from MATLAB NNV** | **PyTorch Native** | **ONNX Support** | **VNN-COMP Ready**
 
 ---
 
@@ -22,7 +22,10 @@ Python implementation of the Neural Network Verification (NNV) tool, supporting 
 - [Performance Tips](#performance-tips)
 - [Testing](#testing)
 - [API Reference](#api-reference)
+- [ONNX Model Support](#onnx-model-support)
+- [VNN-COMP Benchmarks](#vnn-comp-benchmarks)
 - [Differences from MATLAB NNV](#differences-from-matlab-nnv)
+- [Theoretical Foundations](#theoretical-foundations)
 - [References](#references)
 
 ---
@@ -37,11 +40,13 @@ NNV-Python is a Python port of the MATLAB NNV tool, designed for:
 
 ### Why NNV-Python?
 
-- ✅ **PyTorch Native**: Works directly with PyTorch models (no custom layer classes needed)
-- ✅ **Exact & Approximate**: Multiple verification methods for speed/precision trade-offs
-- ✅ **CNN Support**: Full support for convolutional networks with pooling layers
-- ✅ **Efficient**: Optimized for both small and large networks
-- ✅ **Extensible**: Easy to add new layers and methods
+- **PyTorch Native**: Works directly with PyTorch models (no custom layer classes needed)
+- **ONNX Support**: Load and verify ONNX models via onnx2torch
+- **Exact & Approximate**: Multiple verification methods for speed/precision trade-offs
+- **CNN Support**: Full support for convolutional networks with pooling layers
+- **Probabilistic Verification**: Model-agnostic conformal inference for large/black-box models
+- **VNN-COMP Ready**: Complete VNN-COMP 2025 benchmark infrastructure with 28 benchmarks
+- **Extensible**: Easy to add new layers and methods
 
 ---
 
@@ -52,20 +57,23 @@ NNV-Python is a Python port of the MATLAB NNV tool, designed for:
 - **Zonotopes**: Efficient over-approximations (`c + V*α`)
 - **Boxes**: Fast interval-based bounds
 - **ImageStar/ImageZono**: Image-aware representations for CNNs
+- **Hexatope/Octatope**: Specialized polytopes with strongly polynomial optimization
 
-### Layer Support
+### Layer Support (20+ layer types)
 - **Fully Connected**: Linear layers (exact)
 - **Convolutional**: Conv1D, Conv2D (exact)
-- **Activations**: ReLU (exact with splitting), Sigmoid, Tanh
-- **Pooling**: MaxPool2D (exact), **AvgPool2D (exact, no splitting!)** ⭐
-- **Normalization**: BatchNorm, LayerNorm
-- **Structural**: Flatten, Reshape, Concatenation
+- **Activations**: ReLU, LeakyReLU (exact/approx), Sigmoid, Tanh (approx), Sign (exact/approx)
+- **Pooling**: MaxPool2D (exact/approx), AvgPool2D, GlobalAvgPool (exact, no splitting)
+- **Normalization**: BatchNorm1d/2d (exact, fusible with preceding Linear/Conv)
+- **Structural**: Flatten, Pad, Upsample, Transpose, Reshape, Concatenation, Slice, Split, Reduce
+- **ONNX**: Full graph execution for Add, Sub, Mul, Div, MatMul, Neg, Cast, and more
 
 ### Verification Methods
 - **Exact**: Sound and complete (may be slower)
 - **Approximate**: Over-approximate (faster, still sound)
 - **Probabilistic**: Model-agnostic with formal coverage guarantees
 - **Hybrid**: Mix exact/approximate/probabilistic for optimal performance
+- **Falsification**: Quick counterexample search via random sampling and PGD
 
 ---
 
@@ -152,11 +160,11 @@ output_stars = verifier.reach(input_star, method='exact')
 
 print(f"Output: {len(output_stars)} reachable set(s)")
 
-# Get output bounds
+# Get output bounds (use get_ranges() for exact LP-based bounds)
 for star in output_stars:
-    star.estimate_ranges()
-    print(f"Lower bounds: {star.state_lb.flatten()}")
-    print(f"Upper bounds: {star.state_ub.flatten()}")
+    lb, ub = star.get_ranges()
+    print(f"Lower bounds: {lb.flatten()}")
+    print(f"Upper bounds: {ub.flatten()}")
 ```
 
 ### CNN Example: Image Classification
@@ -201,9 +209,9 @@ print(f"CNN output: {len(output_stars)} reachable sets")
 def check_robustness(output_stars, true_class):
     """Check if true_class has highest score in all reachable sets."""
     for star in output_stars:
-        star.estimate_ranges()
-        lb = star.state_lb.flatten()
-        ub = star.state_ub.flatten()
+        lb, ub = star.get_ranges()
+        lb = lb.flatten()
+        ub = ub.flatten()
 
         # Check if any other class could have higher score
         for i in range(len(lb)):
@@ -220,47 +228,85 @@ print(f"Model is robust: {is_robust}")
 
 ## Supported Layers
 
-| Layer Type | Star | Zono | Box | Notes |
-|------------|------|------|-----|-------|
-| **Linear** | ✅ Exact | ✅ Exact | ✅ Exact | Affine transformation |
-| **Conv2D** | ✅ Exact | ✅ Exact | ❌ | Affine transformation |
-| **ReLU** | ✅ Exact | ✅ Approx | ✅ Exact | Splitting in exact mode |
-| **AvgPool2D** | ✅ Exact | ✅ Exact | ⚠️ | **Linear - no splitting!** ⭐ |
-| **MaxPool2D** | ✅ Exact | ✅ Approx | ❌ | Can cause splitting |
-| **Sigmoid/Tanh** | ✅ Approx | ✅ Approx | ✅ Approx | Nonlinear |
-| **BatchNorm** | 🚧 | 🚧 | 🚧 | In progress |
-| **Flatten** | ✅ | ✅ | ✅ | Reshaping |
+### Exact (Linear) Layers
 
-✅ = Implemented | ⚠️ = Partial | 🚧 = In progress | ❌ = Not implemented
+These layers are affine transformations — computed exactly with no approximation or splitting.
+
+| Layer Type | Star/ImageStar | Zono/ImageZono | Box | Hex/Oct |
+|------------|:--------------:|:--------------:|:---:|:-------:|
+| **Linear** (`nn.Linear`) | ✅ | ✅ | ✅ | ✅ |
+| **Conv2D** (`nn.Conv2d`) | ✅ | ✅ | — | — |
+| **Conv1D** (`nn.Conv1d`) | ✅ | ✅ | ✅ | — |
+| **BatchNorm** (`nn.BatchNorm1d/2d`) | ✅ | ✅ | ✅ | ✅ |
+| **AvgPool2D** (`nn.AvgPool2d`) | ✅ | ✅ | — | — |
+| **GlobalAvgPool** (`nn.AdaptiveAvgPool2d(1)`) | ✅ | ✅ | — | — |
+| **Flatten** (`nn.Flatten`) | ✅ | ✅ | no-op | no-op |
+| **Pad** (`nn.ZeroPad2d`, etc.) | ✅ | ✅ | — | — |
+| **Upsample** (`nn.Upsample`, nearest) | ✅ | ✅ | — | — |
+| **Reduce** (ReduceSum, ReduceMean) | ✅ | ✅ | ✅ | — |
+| **Transpose** | ✅ | ✅ | ✅ | — |
+| **Neg** | ✅ | ✅ | ✅ | ✅ |
+| **Identity/Dropout/Cast** | no-op | no-op | no-op | no-op |
+
+### Nonlinear Layers
+
+These layers require splitting (exact) or relaxation (approx). See [docs/theoretical_foundations.md](docs/theoretical_foundations.md) for detailed algorithms.
+
+| Layer Type | Star (exact) | Star (approx) | Zono | Box |
+|------------|:------------:|:--------------:|:----:|:---:|
+| **ReLU** (`nn.ReLU`) | Split | Triangle relax | Interval approx | Elementwise |
+| **LeakyReLU** (`nn.LeakyReLU`) | Split | Triangle relax | Interval approx | Elementwise |
+| **Sigmoid** (`nn.Sigmoid`) | — | S-curve relax | Interval approx | Monotone |
+| **Tanh** (`nn.Tanh`) | — | S-curve relax | Interval approx | Monotone |
+| **Sign** | Split | Parallelogram relax | Interval approx | Elementwise |
+| **MaxPool2D** (`nn.MaxPool2d`) | Split + LP | New predicates | Bounds approx | — |
+
+### ONNX Graph Operations
+
+These operations are handled by the ONNX graph execution engine when loading models via `load_onnx()`.
+
+| Operation | Description |
+|-----------|-------------|
+| OnnxReshape | Reshape with NCHW ↔ HWC format conversion |
+| OnnxConcat | Concatenation along specified axis |
+| OnnxSlice/SliceV9 | Rectangular slicing |
+| OnnxSplit/Split13 | Splitting along axis |
+| OnnxBinaryMath (Add, Sub, Mul, Div) | Element-wise arithmetic with constants |
+| OnnxMatMul | Matrix multiplication with constant weights |
+
+✅ = exact | — = not supported for this set type
 
 ---
 
 ## Set Representations
 
+n2v provides 8 set representations with different expressiveness/speed trade-offs. See [docs/theoretical_foundations.md](docs/theoretical_foundations.md) for full mathematical definitions.
+
 ### Star Sets
 
-Represent sets as: **x = V * [1; α]** where **C*α ≤ d**
+Primary representation: **x = c + V*α** where **C*α ≤ d**
 
 ```python
 from n2v.sets import Star
 
-# From bounds
+# From bounds (creates Star from hyperbox)
 star = Star.from_bounds(lb, ub)
 
 # Manual construction
-V = np.array([[1, 0.1], [0, 0.2], [0, 0.3]])  # Basis matrix
+V = np.array([[1, 0.1], [0, 0.2], [0, 0.3]])  # Basis matrix (center + generators)
 C = np.array([[1, 0], [0, 1]])  # Constraints
 d = np.array([[1], [1]])
 star = Star(V, C, d)
 
 # Operations
-output = star.affine_map(W, b)  # Linear transformation
-bounds_lb, bounds_ub = star.get_bounds()
+output = star.affine_map(W, b)       # Linear transformation
+lb, ub = star.get_ranges()           # LP-based exact bounds
+new_star = star.intersect_half_space(G, g)  # Intersect with G*x <= g
 ```
 
 ### ImageStar
 
-Star sets for images with spatial structure:
+Star sets for images with spatial structure (4D tensor: H x W x C x nVar+1):
 
 ```python
 from n2v.sets import ImageStar
@@ -272,13 +318,15 @@ image_star = ImageStar.from_bounds(
     height=28, width=28, num_channels=1
 )
 
-# Flatten for FC layers
+# Flatten for FC layers (CHW ordering for PyTorch compatibility)
 regular_star = image_star.flatten_to_star()
 ```
 
 ### Zonotopes
 
-Efficient representation: **x = c + V*α** where **-1 ≤ α_i ≤ 1**
+Efficient representation: **x = c + V*α** where **-1 ≤ αᵢ ≤ 1**
+
+Bounds are computed analytically (no LP needed): `lb[i] = c[i] - Σ|V[i,j]|`
 
 ```python
 from n2v.sets import Zono
@@ -286,11 +334,41 @@ from n2v.sets import Zono
 # From center and generators
 zono = Zono(center, generators)
 
-# From bounds (creates zonotope)
+# From bounds
 zono = Zono.from_bounds(lb, ub)
 
-# Fast over-approximation
-bounds_lb, bounds_ub = zono.get_bounds()
+# Analytical bounds (fast, no LP)
+lb, ub = zono.get_ranges()
+```
+
+### Box
+
+Axis-aligned hyperrectangle. Fastest but most conservative.
+
+```python
+from n2v.sets import Box
+
+box = Box(lb, ub)
+```
+
+### Hexatope / Octatope
+
+Specialized polytopes using Difference Constraint Systems (DCS) and UTVPI constraints respectively. Enable **strongly polynomial optimization** via minimum cost flow instead of LP.
+
+```python
+from n2v.sets import Hexatope, Octatope
+```
+
+### ProbabilisticBox
+
+Box with conformal inference metadata (coverage and confidence guarantees). Returned by probabilistic verification.
+
+```python
+from n2v.sets import ProbabilisticBox
+
+# Returned by probabilistic verify()
+result.coverage    # e.g. 0.99
+result.confidence  # e.g. 0.997
 ```
 
 ---
@@ -528,35 +606,33 @@ for i, layer in enumerate(layers):
 
 See [`examples/`](examples/) directory for complete examples:
 
-### Basic Examples
-- **`simple_verification.py`** - Basic feedforward network
-- **`mnist_verification.py`** - MNIST classifier verification
-
-### CNN Examples
-- **`mnist_cnn_verification.py`** - CNN without pooling
-- **`mnist_cnn_maxpool_verification.py`** - CNN with MaxPool2D
-- **`mnist_cnn_avgpool_verification.py`** - CNN with AvgPool2D ⭐ (recommended!)
-
 ### Benchmark Examples
-- **`ACASXu/`** - VNN-COMP 2025 ACAS Xu benchmark (186 instances)
+- **[`ACASXu/`](examples/ACASXu/)** - ACAS Xu benchmark (186 instances). See [examples/ACASXu/README.md](examples/ACASXu/README.md).
+- **[`vnncomp/`](examples/VNN-COMP/)** - Full VNN-COMP 2025 infrastructure (28 benchmarks). See [examples/VNN-COMP/README.md](examples/VNN-COMP/README.md).
 
-### Running Examples
+### Running ACAS Xu
 
 ```bash
-cd examples
+cd examples/ACASXu
 
-# Basic verification
-python simple_verification.py
+# Single instance
+python run_instance.py onnx/ACASXU_run2a_1_1_batch_2000.onnx vnnlib/prop_1.vnnlib
 
-# CNN with AvgPool (fastest!)
-python mnist_cnn_avgpool_verification.py
-
-# ACAS Xu VNN-COMP benchmark
-cd ACASXu
+# Full benchmark
 ./run_benchmark.sh --timeout 120 --falsify-method random+pgd
 ```
 
-See [examples/README.md](examples/README.md) for detailed documentation.
+### Running VNN-COMP Smoke Test
+
+```bash
+cd examples/VNN-COMP
+
+# Quick check: 1 instance per benchmark
+./smoke_test.sh /path/to/vnncomp_benchmarks
+
+# Full benchmark
+./run_benchmark.sh /path/to/benchmarks/acasxu_2023 --timeout 120
+```
 
 ---
 
@@ -922,6 +998,69 @@ result = lpsolver.solve_lp(
 
 ---
 
+## ONNX Model Support
+
+n2v can verify ONNX models directly using the bundled onnx2torch converter.
+
+### Loading ONNX Models
+
+```python
+from n2v.utils import load_onnx
+
+# Load ONNX model as PyTorch module
+model = load_onnx('model.onnx')
+
+# Verify as usual
+verifier = nnv.NeuralNetwork(model)
+output = verifier.reach(input_set, method='approx')
+```
+
+### Loading VNNLIB Specifications
+
+```python
+from n2v.utils import load_vnnlib
+
+# Parse VNNLIB file (returns input bounds and output property)
+regions = load_vnnlib('spec.vnnlib')
+# regions is a list of (input_bounds, output_property) tuples
+# Supports multiple disjunctive input regions
+```
+
+### Supported ONNX Operations
+
+Beyond standard PyTorch layers, the ONNX graph engine handles: Reshape, Concat, Slice, Split, binary arithmetic (Add, Sub, Mul, Div), MatMul, Reduce (Sum, Mean), Resize/Upsample, Transpose, Neg, Cast, and Pad.
+
+See the [Supported Layers](#supported-layers) section for the full list.
+
+---
+
+## VNN-COMP Benchmarks
+
+n2v includes a complete VNN-COMP 2025 benchmark infrastructure supporting 28 benchmarks with per-benchmark tuned verification strategies.
+
+### Quick Smoke Test
+
+```bash
+cd examples/VNN-COMP
+./smoke_test.sh /path/to/vnncomp_benchmarks
+```
+
+### Single Instance
+
+```bash
+python examples/VNN-COMP/run_instance.py model.onnx spec.vnnlib --category acasxu_2023
+```
+
+### Verification Strategy
+
+The runner uses a 3-stage pipeline: **falsification** (random + PGD) to find counterexamples quickly, then **approximate reachability** (sound, fast), then **exact reachability** (sound and complete, potentially slow). Each stage can prove the result and short-circuit remaining stages.
+
+Per-benchmark configurations in `benchmark_configs.py` tune which stages run. For example, large ResNet models skip to probabilistic verification, while small ACAS Xu models run exact analysis.
+
+See [examples/VNN-COMP/README.md](examples/VNN-COMP/README.md) for full documentation.
+
+---
+
 ## Differences from MATLAB NNV
 
 | Feature | MATLAB NNV | Python NNV |
@@ -962,7 +1101,22 @@ This tool is based on the MATLAB NNV tool:
 
 - [NNV Tool Paper](https://link.springer.com/chapter/10.1007/978-3-031-37706-8_15)
 - [MATLAB NNV GitHub](https://github.com/verivital/nnv)
-- [Star Set Reachability](https://arxiv.org/abs/1908.01739)
+- [Star Set Reachability (Tran et al., 2019)](https://arxiv.org/abs/1908.01739)
+- [Conformal Prediction (Vovk et al., 2005)](https://link.springer.com/book/10.1007/978-3-031-06649-8) — Theory behind probabilistic verification
+- [Abstract Interpretation for Neural Networks (Singh et al., 2019)](https://dl.acm.org/doi/10.1145/3290354) — Zonotope abstractions
+
+---
+
+## Theoretical Foundations
+
+For detailed mathematical descriptions of all set representations, relaxation techniques, and algorithmic choices, see [docs/theoretical_foundations.md](docs/theoretical_foundations.md). This includes:
+
+- Mathematical definitions of all 8 set types (Star, Zono, Box, ImageStar, ImageZono, ProbabilisticBox, Hexatope, Octatope)
+- Exact vs approximate computation for every layer+set combination
+- ReLU triangle relaxation, sigmoid/tanh S-curve relaxation, sign parallelogram relaxation
+- MaxPool2D splitting and over-approximation strategies
+- Conformal inference theory for probabilistic verification
+- Optimization techniques (Zono pre-pass, LP solver selection, parallel computation)
 
 ---
 
@@ -972,25 +1126,50 @@ This tool is based on the MATLAB NNV tool:
 
 ```
 n2v/
-├── sets/              # Set representations (Star, Zono, Box, ProbabilisticBox, etc.)
-├── nn/                # Neural network wrapper and layer operations
-│   ├── neural_network.py
+├── sets/              # Set representations
+│   ├── star.py               # Star (primary set type)
+│   ├── image_star.py         # ImageStar (4D for CNNs)
+│   ├── zono.py               # Zonotope
+│   ├── image_zono.py         # ImageZono (4D zonotope)
+│   ├── box.py                # Axis-aligned hyperrectangle
+│   ├── probabilistic_box.py  # Box with conformal guarantees
+│   ├── hexatope.py           # DCS-constrained zonotope
+│   ├── octatope.py           # UTVPI-constrained zonotope
+│   └── halfspace.py          # Linear constraint representation
+├── nn/                # Neural network verification
+│   ├── neural_network.py     # NeuralNetwork wrapper class
 │   ├── reach.py              # Top-level reachability orchestration
-│   └── layer_ops/            # Layer-specific operations
+│   └── layer_ops/            # Layer-specific operations (20+ layers)
 │       ├── dispatcher.py     # Routes by layer type and set type
 │       ├── linear_reach.py
 │       ├── relu_reach.py
+│       ├── leakyrelu_reach.py
+│       ├── sigmoid_reach.py
+│       ├── tanh_reach.py
+│       ├── sign_reach.py
 │       ├── conv2d_reach.py
-│       ├── avgpool2d_reach.py
+│       ├── conv1d_reach.py
 │       ├── maxpool2d_reach.py
-│       └── flatten_reach.py
+│       ├── avgpool2d_reach.py
+│       ├── global_avgpool_reach.py
+│       ├── batchnorm_reach.py
+│       ├── flatten_reach.py
+│       ├── pad_reach.py
+│       ├── upsample_reach.py
+│       └── reduce_reach.py
 ├── probabilistic/     # Probabilistic verification module
 │   ├── verify.py             # Main verify() entry point
 │   ├── conformal.py          # Conformal inference primitives
 │   ├── surrogates/           # Surrogate models (naive, clipping_block)
 │   └── dimensionality/       # Deflation PCA for high-dim outputs
-├── utils/             # Utilities (LP solver, etc.)
-└── examples/          # Example scripts
+├── utils/             # Utilities (LP solver, VNNLIB parser, falsification, etc.)
+├── examples/
+│   ├── ACASXu/               # ACAS Xu benchmark (186 instances)
+│   └── vnncomp/              # VNN-COMP 2025 infrastructure (28 benchmarks)
+└── docs/              # Documentation
+    ├── theoretical_foundations.md  # Mathematical details and algorithms
+    ├── probabilistic_verification.md
+    └── lp_solvers.md
 ```
 
 ### Adding New Layers
@@ -998,8 +1177,6 @@ n2v/
 1. Create operation file in `nn/layer_ops/<layer>_reach.py`
 2. Add dispatch case in `layer_ops/dispatcher.py`
 3. Implement for Star, Zono, Box (as applicable)
-
-See [CHANGELOG.md](CHANGELOG.md) for development history.
 
 ### Contributing
 
@@ -1021,17 +1198,16 @@ MIT License - See LICENSE file for details
 
 - **Issues**: [GitHub Issues](https://github.com/verivital/nnv/issues)
 - **Email**: samuel.sasaki@vanderbilt.edu
-- **Documentation**: This README and [CHANGELOG.md](CHANGELOG.md)
+- **Documentation**: This README and [docs/](docs/)
 
 ---
 
 ## Quick Links
 
-- 📖 [Examples README](examples/README.md) - How to run examples
-- 📋 [CHANGELOG](CHANGELOG.md) - Development history and changes
-- 🚀 [Quick Start](#quick-start) - Get started in 5 minutes
-- 🧠 [CNN Verification](#cnn-verification) - CNN-specific guide
-
----
-
-**NNV-Python**: Bringing formal verification to PyTorch! 🚀
+- [Quick Start](#quick-start) - Get started in 5 minutes
+- [Theoretical Foundations](docs/theoretical_foundations.md) - Mathematical details and algorithms
+- [VNN-COMP Guide](examples/VNN-COMP/README.md) - Running VNN-COMP benchmarks
+- [ACAS Xu Guide](examples/ACASXu/README.md) - ACAS Xu benchmark
+- [Probabilistic Verification](docs/probabilistic_verification.md) - Conformal inference theory
+- [LP Solvers](docs/lp_solvers.md) - Solver comparison and selection
+- [CNN Verification](#cnn-verification) - CNN-specific guide

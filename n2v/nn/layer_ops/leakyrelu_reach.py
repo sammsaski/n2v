@@ -13,10 +13,14 @@ Like ReLU, this is element-wise so it operates on 2D Star representation.
 ImageStar inputs are converted to Star, processed, and converted back.
 """
 
+import logging
+
 import numpy as np
 from typing import List, Optional
 from n2v.sets import Star, Zono
 from n2v.sets.image_star import ImageStar
+
+logger = logging.getLogger(__name__)
 
 
 def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
@@ -97,7 +101,7 @@ def _leakyrelu_single_star_exact(
 
     for i, neuron_idx in enumerate(split_map):
         if verbose:
-            print(f'Exact LeakyReLU_{neuron_idx} ({i+1}/{len(split_map)})')
+            logger.debug(f'Exact LeakyReLU_{neuron_idx} ({i+1}/{len(split_map)})')
         new_stars = []
         for star in current_stars:
             split_result = _step_leakyrelu(star, neuron_idx, gamma, lp_solver)
@@ -353,8 +357,16 @@ def _apply_leakyrelu_approx_multi(
 
 
 def leakyrelu_zono_approx(input_zonos: List[Zono], gamma: float = 0.01) -> List[Zono]:
-    """Approximate LeakyReLU for Zonotopes."""
-    return [_leakyrelu_single_zono(z, gamma) for z in input_zonos]
+    """Approximate LeakyReLU for Zonotopes, preserving ImageZono type."""
+    from n2v.sets.image_zono import ImageZono
+
+    output = []
+    for z in input_zonos:
+        result = _leakyrelu_single_zono(z, gamma)
+        if isinstance(z, ImageZono) and not isinstance(result, ImageZono):
+            result = ImageZono(result.c, result.V, z.height, z.width, z.num_channels)
+        output.append(result)
+    return output
 
 
 def _leakyrelu_single_zono(I: Zono, gamma: float) -> Zono:

@@ -37,6 +37,7 @@ class NaiveSurrogate(Surrogate):
     """
 
     def __init__(self):
+        """Initialize NaiveSurrogate with empty state."""
         self.center = None
         self.n_dim = None
         self._is_fitted = False

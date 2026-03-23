@@ -4,28 +4,37 @@ Verify a specification based on the intersection between the reach set and halfs
 This module provides functionality to verify properties by checking intersection
 between the computed reachable set and the property (assumed to be the un-robust
 or unsafe region to prove).
+
+The router (verify_specification) parses the property format and dispatches to
+type-specific verification functions:
+- _verify_specification_box: O(n) interval arithmetic for Box/ProbabilisticBox sets
+- _verify_specification_star: LP-based intersection for Star sets (default fallback)
 """
 
 import numpy as np
-from typing import Union, List, TYPE_CHECKING, Any
+from scipy.optimize import linprog
+from typing import Union, List
 
-# Use TYPE_CHECKING to avoid circular import (Star -> lpsolver -> verify_specification -> Star)
-if TYPE_CHECKING:
-    from n2v.sets import Star, HalfSpace
+from n2v.sets import Star, Box, HalfSpace
 
 
-def verify_specification(reach_set: Union[List['Star'], List], property: Union[dict, List[dict], 'HalfSpace', List['HalfSpace']]) -> int:
+def verify_specification(reach_set: Union[List[Star], List], property: Union[dict, List[dict], HalfSpace, List[HalfSpace]]) -> int:
     """
     Verify a specification based on intersection between reach set and property halfspaces.
 
     The property is assumed to represent the un-robust or unsafe region that we want
     to prove does NOT intersect with the reachable set.
 
+    Dispatches to type-specific verification:
+    - Box/ProbabilisticBox: interval arithmetic (fast, no LP)
+    - Star: LP-based intersection (exact)
+    - Other types: converted to Star as fallback
+
     Args:
-        reach_set: Computed output set of neural network (list of Star objects)
+        reach_set: Computed output set of neural network (list of set objects)
         property: Property specification, can be:
                   - dict with 'Hg' field containing HalfSpace(s)
-                  - list of dicts with 'Hg' field
+                  - list of dicts with 'Hg' field (multiple groups, ANDed)
                   - HalfSpace object
                   - list of HalfSpace objects
 
@@ -35,101 +44,152 @@ def verify_specification(reach_set: Union[List['Star'], List], property: Union[d
                 2 -> unknown (may have intersection with both safe and unsafe)
 
     Note:
-        - Single HalfSpace: ALL reach sets must NOT intersect (AND logic)
-        - Multiple HalfSpaces: If ANY intersects with ANY reach set -> unknown/unsafe (OR logic)
+        - Multiple property groups (list of dicts): AND logic across groups.
+          The unsafe region is the intersection of all groups. If ANY group is
+          disjoint from all reach sets → satisfied.
+        - Within a single group with multiple HalfSpaces: OR logic.
+          If ANY halfspace intersects with ANY reach set → that group intersects.
+        - Single HalfSpace: ALL reach sets must NOT intersect.
     """
-    # Import at runtime to avoid circular dependency
-    from n2v.sets import Star, HalfSpace
+    # Parse property into groups (AND of OR)
+    groups = _parse_property_groups(property)
 
-    R = reach_set
-    nr = len(R)  # number of output sets (for approx should be 1)
+    # For AND logic across groups: if ANY group is fully disjoint → satisfied
+    for group in groups:
+        if _group_disjoint_from_reach_set(group, reach_set):
+            return 1  # this group is disjoint → overall AND is disjoint → satisfied
 
-    # Process property to verify
+    # All groups individually intersect → unknown
+    return 2
+
+
+def _parse_property_groups(property: Union[dict, List, HalfSpace]) -> List[List[HalfSpace]]:
+    """
+    Normalize property input into a list of groups (AND of OR).
+
+    Each group is a list of HalfSpace objects (OR within group).
+    Multiple groups are ANDed together.
+    """
+    # List of dicts: each dict is a property group (AND across groups)
     if isinstance(property, list) and len(property) > 0 and isinstance(property[0], dict):
-        # Created from vnnlib (one or multiple halfSpaces)
-        property = property[0]
-        property = property['Hg']  # property transformed into HalfSpace(s)
+        groups = []
+        for p in property:
+            hg = p['Hg']
+            if isinstance(hg, HalfSpace):
+                groups.append([hg])
+            elif isinstance(hg, list):
+                groups.append(hg)
+            else:
+                raise TypeError(f"Property group 'Hg' must be HalfSpace or list, got {type(hg)}")
+        return groups
     elif isinstance(property, dict):
-        # Single dict
-        property = property['Hg']
+        hg = property['Hg']
+        if isinstance(hg, HalfSpace):
+            return [[hg]]
+        elif isinstance(hg, list):
+            return [hg]
+        else:
+            raise TypeError(f"Property 'Hg' must be HalfSpace or list, got {type(hg)}")
 
-    # Ensure property is a list
+    # Single HalfSpace → one group with one halfspace
     if isinstance(property, HalfSpace):
-        property = [property]
-    elif not isinstance(property, list):
+        return [[property]]
+    # List of HalfSpaces → one group with OR logic
+    elif isinstance(property, list):
+        return [property]
+    else:
         raise TypeError(f"Property must be HalfSpace, list of HalfSpace, or dict with 'Hg' field, got {type(property)}")
 
-    # Begin verification
-    np_halfspaces = len(property)
 
-    if np_halfspaces == 1:
-        # Only one halfspace - check if ALL reach sets do NOT intersect
-        result = 1  # Assume property is satisfied (no intersection)
+def _group_disjoint_from_reach_set(group: List[HalfSpace], reach_set: list) -> bool:
+    """
+    Check if a group of halfspaces (OR) is disjoint from all reach sets.
 
-        for k in range(nr):
-            Set = R[k]
+    A group is disjoint from the reach set if for every reach set S and every
+    halfspace in the group, S is disjoint from the halfspace.
 
-            # Convert to Star if needed
-            if not isinstance(Set, Star):
-                if hasattr(Set, 'to_star'):
-                    Set = Set.to_star()
-                else:
-                    raise TypeError(f"Cannot convert {type(Set)} to Star")
+    If the group has a single halfspace: all S must be disjoint from it.
+    If the group has multiple halfspaces (OR): if any hs intersects any S → not disjoint.
+    """
+    for hs in group:
+        for S in reach_set:
+            if not _is_disjoint(S, hs):
+                return False  # this halfspace intersects → group not disjoint
+    return True  # all halfspaces disjoint from all reach sets
 
-            # TODO: Handle GPU arrays if needed (in Python, likely using CuPy)
-            # if isinstance(Set.V, cp.ndarray):  # CuPy array
-            #     Set = Set.to_cpu()
 
-            # Compute intersection with unsafe/not robust region
-            G = property[0].G.astype(np.float64)
-            g = property[0].g.astype(np.float64)
-
-            S = Set.intersect_half_space(G, g)
-
-            # Check if intersection is empty (no feasible intersection with unsafe region)
-            if S is None or (isinstance(S, list) and len(S) == 0) or (isinstance(S, Star) and S.is_empty_set()):
-                # No intersection with unsafe region = safe (unsat)
-                result = 1
-            else:
-                # Intersection with safe and unsafe region = unknown or unsafe
-                result = 2
-                break
-
+def _is_disjoint(S: Union[Star, Box], halfspace: HalfSpace) -> bool:
+    """Check if set S is disjoint from halfspace. Dispatches by set type."""
+    if isinstance(S, Box):
+        return _verify_specification_box(S, halfspace)
+    elif isinstance(S, Star):
+        return _verify_specification_star(S, halfspace)
+    elif hasattr(S, 'to_star'):
+        return _verify_specification_star(S.to_star(), halfspace)
     else:
-        # Multiple halfspaces, which means OR assertion
-        # If ANY halfspace intersects with ANY reach set -> unknown/unsafe
-        cp = 0  # current halfspace we are looking at (0-indexed in Python)
-        result = 1  # start assuming property is unsat (no intersection)
+        raise TypeError(f"Cannot verify specification for {type(S)}")
 
-        while cp < np_halfspaces:
-            for k in range(nr):  # check every reach set vs OR property
-                Set = R[k]
 
-                # Convert to Star if needed
-                if not isinstance(Set, Star):
-                    if hasattr(Set, 'to_star'):
-                        Set = Set.to_star()
-                    else:
-                        raise TypeError(f"Cannot convert {type(Set)} to Star")
+def _verify_specification_box(box: Box, halfspace: HalfSpace) -> bool:
+    """
+    Check if a Box is disjoint from a halfspace using interval arithmetic.
 
-                # TODO: Handle GPU arrays if needed
-                # if isinstance(Set.V, cp.ndarray):
-                #     Set = Set.to_cpu()
+    For halfspace Gx <= g with box [lb, ub], the intersection is empty iff
+    there is no x in [lb, ub] satisfying all rows of Gx <= g.
 
-                G = property[cp].G.astype(np.float64)
-                g = property[cp].g.astype(np.float64)
+    For each row i: min_{x in box} G_i·x = Σ_j min(G_ij*lb_j, G_ij*ub_j).
+    If min > g_i for any row → that constraint is infeasible → disjoint.
 
-                S = Set.intersect_half_space(G, g)
+    If all rows are individually feasible, we solve a box-bounded LP to check
+    simultaneous feasibility (needed for multi-row halfspaces).
 
-                # Check if intersection is empty (no feasible intersection with unsafe region)
-                if S is None or (isinstance(S, list) and len(S) == 0) or (isinstance(S, Star) and S.is_empty_set()):
-                    # No intersection, continue to next reach set
-                    continue
-                else:
-                    # Intersection found - unknown if approx, sat if exact
-                    result = 2
-                    return result
+    Returns:
+        True if disjoint (empty intersection), False if intersection may exist.
+    """
+    G = halfspace.G.astype(np.float64)
+    g = halfspace.g.astype(np.float64).flatten()
+    lb = box.lb.flatten()
+    ub = box.ub.flatten()
 
-            cp += 1
+    n_rows = G.shape[0]
 
-    return result
+    # Fast check: for each row, compute min(G_i · x) over the box.
+    # min(G_i · x) = Σ_j min(G_ij * lb_j, G_ij * ub_j)
+    for i in range(n_rows):
+        row = G[i]
+        min_val = np.sum(np.minimum(row * lb, row * ub))
+        if min_val > g[i]:
+            return True  # constraint i infeasible → disjoint
+
+    # If only one row and it's feasible, intersection exists
+    if n_rows == 1:
+        return False
+
+    # Multiple rows all individually feasible — check simultaneous feasibility
+    # via box-bounded LP (only variable bounds + halfspace constraints)
+    # Feasibility LP: minimize 0 subject to Gx <= g, lb <= x <= ub
+    n = len(lb)
+    c = np.zeros(n)
+    bounds = list(zip(lb, ub))
+
+    result = linprog(c, A_ub=G, b_ub=g, bounds=bounds, method='highs')
+
+    # If infeasible → disjoint
+    return not result.success
+
+
+def _verify_specification_star(star: Star, halfspace: HalfSpace) -> bool:
+    """
+    Check if a Star is disjoint from a halfspace using LP-based intersection.
+
+    Returns:
+        True if disjoint (empty intersection), False if intersection may exist.
+    """
+    G = halfspace.G.astype(np.float64)
+    g = halfspace.g.astype(np.float64)
+
+    S = star.intersect_half_space(G, g)
+
+    if S is None or (isinstance(S, list) and len(S) == 0) or (isinstance(S, Star) and S.is_empty_set()):
+        return True  # empty intersection → disjoint
+    return False

@@ -70,7 +70,7 @@ class ImageStar:
         height: int = 0,
         width: int = 0,
         num_channels: int = 0,
-    ):
+    ) -> None:
         """
         Initialize an ImageStar.
 
@@ -170,6 +170,7 @@ class ImageStar:
         self.state_ub = None
 
     def __repr__(self) -> str:
+        """Return string representation of the ImageStar."""
         return (
             f"ImageStar(height={self.height}, width={self.width}, "
             f"channels={self.num_channels}, nVar={self.nVar})"
@@ -278,21 +279,33 @@ class ImageStar:
         if ub_flat.shape[0] != dim:
             raise ValueError(f"ub has {ub_flat.shape[0]} elements but expected {dim}")
 
-        # Center and generators
+        # Center and generators (only for dimensions with nonzero range)
         center = 0.5 * (lb_flat + ub_flat)
-        generators = 0.5 * np.diag(ub_flat - lb_flat)
+        ranges = ub_flat - lb_flat
+        nonzero_mask = ranges != 0
+        nVar = int(nonzero_mask.sum())
 
-        # Build V matrix (center as first column, generators as remaining columns)
-        V_2d = np.hstack([center.reshape(-1, 1), generators])
+        if nVar == 0:
+            # Point input — no predicates
+            V_2d = center.reshape(-1, 1)
+            C = np.zeros((0, 0))
+            d = np.zeros((0, 1))
+            pred_lb = np.zeros((0, 1))
+            pred_ub = np.zeros((0, 1))
+        else:
+            # Build generator columns only for perturbed dimensions
+            generators = np.zeros((dim, nVar))
+            nonzero_idx = np.where(nonzero_mask)[0]
+            for j, idx in enumerate(nonzero_idx):
+                generators[idx, j] = 0.5 * ranges[idx]
 
-        # Constraints: each predicate variable in [-1, 1]
-        nVar = dim
-        C = np.vstack([np.eye(nVar), -np.eye(nVar)])
-        d = np.ones((2 * nVar, 1))
+            V_2d = np.hstack([center.reshape(-1, 1), generators])
 
-        # Predicate bounds
-        pred_lb = -np.ones((nVar, 1))
-        pred_ub = np.ones((nVar, 1))
+            # Constraints: each predicate variable in [-1, 1]
+            C = np.vstack([np.eye(nVar), -np.eye(nVar)])
+            d = np.ones((2 * nVar, 1))
+            pred_lb = -np.ones((nVar, 1))
+            pred_ub = np.ones((nVar, 1))
 
         return cls(V_2d, C, d, pred_lb, pred_ub, height, width, num_channels)
 
@@ -422,6 +435,7 @@ class ImageStar:
         ub = np.zeros((self.dim, 1))
 
         def compute_range(i):
+            """Compute range for flat index i, returning (i, (lb, ub))."""
             try:
                 return i, self.get_range_flat(i, lp_solver)
             except Exception:

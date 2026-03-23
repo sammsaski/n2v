@@ -60,8 +60,8 @@ python verify_acasxu.py onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnl
 | box | approx | Fastest | Basic |
 | zono | approx | Fast | Good |
 | star | exact, approx | Moderate | High |
-| hexatope | exact, exact-differentiable, approx | Slow | Very High |
-| octatope | exact, exact-differentiable, approx | Slow | Very High |
+| hexatope | approx | Slow | Very High |
+| octatope | approx | Slow | Very High |
 
 ### VNN-COMP Benchmarking
 

@@ -24,7 +24,8 @@ import numpy as np
 import n2v
 from n2v.nn import NeuralNetwork
 from n2v.sets import Star
-from n2v.utils import load_vnnlib, verify_specification, falsify
+from n2v.utils import load_vnnlib, falsify
+from n2v.utils.verify_specification import verify_specification
 from n2v.utils.model_loader import load_onnx
 
 

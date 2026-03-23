@@ -55,7 +55,7 @@ class TestOctatope:
 
     def test_get_bounds(self, simple_octatope):
         """Test bounds computation."""
-        lb, ub = simple_octatope.get_bounds()
+        lb, ub = simple_octatope.get_bounds(solver='lp')
 
         assert lb.shape == (simple_octatope.dim, 1)
         assert ub.shape == (simple_octatope.dim, 1)
@@ -148,7 +148,7 @@ class TestOctatope:
 
     def test_octatope_to_box_conversion(self, simple_octatope):
         """Test conversion to Box."""
-        box = simple_octatope.get_box(use_mcf=False)
+        box = simple_octatope.get_box(solver='lp')
 
         assert box.dim == simple_octatope.dim
         assert np.all(box.lb <= box.ub)
@@ -171,7 +171,7 @@ class TestOctatope:
         ub = np.array([[1.0], [2.0]])
         octatope = Octatope.from_bounds(lb, ub)
 
-        lb_computed, ub_computed = octatope.get_bounds()
+        lb_computed, ub_computed = octatope.get_bounds(solver='lp')
 
         assert np.allclose(lb_computed, lb, atol=1e-6)
         assert np.allclose(ub_computed, ub, atol=1e-6)
@@ -186,7 +186,7 @@ class TestOctatope:
         W = np.eye(2) * 2
         octatope_transformed = octatope.affine_map(W)
 
-        lb_computed, ub_computed = octatope_transformed.get_bounds()
+        lb_computed, ub_computed = octatope_transformed.get_bounds(solver='lp')
 
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[2.0], [2.0]])
@@ -205,7 +205,7 @@ class TestOctatope:
                       [0.0, 1.0, 1.0]])
         octatope_projected = octatope.affine_map(W)
 
-        lb_computed, ub_computed = octatope_projected.get_bounds()
+        lb_computed, ub_computed = octatope_projected.get_bounds(solver='lp')
 
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[1.0], [2.0]])
@@ -224,7 +224,7 @@ class TestOctatope:
                       [0.0, 1.0, 0.5]])
         octatope_transformed = octatope.affine_map(W)
 
-        lb_exact, ub_exact = octatope_transformed.get_bounds()
+        lb_exact, ub_exact = octatope_transformed.get_bounds(solver='lp')
         lb_estimate, ub_estimate = octatope_transformed.estimate_ranges()
 
         # Exact should be contained in estimate
@@ -239,8 +239,8 @@ class TestOctatope:
         hexatope = Hexatope.from_bounds(lb, ub)
         octatope = Octatope.from_bounds(lb, ub)
 
-        lb_hex, ub_hex = hexatope.get_bounds()
-        lb_oct, ub_oct = octatope.get_bounds()
+        lb_hex, ub_hex = hexatope.get_bounds(solver='lp')
+        lb_oct, ub_oct = octatope.get_bounds(solver='lp')
 
         assert np.allclose(lb_hex, lb_oct, atol=1e-6)
         assert np.allclose(ub_hex, ub_oct, atol=1e-6)
@@ -383,7 +383,7 @@ class TestOctatope:
         assert octatope.dim == 1
         assert octatope.nVar == 1
 
-        computed_lb, computed_ub = octatope.get_bounds()
+        computed_lb, computed_ub = octatope.get_bounds(solver='lp')
         np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
         np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
 
@@ -433,7 +433,7 @@ class TestOctatope:
 
         # Star should represent similar region
         star_lb, star_ub = star.get_ranges()
-        oct_lb, oct_ub = octatope.get_bounds()
+        oct_lb, oct_ub = octatope.get_bounds(solver='lp')
 
         # Bounds should be close (Star may be looser)
         np.testing.assert_allclose(star_lb, oct_lb, atol=1e-3)
@@ -450,7 +450,7 @@ class TestOctatope:
         octatope = Octatope.from_bounds(lb, ub)
 
         # Should handle large values
-        computed_lb, computed_ub = octatope.get_bounds()
+        computed_lb, computed_ub = octatope.get_bounds(solver='lp')
         assert np.all(computed_lb >= lb - 1e-3)
         assert np.all(computed_ub <= ub + 1e-3)
 
@@ -461,7 +461,7 @@ class TestOctatope:
         octatope = Octatope.from_bounds(lb, ub)
 
         # Should handle small values
-        computed_lb, computed_ub = octatope.get_bounds()
+        computed_lb, computed_ub = octatope.get_bounds(solver='lp')
         assert np.all(computed_lb >= -1e-5)
         assert np.all(computed_ub <= ub + 1e-5)
 
@@ -471,7 +471,7 @@ class TestOctatope:
         ub = np.array([[-1.0], [0.0]])
         octatope = Octatope.from_bounds(lb, ub)
 
-        computed_lb, computed_ub = octatope.get_bounds()
+        computed_lb, computed_ub = octatope.get_bounds(solver='lp')
         np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
         np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
 
@@ -481,8 +481,8 @@ class TestOctatope:
         ub = np.array([[1.0], [2.0], [3.0]])
         octatope = Octatope.from_bounds(lb, ub)
 
-        bounds_mcf = octatope.get_bounds(use_mcf=True)
-        bounds_lp = octatope.get_bounds(use_mcf=False)
+        bounds_mcf = octatope.get_bounds(solver='mcf')
+        bounds_lp = octatope.get_bounds(solver='lp')
 
         np.testing.assert_allclose(bounds_mcf[0], bounds_lp[0], atol=1e-5)
         np.testing.assert_allclose(bounds_mcf[1], bounds_lp[1], atol=1e-5)
@@ -699,7 +699,7 @@ class TestOctatope:
         assert oct_result.contains(np.array([1.4, 0.9]))
 
         # Verify optimization respects constraints
-        lb_result, ub_result = oct_result.get_ranges(use_mcf=False)
+        lb_result, ub_result = oct_result.get_ranges(solver='lp')
 
         # Check tightening occurred
         assert ub_result[0] <= 2.0
@@ -731,7 +731,7 @@ class TestOctatope:
         assert result.contains(np.array([0.2, 0.2]))
 
         # Verify bounds are tightened
-        lb_result, ub_result = result.get_ranges(use_mcf=False)
+        lb_result, ub_result = result.get_ranges(solver='lp')
         assert ub_result[0] <= 1.0  # Should be tightened
         assert ub_result[1] <= 1.0  # Should be tightened
 
@@ -757,5 +757,117 @@ class TestOctatope:
         # Point (0.5, 0.5) should be inside (sum = 1.0 < 1.2, x1 = 0.5 < 0.8)
         assert result.contains(np.array([0.5, 0.5]))
 
-        lb_result, ub_result = result.get_ranges(use_mcf=False)
+        lb_result, ub_result = result.get_ranges(solver='lp')
+
+
+class TestUTVPIBoundingBoxCorrectness:
+    """Test that optimized _utvpi_bounding_box matches expected behavior."""
+
+    def test_bounding_box_3d_non_utvpi_constraint(self):
+        """Test bounding box with a non-UTVPI constraint in 3D."""
+        lb = np.array([[0.0], [0.0], [0.0]])
+        ub = np.array([[1.0], [1.0], [1.0]])
+        o = Octatope.from_bounds(lb, ub)
+
+        # Non-UTVPI constraint: x0 + x1 + x2 <= 1.5
+        H = np.array([[1.0, 1.0, 1.0]])
+        g = np.array([[1.5]])
+        o_int = o.intersect_half_space(H, g)
+
+        # Verify ranges are tighter than original
+        lb_int, ub_int = o_int.get_ranges(solver='lp')
+        lb_orig, ub_orig = o.get_ranges(solver='lp')
+
+        assert np.all(lb_int >= lb_orig - 1e-6)
+        assert np.all(ub_int <= ub_orig + 1e-6)
+
+    def test_bounding_box_preserves_single_variable_bounds(self):
+        """Test that single-variable bounds are correctly computed."""
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[2.0], [2.0]])
+        o = Octatope.from_bounds(lb, ub)
+
+        # Non-UTVPI constraint: x0 + x1 <= 1.0
+        # This should tighten the upper bounds on both variables
+        H = np.array([[1.0, 1.0]])
+        g = np.array([[1.0]])
+        o_int = o.intersect_half_space(H, g)
+
+        lb_int, ub_int = o_int.get_ranges(solver='lp')
+
+        # Each variable should still have lb >= 0
+        assert np.all(lb_int >= -1e-6)
+        # Each variable should have ub <= 1.0 (since x0+x1<=1 and both >= 0)
+        assert ub_int[0, 0] <= 1.0 + 1e-6
+        assert ub_int[1, 0] <= 1.0 + 1e-6
+
+    def test_bounding_box_two_variable_bounds(self):
+        """Test that two-variable (cross) bounds are correctly computed."""
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        o = Octatope.from_bounds(lb, ub)
+
+        # Non-UTVPI constraint: 2*x0 + x1 <= 1.0
+        H = np.array([[2.0, 1.0]])
+        g = np.array([[1.0]])
+        o_int = o.intersect_half_space(H, g)
+
+        # Point (0.1, 0.1) should be inside (2*0.1 + 0.1 = 0.3 <= 1.0)
+        assert o_int.contains(np.array([0.1, 0.1]))
+
+        # Point (0.5, 0.5) should be outside (2*0.5 + 0.5 = 1.5 > 1.0)
+        # But since we over-approximate, it might still be in the octatope
+        # Just verify the bounds are tightened
+        lb_int, ub_int = o_int.get_ranges(solver='lp')
+        assert ub_int[0, 0] <= 0.5 + 1e-6  # x0 <= 0.5 since 2*x0 <= 1
+
+    def test_bounding_box_soundness_with_samples(self):
+        """Test that the bounding box is sound: all feasible points are contained."""
+        lb = np.array([[0.0], [0.0], [0.0]])
+        ub = np.array([[1.0], [1.0], [1.0]])
+        o = Octatope.from_bounds(lb, ub)
+
+        # Non-UTVPI constraint: x0 + x1 + x2 <= 1.5
+        H = np.array([[1.0, 1.0, 1.0]])
+        g = np.array([[1.5]])
+        o_int = o.intersect_half_space(H, g)
+
+        # Sample points from original box that satisfy the constraint
+        rng = np.random.default_rng(42)
+        for _ in range(100):
+            point = rng.uniform(0, 1, size=3)
+            if np.sum(point) <= 1.5:
+                # This point is feasible, so it must be in the octatope
+                assert o_int.contains(point), \
+                    f"Feasible point {point} not contained (sum={np.sum(point)})"
+
+
+class TestOctatopeSample:
+    """Test Octatope.sample() method."""
+
+    def test_sample_returns_correct_shape(self):
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        o = Octatope.from_bounds(lb, ub)
+        samples = o.sample(10)
+        assert samples.shape == (10, 2)
+
+    def test_samples_are_contained(self):
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        o = Octatope.from_bounds(lb, ub)
+        samples = o.sample(50)
+        for i in range(50):
+            assert o.contains(samples[i]), f"Sample {i} not contained: {samples[i]}"
+
+    def test_sample_after_affine_map(self):
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        o = Octatope.from_bounds(lb, ub)
+        W = np.array([[1.0, 1.0], [1.0, -1.0]])
+        b = np.array([0.0, 0.0])
+        o2 = o.affine_map(W, b)
+        samples = o2.sample(50)
+        for i in range(50):
+            assert o2.contains(samples[i]), f"Sample {i} not contained after affine map"
 

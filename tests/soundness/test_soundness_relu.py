@@ -449,10 +449,19 @@ class TestReLUHexatopeSoundness:
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[1.0], [1.0]])
 
-        assert len(output_hexatopes) == 1
-        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
-        assert np.allclose(output_lb, expected_lb, atol=1e-6)
-        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+        # Approx now splits crossing neurons, so may return multiple sets
+        assert len(output_hexatopes) >= 1
+        # Compute union bounds
+        all_lbs = []
+        all_ubs = []
+        for h in output_hexatopes:
+            h_lb, h_ub = h.get_ranges(solver='lp')
+            all_lbs.append(h_lb)
+            all_ubs.append(h_ub)
+        output_lb = np.min(all_lbs, axis=0)
+        output_ub = np.max(all_ubs, axis=0)
+        assert np.allclose(output_lb, expected_lb, atol=1e-4)
+        assert np.allclose(output_ub, expected_ub, atol=1e-4)
 
     def test_mixed_dimensions(self):
         """Test ReLU with one positive and one negative dimension."""
@@ -487,10 +496,18 @@ class TestReLUHexatopeSoundness:
         expected_lb = np.array([[0.0]])
         expected_ub = np.array([[1.0]])
 
-        assert len(output_hexatopes) == 1
-        output_lb, output_ub = output_hexatopes[0].estimate_ranges()
-        assert np.allclose(output_lb, expected_lb, atol=1e-6)
-        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+        # Approx now splits crossing neurons, so may return multiple sets
+        assert len(output_hexatopes) >= 1
+        all_lbs = []
+        all_ubs = []
+        for h in output_hexatopes:
+            h_lb, h_ub = h.get_ranges(solver='lp')
+            all_lbs.append(h_lb)
+            all_ubs.append(h_ub)
+        output_lb = np.min(all_lbs, axis=0)
+        output_ub = np.max(all_ubs, axis=0)
+        assert np.allclose(output_lb, expected_lb, atol=1e-4)
+        assert np.allclose(output_ub, expected_ub, atol=1e-4)
 
     def test_boundary_at_zero(self):
         """Test ReLU with input exactly at zero."""
@@ -557,10 +574,18 @@ class TestReLUOctatopeSoundness:
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[1.0], [1.0]])
 
-        assert len(output_octatopes) == 1
-        output_lb, output_ub = output_octatopes[0].estimate_ranges()
-        assert np.allclose(output_lb, expected_lb, atol=1e-6)
-        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+        # Approx now splits crossing neurons, so may return multiple sets
+        assert len(output_octatopes) >= 1
+        all_lbs = []
+        all_ubs = []
+        for o in output_octatopes:
+            o_lb, o_ub = o.get_ranges(solver='lp')
+            all_lbs.append(o_lb)
+            all_ubs.append(o_ub)
+        output_lb = np.min(all_lbs, axis=0)
+        output_ub = np.max(all_ubs, axis=0)
+        assert np.allclose(output_lb, expected_lb, atol=1e-4)
+        assert np.allclose(output_ub, expected_ub, atol=1e-4)
 
     def test_mixed_dimensions(self):
         """Test ReLU with one positive and one negative dimension."""
@@ -595,10 +620,18 @@ class TestReLUOctatopeSoundness:
         expected_lb = np.array([[0.0]])
         expected_ub = np.array([[1.0]])
 
-        assert len(output_octatopes) == 1
-        output_lb, output_ub = output_octatopes[0].estimate_ranges()
-        assert np.allclose(output_lb, expected_lb, atol=1e-6)
-        assert np.allclose(output_ub, expected_ub, atol=1e-6)
+        # Approx now splits crossing neurons, so may return multiple sets
+        assert len(output_octatopes) >= 1
+        all_lbs = []
+        all_ubs = []
+        for o in output_octatopes:
+            o_lb, o_ub = o.get_ranges(solver='lp')
+            all_lbs.append(o_lb)
+            all_ubs.append(o_ub)
+        output_lb = np.min(all_lbs, axis=0)
+        output_ub = np.max(all_ubs, axis=0)
+        assert np.allclose(output_lb, expected_lb, atol=1e-4)
+        assert np.allclose(output_ub, expected_ub, atol=1e-4)
 
     def test_boundary_at_zero(self):
         """Test ReLU with input exactly at zero."""

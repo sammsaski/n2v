@@ -6,12 +6,16 @@ Translated from MATLAB NNV MaxPooling2DLayer.m
 Supports both ImageStar (4D V) and Star (2D V) inputs with optimized paths for each.
 """
 
+import logging
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Tuple, Optional
 from n2v.sets import Star, ImageStar, ImageZono, Hexatope, Octatope
+
+logger = logging.getLogger(__name__)
 
 
 def maxpool2d_star(
@@ -139,7 +143,7 @@ def _maxpool2d_star_exact_single(
 
     # Report splits
     if verbose and len(split_positions) > 0:
-        print(f'There are splits at {len(split_positions)} local regions')
+        logger.debug(f'There are splits at {len(split_positions)} local regions')
 
     # Perform splitting for uncertain positions
     for pos in split_positions:
@@ -155,7 +159,7 @@ def _maxpool2d_star_exact_single(
             new_stars.extend(split_stars)
 
         if verbose:
-            print(f'Split {len(output_stars)} images into {len(new_stars)} images')
+            logger.debug(f'Split {len(output_stars)} images into {len(new_stars)} images')
 
         output_stars = new_stars
 
@@ -253,7 +257,7 @@ def _maxpool2d_star_approx_single(
                     new_pred_count += 1
 
     if verbose and new_pred_count > 0:
-        print(f'{new_pred_count} new variables are introduced')
+        logger.debug(f'{new_pred_count} new variables are introduced')
 
     # Build new basis matrix with additional predicates
     n_pred_new = n_pred_orig + new_pred_count

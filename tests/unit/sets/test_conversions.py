@@ -237,7 +237,7 @@ class TestToStarConversion:
         star = hexatope.to_star()
 
         # Compute bounds on both
-        hex_lb, hex_ub = hexatope.get_bounds()
+        hex_lb, hex_ub = hexatope.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
 
         # Star bounds should match Hexatope bounds (within tolerance)
@@ -253,7 +253,7 @@ class TestToStarConversion:
         star = octatope.to_star()
 
         # Compute bounds on both
-        oct_lb, oct_ub = octatope.get_bounds()
+        oct_lb, oct_ub = octatope.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
 
         # Star bounds should match Octatope bounds (within tolerance)
@@ -319,7 +319,7 @@ class TestToStarConversion:
         assert star.C.shape[0] == n_dcs_constraints
 
         # Verify the bounds are correct (most important check)
-        hex_lb, hex_ub = hexatope.get_bounds()
+        hex_lb, hex_ub = hexatope.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
         np.testing.assert_allclose(star_lb, hex_lb, atol=1e-5)
         np.testing.assert_allclose(star_ub, hex_ub, atol=1e-5)
@@ -339,7 +339,7 @@ class TestToStarConversion:
         assert star.C.shape[0] == n_utvpi_constraints
 
         # Verify the bounds are correct (most important check)
-        oct_lb, oct_ub = octatope.get_bounds()
+        oct_lb, oct_ub = octatope.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
         np.testing.assert_allclose(star_lb, oct_lb, atol=1e-5)
         np.testing.assert_allclose(star_ub, oct_ub, atol=1e-5)
@@ -358,7 +358,7 @@ class TestToStarConversion:
         star = hexatope_transformed.to_star()
 
         # Check that bounds are preserved
-        hex_lb, hex_ub = hexatope_transformed.get_bounds()
+        hex_lb, hex_ub = hexatope_transformed.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
 
         np.testing.assert_allclose(star_lb, hex_lb, atol=1e-5)
@@ -378,7 +378,7 @@ class TestToStarConversion:
         star = octatope_transformed.to_star()
 
         # Check that bounds are preserved
-        oct_lb, oct_ub = octatope_transformed.get_bounds()
+        oct_lb, oct_ub = octatope_transformed.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
 
         np.testing.assert_allclose(star_lb, oct_lb, atol=1e-5)
@@ -424,7 +424,7 @@ class TestToStarConversion:
         pytest.assert_star_valid(star)
 
         # Verify the bounds are correct (most important check)
-        hex_lb, hex_ub = hexatope_constrained.get_bounds()
+        hex_lb, hex_ub = hexatope_constrained.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
         np.testing.assert_allclose(star_lb, hex_lb, atol=1e-5)
         np.testing.assert_allclose(star_ub, hex_ub, atol=1e-5)

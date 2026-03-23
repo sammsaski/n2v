@@ -57,7 +57,7 @@ class TestHexatope:
 
     def test_get_bounds(self, simple_hexatope):
         """Test bounds computation."""
-        lb, ub = simple_hexatope.get_bounds()
+        lb, ub = simple_hexatope.get_bounds(solver='lp')
 
         assert lb.shape == (simple_hexatope.dim, 1)
         assert ub.shape == (simple_hexatope.dim, 1)
@@ -150,7 +150,7 @@ class TestHexatope:
 
     def test_hexatope_to_box_conversion(self, simple_hexatope):
         """Test conversion to Box."""
-        box = simple_hexatope.get_box(use_mcf=False)
+        box = simple_hexatope.get_box(solver='lp')
 
         assert box.dim == simple_hexatope.dim
         assert np.all(box.lb <= box.ub)
@@ -163,7 +163,7 @@ class TestHexatope:
         ub = np.array([[1.0], [2.0]])
         hexatope = Hexatope.from_bounds(lb, ub)
 
-        lb_computed, ub_computed = hexatope.get_bounds()
+        lb_computed, ub_computed = hexatope.get_bounds(solver='lp')
 
         assert np.allclose(lb_computed, lb, atol=1e-6)
         assert np.allclose(ub_computed, ub, atol=1e-6)
@@ -178,7 +178,7 @@ class TestHexatope:
         W = np.eye(2) * 2
         hexatope_transformed = hexatope.affine_map(W)
 
-        lb_computed, ub_computed = hexatope_transformed.get_bounds()
+        lb_computed, ub_computed = hexatope_transformed.get_bounds(solver='lp')
 
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[2.0], [2.0]])
@@ -197,7 +197,7 @@ class TestHexatope:
                       [0.0, 1.0, 1.0]])
         hexatope_projected = hexatope.affine_map(W)
 
-        lb_computed, ub_computed = hexatope_projected.get_bounds()
+        lb_computed, ub_computed = hexatope_projected.get_bounds(solver='lp')
 
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[1.0], [2.0]])
@@ -216,7 +216,7 @@ class TestHexatope:
                       [0.0, 1.0, 0.5]])
         hexatope_transformed = hexatope.affine_map(W)
 
-        lb_exact, ub_exact = hexatope_transformed.get_bounds()
+        lb_exact, ub_exact = hexatope_transformed.get_bounds(solver='lp')
         lb_estimate, ub_estimate = hexatope_transformed.estimate_ranges()
 
         # Exact should be contained in estimate
@@ -329,8 +329,8 @@ class TestHexatope:
         hexatope = Hexatope.from_bounds(lb, ub)
 
         # Get range using both methods
-        lb_mcf, ub_mcf = hexatope.get_range(0, use_mcf=True)
-        lb_lp, ub_lp = hexatope.get_range(0, use_mcf=False)
+        lb_mcf, ub_mcf = hexatope.get_range(0, solver='mcf')
+        lb_lp, ub_lp = hexatope.get_range(0, solver='lp')
 
         # Check both returned valid results
         assert lb_mcf is not None and ub_mcf is not None
@@ -346,8 +346,8 @@ class TestHexatope:
         ub = np.array([[1.0], [2.0], [3.0]])
         hexatope = Hexatope.from_bounds(lb, ub)
 
-        bounds_mcf = hexatope.get_bounds(use_mcf=True)
-        bounds_lp = hexatope.get_bounds(use_mcf=False)
+        bounds_mcf = hexatope.get_bounds(solver='mcf')
+        bounds_lp = hexatope.get_bounds(solver='lp')
 
         np.testing.assert_allclose(bounds_mcf[0], bounds_lp[0], atol=1e-5)
         np.testing.assert_allclose(bounds_mcf[1], bounds_lp[1], atol=1e-5)
@@ -362,8 +362,8 @@ class TestHexatope:
         # Maximize x0 + x1
         objective = np.array([1.0, 1.0])
 
-        result_mcf = hexatope.optimize_linear(objective, maximize=True, use_mcf=True)
-        result_lp = hexatope.optimize_linear(objective, maximize=True, use_mcf=False)
+        result_mcf = hexatope.optimize_linear(objective, maximize=True, solver='mcf')
+        result_lp = hexatope.optimize_linear(objective, maximize=True, solver='lp')
 
         # Check both returned valid results
         assert result_mcf is not None
@@ -386,7 +386,7 @@ class TestHexatope:
         # V1 soundness fix: nVar = dim + 1 (includes anchor)
         assert hexatope.nVar == 2  # 1 anchor + 1 dimension
 
-        computed_lb, computed_ub = hexatope.get_bounds()
+        computed_lb, computed_ub = hexatope.get_bounds(solver='lp')
         np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
         np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
 
@@ -432,7 +432,7 @@ class TestHexatope:
                                         np.array([[1.0], [1.0]]))
 
         with pytest.raises((IndexError, ValueError)):
-            hexatope.get_range(5)
+            hexatope.get_range(5, solver='lp')
 
     def test_intersect_half_space_basic(self):
         """Test half-space intersection."""
@@ -451,7 +451,7 @@ class TestHexatope:
         pytest.assert_hexatope_valid(result)
 
         # Bounds should be constrained
-        result_lb, result_ub = result.get_bounds()
+        result_lb, result_ub = result.get_bounds(solver='lp')
         assert result_ub[0] <= 0.5 + 1e-5
 
     def test_to_star_conversion(self):
@@ -464,7 +464,7 @@ class TestHexatope:
 
         # Star should represent similar region
         star_lb, star_ub = star.get_ranges()
-        hex_lb, hex_ub = hexatope.get_bounds()
+        hex_lb, hex_ub = hexatope.get_bounds(solver='lp')
 
         # Bounds should be close (Star may be looser)
         np.testing.assert_allclose(star_lb, hex_lb, atol=1e-3)
@@ -481,7 +481,7 @@ class TestHexatope:
         hexatope = Hexatope.from_bounds(lb, ub)
 
         # Should handle large values
-        computed_lb, computed_ub = hexatope.get_bounds()
+        computed_lb, computed_ub = hexatope.get_bounds(solver='lp')
         assert np.all(computed_lb >= lb - 1e-3)
         assert np.all(computed_ub <= ub + 1e-3)
 
@@ -492,7 +492,7 @@ class TestHexatope:
         hexatope = Hexatope.from_bounds(lb, ub)
 
         # Should handle small values
-        computed_lb, computed_ub = hexatope.get_bounds()
+        computed_lb, computed_ub = hexatope.get_bounds(solver='lp')
         assert np.all(computed_lb >= -1e-5)
         assert np.all(computed_ub <= ub + 1e-5)
 
@@ -502,7 +502,7 @@ class TestHexatope:
         ub = np.array([[-1.0], [0.0]])
         hexatope = Hexatope.from_bounds(lb, ub)
 
-        computed_lb, computed_ub = hexatope.get_bounds()
+        computed_lb, computed_ub = hexatope.get_bounds(solver='lp')
         np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
         np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
 
@@ -579,7 +579,7 @@ class TestHexatope:
             f"Expected center {expected_center}, got {H2.center}"
 
         # Verify the transformed box has correct bounds [1, 3]
-        min_val, max_val = H2.get_range(0, use_mcf=False)
+        min_val, max_val = H2.get_range(0, solver='lp')
         assert np.isclose(min_val, 1.0, atol=1e-4), \
             f"Expected min=1.0, got {min_val}"
         assert np.isclose(max_val, 3.0, atol=1e-4), \
@@ -768,7 +768,7 @@ class TestHexatope:
         assert hex_result.contains(np.array([1.4, 0.9]))
 
         # Verify optimization respects constraints
-        lb_result, ub_result = hex_result.get_ranges(use_mcf=False)
+        lb_result, ub_result = hex_result.get_ranges(solver='lp')
 
         # Upper bounds should be at most [1.5, 1.0] (with some tolerance for over-approximation)
         # Due to bounding box over-approximation, these may be slightly larger
@@ -811,8 +811,8 @@ class TestHexatope:
         assert result_multi.contains(test_point) == result_seq.contains(test_point)
 
         # Both should give similar bounds (may differ due to over-approximation order)
-        lb_multi, ub_multi = result_multi.get_ranges(use_mcf=False)
-        lb_seq, ub_seq = result_seq.get_ranges(use_mcf=False)
+        lb_multi, ub_multi = result_multi.get_ranges(solver='lp')
+        lb_seq, ub_seq = result_seq.get_ranges(solver='lp')
 
         # Should be similar (within reasonable tolerance for over-approximation)
         # Main thing is that both are tightened from original [2, 2]
@@ -844,8 +844,78 @@ class TestHexatope:
         # Test point (0.8, 0.4) has x1 - x2 = 0.4 > 0.3
         # Due to over-approximation this might still be inside, but optimization should respect it
 
-        lb_result, ub_result = result.get_ranges(use_mcf=False)
+        lb_result, ub_result = result.get_ranges(solver='lp')
 
         # The fact that we get a result without errors indicates the MCF path worked
 
 
+class TestHexatopeSample:
+    """Test Hexatope.sample() method."""
+
+    def test_sample_returns_correct_shape(self):
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        h = Hexatope.from_bounds(lb, ub)
+        samples = h.sample(10)
+        assert samples.shape == (10, 2)
+
+    def test_samples_are_contained(self):
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        h = Hexatope.from_bounds(lb, ub)
+        samples = h.sample(50)
+        for i in range(50):
+            assert h.contains(samples[i]), f"Sample {i} not contained: {samples[i]}"
+
+    def test_sample_after_affine_map(self):
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        h = Hexatope.from_bounds(lb, ub)
+        W = np.array([[1.0, 1.0], [1.0, -1.0]])
+        b = np.array([0.0, 0.0])
+        h2 = h.affine_map(W, b)
+        samples = h2.sample(50)
+        for i in range(50):
+            assert h2.contains(samples[i]), f"Sample {i} not contained after affine map"
+
+
+class TestDCSFeasibilityEdgeCases:
+    """Test DCS feasibility checking with disconnected graphs."""
+
+    def test_negative_cycle_unreachable_from_zero(self):
+        """Negative cycle in component not reachable from node 0."""
+        from n2v.sets.hexatope import DifferenceConstraintSystem
+
+        dcs = DifferenceConstraintSystem(4)
+        # Component 1: node 0 -> node 1 (no cycle)
+        dcs.add_constraint(1, 0, 5.0)
+
+        # Component 2: negative cycle between nodes 2 and 3
+        dcs.add_constraint(2, 3, -1.0)  # x2 - x3 <= -1
+        dcs.add_constraint(3, 2, -1.0)  # x3 - x2 <= -1
+        # Together: x2 - x3 <= -1 AND x3 - x2 <= -1 => 0 <= -2, contradiction
+
+        assert not dcs.is_feasible(), "Should detect negative cycle in disconnected component"
+
+
+class TestMCFDemandBalancing:
+    """Test MCF demand balancing robustness."""
+
+    def test_mcf_matches_lp_on_transformed_hexatope(self):
+        """MCF and LP should agree on a hexatope after affine transformation."""
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[1.0], [1.0]])
+        h = Hexatope.from_bounds(lb, ub)
+
+        # Non-diagonal transform introduces off-diagonal generators
+        W = np.array([[1.0, 0.5], [0.5, 1.0]])
+        b = np.array([0.0, 0.0])
+        h2 = h.affine_map(W, b)
+
+        lb_mcf, ub_mcf = h2.get_ranges(solver='mcf')
+        lb_lp, ub_lp = h2.get_ranges(solver='lp')
+
+        assert np.allclose(lb_mcf, lb_lp, atol=1e-4), \
+            f"MCF lb={lb_mcf.flatten()} vs LP lb={lb_lp.flatten()}"
+        assert np.allclose(ub_mcf, ub_lp, atol=1e-4), \
+            f"MCF ub={ub_mcf.flatten()} vs LP ub={ub_lp.flatten()}"

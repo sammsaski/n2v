@@ -325,7 +325,7 @@ def _fuse_graph_module(gm: 'torch.fx.GraphModule') -> 'torch.fx.GraphModule':
     return gm
 
 
-def _set_module_by_name(model: nn.Module, target: str, new_module: nn.Module):
+def _set_module_by_name(model: nn.Module, target: str, new_module: nn.Module) -> None:
     """
     Set a module in a model by its dotted name path.
 

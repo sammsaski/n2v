@@ -256,6 +256,108 @@ class TestFalsifyCombined:
         assert cex is not None
 
 
+class TestFalsifyMultiGroupProperty:
+    """Tests for multi-group property handling (AND logic across groups).
+
+    VNN-LIB properties can have multiple top-level asserts that are ANDed.
+    A counterexample must satisfy ALL property groups simultaneously.
+    """
+
+    def test_rejects_false_counterexample_when_second_group_not_satisfied(self):
+        """Counterexample satisfying only first property group should not be reported as SAT.
+
+        Reproduces lsnc_relu bug: falsify only checked property[0], ignoring property[1].
+        """
+        # Identity model: output = input
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        # Group 0: x1 >= 0.3 (easy to satisfy in [0,1]^2)
+        hs0 = HalfSpace(np.array([[-1.0, 0.0]]), np.array([[-0.3]]))
+
+        # Group 1: x2 >= 2.0 (impossible in [0,1]^2)
+        hs1 = HalfSpace(np.array([[0.0, -1.0]]), np.array([[-2.0]]))
+
+        prop = [{'Hg': hs0}, {'Hg': hs1}]
+
+        result, cex = falsify(model, lb, ub, prop, method='random', n_samples=500, seed=42)
+
+        # No valid counterexample exists (group 1 is infeasible)
+        assert result == 2, "Should return UNKNOWN — no input satisfies both groups"
+        assert cex is None
+
+    def test_finds_counterexample_when_all_groups_satisfied(self):
+        """Counterexample satisfying all property groups should be reported as SAT."""
+        # Identity model: output = input
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        # Group 0: x1 >= 0.3
+        hs0 = HalfSpace(np.array([[-1.0, 0.0]]), np.array([[-0.3]]))
+
+        # Group 1: x2 >= 0.3
+        hs1 = HalfSpace(np.array([[0.0, -1.0]]), np.array([[-0.3]]))
+
+        prop = [{'Hg': hs0}, {'Hg': hs1}]
+
+        result, cex = falsify(model, lb, ub, prop, method='random', n_samples=500, seed=42)
+
+        assert result == 0, "Should find counterexample satisfying both groups"
+        assert cex is not None
+        inp, out = cex
+        assert inp[0] >= 0.3 and inp[1] >= 0.3, "Counterexample must satisfy both groups"
+
+    def test_pgd_rejects_false_counterexample_multi_group(self):
+        """PGD should also respect multi-group AND logic."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        # Group 0: x1 >= 0.3 (easy to satisfy)
+        hs0 = HalfSpace(np.array([[-1.0, 0.0]]), np.array([[-0.3]]))
+
+        # Group 1: x2 >= 2.0 (impossible)
+        hs1 = HalfSpace(np.array([[0.0, -1.0]]), np.array([[-2.0]]))
+
+        prop = [{'Hg': hs0}, {'Hg': hs1}]
+
+        result, cex = falsify(model, lb, ub, prop, method='pgd',
+                              n_restarts=5, n_steps=20, seed=42)
+
+        assert result == 2, "PGD should return UNKNOWN — no input satisfies both groups"
+        assert cex is None
+
+    def test_multi_group_with_or_within_group(self):
+        """Multi-group where one group has OR of halfspaces (list)."""
+        model = nn.Sequential(nn.Linear(2, 2, bias=False))
+        model[0].weight.data = torch.eye(2)
+
+        lb = np.array([0.0, 0.0])
+        ub = np.array([1.0, 1.0])
+
+        # Group 0: x1 >= 0.8 OR x1 <= 0.2 (OR of two halfspaces)
+        hs0a = HalfSpace(np.array([[-1.0, 0.0]]), np.array([[-0.8]]))
+        hs0b = HalfSpace(np.array([[1.0, 0.0]]), np.array([[0.2]]))
+
+        # Group 1: x2 >= 2.0 (impossible)
+        hs1 = HalfSpace(np.array([[0.0, -1.0]]), np.array([[-2.0]]))
+
+        prop = [{'Hg': [hs0a, hs0b]}, {'Hg': hs1}]
+
+        result, cex = falsify(model, lb, ub, prop, method='random', n_samples=500, seed=42)
+
+        assert result == 2, "Should not find counterexample — group 1 is infeasible"
+        assert cex is None
+
+
 class TestFalsifyValidation:
     """Tests for input validation."""
 

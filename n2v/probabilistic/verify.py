@@ -5,9 +5,9 @@ This module provides the main entry point for probabilistic verification,
 which works with any callable model (PyTorch, TensorFlow, ONNX, APIs, etc.).
 """
 
+import logging
 import numpy as np
-from typing import Callable, Optional, Union
-import warnings
+from typing import Callable, Optional, Tuple, Union
 
 from n2v.sets import Box
 from n2v.sets.probabilistic_box import ProbabilisticBox
@@ -17,6 +17,38 @@ from n2v.probabilistic.surrogates.clipping_block import (
     ClippingBlockSurrogate,
     BatchedClippingBlockSurrogate
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _inverse_transform_bounds(pca: object, lb_reduced: np.ndarray, ub_reduced: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Map reduced-space box bounds to original space using interval arithmetic.
+
+    For the linear mapping y[k] = mean[k] + Σ_j x[j] * A[j,k]:
+        lb[k] = mean[k] + Σ_j min(lb_reduced[j] * A[j,k], ub_reduced[j] * A[j,k])
+        ub[k] = mean[k] + Σ_j max(lb_reduced[j] * A[j,k], ub_reduced[j] * A[j,k])
+
+    Args:
+        pca: Fitted DeflationPCA with components_ (N, n) and mean_ (n,)
+        lb_reduced: Lower bounds in reduced space, shape (N,)
+        ub_reduced: Upper bounds in reduced space, shape (N,)
+
+    Returns:
+        Tuple of (lb_original, ub_original), each of shape (n,)
+    """
+    A = pca.components_  # Shape: (N, n)
+
+    products1 = lb_reduced[:, np.newaxis] * A  # (N, n)
+    products2 = ub_reduced[:, np.newaxis] * A  # (N, n)
+
+    mins = np.minimum(products1, products2)  # (N, n)
+    maxs = np.maximum(products1, products2)  # (N, n)
+
+    lb = pca.mean_ + np.sum(mins, axis=0)
+    ub = pca.mean_ + np.sum(maxs, axis=0)
+
+    return lb, ub
 
 
 def verify(
@@ -156,18 +188,18 @@ def verify(
     input_dim = input_set.dim
 
     if verbose:
-        print(f"Probabilistic Verification")
-        print(f"  Input dimension: {input_dim}")
-        print(f"  Calibration size m: {m}")
-        print(f"  Rank ℓ: {ell}")
-        print(f"  Miscoverage ε: {epsilon}")
-        print(f"  Surrogate: {surrogate}")
+        logger.info("Probabilistic Verification")
+        logger.debug(f"  Input dimension: {input_dim}")
+        logger.info(f"  Calibration size m: {m}")
+        logger.info(f"  Rank ell: {ell}")
+        logger.info(f"  Miscoverage epsilon: {epsilon}")
+        logger.info(f"  Surrogate: {surrogate}")
 
     # =========================================
     # Step 1: Generate training samples
     # =========================================
     if verbose:
-        print(f"\nStep 1: Generating {training_samples} training samples...")
+        logger.info(f"Step 1: Generating {training_samples} training samples...")
 
     training_inputs = _sample_from_box(input_set, training_samples)  # Shape: (t, input_dim)
     training_outputs = _batched_inference(model, training_inputs, batch_size)  # Shape: (t, output_dim)
@@ -175,7 +207,7 @@ def verify(
     output_dim = training_outputs.shape[1]
 
     if verbose:
-        print(f"  Output dimension: {output_dim}")
+        logger.debug(f"  Output dimension: {output_dim}")
 
     # =========================================
     # Step 2: Dimensionality reduction (optional)
@@ -183,7 +215,7 @@ def verify(
     pca = None
     if pca_components is not None and pca_components < output_dim:
         if verbose:
-            print(f"\nStep 2: Reducing dimension {output_dim} -> {pca_components} via PCA...")
+            logger.info(f"Step 2: Reducing dimension {output_dim} -> {pca_components} via PCA...")
 
         # Import DeflationPCA only if needed
         from n2v.probabilistic.dimensionality.deflation_pca import DeflationPCA
@@ -198,7 +230,7 @@ def verify(
     # Step 3: Fit surrogate
     # =========================================
     if verbose:
-        print(f"\nStep 3: Fitting {surrogate} surrogate...")
+        logger.info(f"Step 3: Fitting {surrogate} surrogate...")
 
     if surrogate == 'naive':
         surr = NaiveSurrogate()
@@ -208,18 +240,24 @@ def verify(
     surr.fit(training_outputs_reduced)
     surrogate_lb, surrogate_ub = surr.get_bounds()
 
-    # Compute training errors for normalization
-    training_projections = surr.predict(training_outputs_reduced)
-    training_errors = training_outputs_reduced - training_projections
+    # Compute training errors for normalization.
+    # For clipping block, training outputs are the convex hull vertices,
+    # so predict() returns them unchanged — training errors are zero.
+    # Skip the expensive LP projections in that case.
+    if surrogate == 'clipping_block':
+        training_errors = np.zeros_like(training_outputs_reduced)
+    else:
+        training_projections = surr.predict(training_outputs_reduced)
+        training_errors = training_outputs_reduced - training_projections
 
     if verbose:
-        print(f"  Surrogate bounds computed")
+        logger.debug("  Surrogate bounds computed")
 
     # =========================================
     # Step 4: Generate calibration samples
     # =========================================
     if verbose:
-        print(f"\nStep 4: Generating {m} calibration samples...")
+        logger.info(f"Step 4: Generating {m} calibration samples...")
 
     calibration_inputs = _sample_from_box(input_set, m)  # Shape: (m, input_dim)
     calibration_outputs = _batched_inference(model, calibration_inputs, batch_size)  # Shape: (m, output_dim)
@@ -234,7 +272,7 @@ def verify(
     # Step 5: Compute calibration errors
     # =========================================
     if verbose:
-        print(f"\nStep 5: Computing calibration errors...")
+        logger.info("Step 5: Computing calibration errors...")
 
     calibration_projections = surr.predict(calibration_outputs_reduced)
     calibration_errors = calibration_outputs_reduced - calibration_projections
@@ -243,7 +281,7 @@ def verify(
     # Step 6: Conformal inference
     # =========================================
     if verbose:
-        print(f"\nStep 6: Running conformal inference...")
+        logger.info("Step 6: Running conformal inference...")
 
     guarantee = conformal_inference(
         training_errors=training_errors,
@@ -254,39 +292,23 @@ def verify(
     )
 
     if verbose:
-        print(f"  Coverage δ₁: {guarantee.coverage:.4f}")
-        print(f"  Confidence δ₂: {guarantee.confidence:.4f}")
-        print(f"  Threshold R_ℓ: {guarantee.threshold:.4f}")
+        logger.info(f"  Coverage: {guarantee.coverage:.4f}")
+        logger.info(f"  Confidence: {guarantee.confidence:.4f}")
+        logger.info(f"  Threshold R_ell: {guarantee.threshold:.4f}")
 
     # =========================================
     # Step 7: Compute final bounds
     # =========================================
     if verbose:
-        print(f"\nStep 7: Computing final bounds...")
+        logger.info("Step 7: Computing final bounds...")
 
     final_lb_reduced = surrogate_lb - guarantee.inflation
     final_ub_reduced = surrogate_ub + guarantee.inflation
 
     # Transform back to full dimension if PCA was used
     if pca is not None:
-        # For bounds, we need to be careful. The simple approach:
-        # transform the corner points and take element-wise min/max
-        # This is conservative but sound.
-        transformed_lb = pca.inverse_transform(final_lb_reduced.reshape(1, -1)).flatten()
-        transformed_ub = pca.inverse_transform(final_ub_reduced.reshape(1, -1)).flatten()
-
-        # PCA inverse transform doesn't preserve lb < ub ordering because
-        # components can have negative values. Take element-wise min/max
-        # to ensure proper bound ordering.
-        final_lb = np.minimum(transformed_lb, transformed_ub)
-        final_ub = np.maximum(transformed_lb, transformed_ub)
-
-        # The above is an approximation - the true bounds in original space
-        # would require transforming all corner points of the reduced box.
-        # This simple approach may be conservative.
-        warnings.warn(
-            "PCA inverse transform for bounds is approximate. "
-            "Consider verifying without PCA for exact bounds."
+        final_lb, final_ub = _inverse_transform_bounds(
+            pca, final_lb_reduced, final_ub_reduced
         )
     else:
         final_lb = final_lb_reduced
@@ -304,8 +326,8 @@ def verify(
     )
 
     if verbose:
-        print(f"\nResult: {result}")
-        print(result.get_guarantee_string())
+        logger.info(f"Result: {result}")
+        logger.info(result.get_guarantee_string())
 
     return result
 

@@ -30,13 +30,13 @@ def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
 
 # --- Sigmoid math helpers ---
 
-def _sigmoid(x):
+def _sigmoid(x: np.ndarray) -> np.ndarray:
     """Numerically stable sigmoid."""
     return np.where(x >= 0,
                     1.0 / (1.0 + np.exp(-x)),
                     np.exp(x) / (1.0 + np.exp(x)))
 
-def _sigmoid_deriv(x):
+def _sigmoid_deriv(x: np.ndarray) -> np.ndarray:
     """Sigmoid derivative: sigma(x) * (1 - sigma(x))."""
     s = _sigmoid(x)
     return s * (1.0 - s)
@@ -75,8 +75,16 @@ def sigmoid_star_approx(
 # --- Zono approx ---
 
 def sigmoid_zono_approx(input_zonos: List[Zono]) -> List[Zono]:
-    """Approximate Sigmoid for Zonotopes using interval over-approximation."""
-    return [_s_curve_single_zono(z, _sigmoid) for z in input_zonos]
+    """Approximate Sigmoid for Zonotopes, preserving ImageZono type."""
+    from n2v.sets.image_zono import ImageZono
+
+    output = []
+    for z in input_zonos:
+        result = _s_curve_single_zono(z, _sigmoid)
+        if isinstance(z, ImageZono) and not isinstance(result, ImageZono):
+            result = ImageZono(result.c, result.V, z.height, z.width, z.num_channels)
+        output.append(result)
+    return output
 
 
 # --- Box ---

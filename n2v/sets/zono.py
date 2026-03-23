@@ -82,6 +82,7 @@ class Zono:
             raise ValueError("Must provide both c and V, or neither")
 
     def __repr__(self) -> str:
+        """Return string representation of the Zonotope."""
         return f"Zono(dim={self.dim}, n_generators={self.V.shape[1] if self.V.size > 0 else 0})"
 
     @classmethod

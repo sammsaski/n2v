@@ -23,7 +23,8 @@ from pathlib import Path
 import n2v
 from n2v.sets import Star, Zono, Box, Hexatope, Octatope
 from n2v.nn import NeuralNetwork
-from n2v.utils import load_vnnlib, verify_specification
+from n2v.utils import load_vnnlib
+from n2v.utils.verify_specification import verify_specification
 from n2v.utils.model_loader import load_onnx
 
 
@@ -68,7 +69,7 @@ def get_supported_methods(set_type: str):
     elif set_type in ['box', 'zono']:
         return ['approx']
     elif set_type in ['hexatope', 'octatope']:
-        return ['exact', 'exact-differentiable', 'approx']
+        return ['approx']
     else:
         raise ValueError(f"Unknown set type: {set_type}")
 
@@ -89,7 +90,7 @@ def verify_acasxu_property(network_file: str, property_file: str,
         reach_method: Reachability method:
             - For Star: 'exact' or 'approx'
             - For Box/Zono: 'approx'
-            - For Hexatope/Octatope: 'exact', 'exact-differentiable', or 'approx'
+            - For Hexatope/Octatope: 'approx'
         timeout: Timeout in seconds
         use_parallel: Enable parallel processing (Star only)
         n_workers: Number of parallel workers (None = use default of 4)
@@ -270,15 +271,12 @@ Set Types and Supported Methods:
   - box:      Fast interval arithmetic [Methods: approx]
   - zono:     Zonotope representation [Methods: approx]
   - star:     Star set representation [Methods: exact, approx]
-  - hexatope: Hexatope with DCS [Methods: exact, exact-differentiable, approx]
-  - octatope: Octatope with UTVPI [Methods: exact, exact-differentiable, approx]
+  - hexatope: Hexatope with DCS [Methods: approx]
+  - octatope: Octatope with UTVPI [Methods: approx]
 
 Examples:
   # Use Star sets with exact method
   %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --set star --method exact
-
-  # Use Hexatope with differentiable LP solver
-  %(prog)s onnx/ACASXU_run2a_1_4_batch_2000.onnx vnnlib/prop_3.vnnlib --set hexatope --method exact-differentiable
 
   # Use Box for fast approximate verification
   %(prog)s onnx/ACASXU_run2a_1_5_batch_2000.onnx vnnlib/prop_3.vnnlib --set box --method approx
@@ -299,7 +297,7 @@ Examples:
                         default='star',
                         help='Set representation type (default: star)')
     parser.add_argument('--method', type=str,
-                        choices=['exact', 'exact-differentiable', 'approx'],
+                        choices=['exact', 'approx'],
                         default='exact',
                         help='Reachability method (default: exact). Note: not all methods supported by all set types.')
     parser.add_argument('--timeout', type=float, default=300.0,

@@ -1,4 +1,4 @@
-"""Tests for examples/vnncomp/run_instance.py"""
+"""Tests for examples/VNN-COMP/run_instance.py"""
 
 import sys
 import os
@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'examples', 'vnncomp'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'examples', 'VNN-COMP'))
 
 
 class TestFormatCounterexample:

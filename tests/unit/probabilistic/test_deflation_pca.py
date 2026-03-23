@@ -334,6 +334,48 @@ class TestDeflationPCAParameters:
             assert pca._is_fitted
 
 
+class TestDeflationPCAVarianceThreshold:
+    """Test early stopping when remaining variance is negligible."""
+
+    def test_stops_early_when_variance_exhausted(self):
+        """PCA with low-rank data should extract fewer components than requested."""
+        np.random.seed(42)
+        t, true_rank = 30, 2
+        Z = np.random.randn(t, true_rank) @ np.random.randn(true_rank, 50)
+
+        pca = DeflationPCA(n_components=10, variance_threshold=1e-6)
+        pca.fit(Z)
+
+        assert pca.components_.shape[0] <= true_rank + 1
+        assert pca.n_components_fitted_ <= true_rank + 1
+
+    def test_no_threshold_extracts_all(self):
+        """Without threshold, all requested components are extracted."""
+        np.random.seed(42)
+        t, true_rank = 30, 2
+        Z = np.random.randn(t, true_rank) @ np.random.randn(true_rank, 50)
+
+        pca = DeflationPCA(n_components=10, variance_threshold=None)
+        pca.fit(Z)
+
+        assert pca.components_.shape[0] == 10
+
+    def test_transform_shape_with_early_stop(self):
+        """Transform output shape matches actual fitted components, not requested."""
+        np.random.seed(42)
+        t = 30
+        Z = np.random.randn(t, 2) @ np.random.randn(2, 50)
+
+        pca = DeflationPCA(n_components=10, variance_threshold=1e-6)
+        pca.fit(Z)
+
+        reduced = pca.transform(Z)
+        assert reduced.shape == (t, pca.n_components_fitted_)
+
+        reconstructed = pca.inverse_transform(reduced)
+        assert reconstructed.shape == (t, 50)
+
+
 class TestDeflationPCACompareWithSklearn:
     """Compare with sklearn PCA on small data (where both work)."""
 

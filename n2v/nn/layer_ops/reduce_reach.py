@@ -7,7 +7,7 @@ is exact for all set types — no splitting or approximation needed.
 """
 
 import numpy as np
-from typing import List
+from typing import List, Optional, Union
 
 from n2v.sets import Star, Zono, Box
 from n2v.sets.image_star import ImageStar
@@ -18,7 +18,7 @@ from n2v.sets.image_zono import ImageZono
 # Helpers for extracting layer configuration
 # ---------------------------------------------------------------------------
 
-def _get_axes(layer):
+def _get_axes(layer: object) -> Optional[List[int]]:
     """
     Extract reduction axes from an ONNX reduce layer, removing batch dim.
 
@@ -45,7 +45,7 @@ def _get_axes(layer):
     return axes if axes else None
 
 
-def _get_reduce_op(layer):
+def _get_reduce_op(layer: object) -> str:
     """
     Determine whether the layer performs 'mean' or 'sum'.
 
@@ -62,7 +62,7 @@ def _get_reduce_op(layer):
     return 'sum'
 
 
-def _get_keepdims(layer):
+def _get_keepdims(layer: object) -> bool:
     """
     Return whether the layer keeps reduced dimensions.
 
@@ -110,7 +110,7 @@ def reduce_star(layer, input_sets: List) -> List:
     return output_sets
 
 
-def _reduce_imagestar(star, axes, op, keepdims):
+def _reduce_imagestar(star: ImageStar, axes: Optional[List[int]], op: str, keepdims: bool) -> Union[ImageStar, Star]:
     """
     Apply reduce to an ImageStar.
 
@@ -148,7 +148,7 @@ def _reduce_imagestar(star, axes, op, keepdims):
         return Star(V_flat, star.C, star.d, star.predicate_lb, star.predicate_ub)
 
 
-def _reduce_flat_star(star, axes, op, keepdims):
+def _reduce_flat_star(star: Star, axes: Optional[List[int]], op: str, keepdims: bool) -> Star:
     """
     Apply reduce to a flat Star.
 
@@ -203,7 +203,7 @@ def reduce_zono(layer, input_sets: List) -> List:
     return output_sets
 
 
-def _reduce_imagezono(zono, axes, op, keepdims):
+def _reduce_imagezono(zono: ImageZono, axes: Optional[List[int]], op: str, keepdims: bool) -> Union[ImageZono, Zono]:
     """Apply reduce to an ImageZono."""
     h, w, c = zono.height, zono.width, zono.num_channels
     n_gen = zono.V.shape[1]
@@ -241,7 +241,7 @@ def _reduce_imagezono(zono, axes, op, keepdims):
         return Zono(c_flat, V_flat)
 
 
-def _reduce_flat_zono(zono, axes, op, keepdims):
+def _reduce_flat_zono(zono: Zono, axes: Optional[List[int]], op: str, keepdims: bool) -> Zono:
     """Apply reduce to a flat Zono."""
     dim = zono.dim
 
@@ -289,7 +289,7 @@ def reduce_box(layer, input_sets: List) -> List:
     return output_sets
 
 
-def _reduce_flat_box(box, axes, op, keepdims):
+def _reduce_flat_box(box: Box, axes: Optional[List[int]], op: str, keepdims: bool) -> Box:
     """Apply reduce to a flat Box using interval arithmetic."""
     if axes is None or axes == [0] or (len(axes) == 1 and axes[0] == 0):
         if op == 'mean':

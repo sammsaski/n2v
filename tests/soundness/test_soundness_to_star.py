@@ -59,7 +59,7 @@ class TestHexatopeToStarSoundness:
         hexatope = Hexatope.from_bounds(lb, ub)
         star = hexatope.to_star()
 
-        hex_lb, hex_ub = hexatope.get_bounds()
+        hex_lb, hex_ub = hexatope.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
 
         # Star bounds should contain Hexatope bounds
@@ -199,7 +199,7 @@ class TestOctatopeToStarSoundness:
         octatope = Octatope.from_bounds(lb, ub)
         star = octatope.to_star()
 
-        oct_lb, oct_ub = octatope.get_bounds()
+        oct_lb, oct_ub = octatope.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
 
         # Star bounds should contain Octatope bounds

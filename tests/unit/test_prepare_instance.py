@@ -1,4 +1,4 @@
-"""Tests for examples/vnncomp/prepare_instance.py"""
+"""Tests for examples/VNN-COMP/prepare_instance.py"""
 
 import sys
 import os
@@ -8,8 +8,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-# Add examples/vnncomp to path so we can import prepare_instance
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'examples', 'vnncomp'))
+# Add examples/VNN-COMP to path so we can import prepare_instance
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'examples', 'VNN-COMP'))
 
 
 class TestGetInputShape:

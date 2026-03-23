@@ -217,8 +217,9 @@ class TestDispatcherOptions:
         # Approx should not split
         assert len(approx_result) <= len(exact_result)
 
-    def test_display_option(self, capsys):
-        """Test verbose=True produces output."""
+    def test_display_option(self, caplog):
+        """Test verbose=True produces log output."""
+        import logging
         layer = nn.ReLU()
 
         # Create a star that crosses zero to guarantee splitting (and thus output)
@@ -226,8 +227,8 @@ class TestDispatcherOptions:
         ub = np.array([[1.0], [1.0]])
         star_crossing_zero = Star.from_bounds(lb, ub)
 
-        reach_layer(layer, [star_crossing_zero], method='exact', verbose=True)
+        with caplog.at_level(logging.DEBUG):
+            reach_layer(layer, [star_crossing_zero], method='exact', verbose=True)
 
-        captured = capsys.readouterr()
-        # Should print something about ReLU processing
-        assert len(captured.out) > 0 or len(captured.err) > 0
+        # Should log something about ReLU processing
+        assert len(caplog.records) > 0

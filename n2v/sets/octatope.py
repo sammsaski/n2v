@@ -27,13 +27,6 @@ if TYPE_CHECKING:
     from n2v.sets.box import Box
     from n2v.sets.star import Star
 
-# Optional differentiable solver import
-try:
-    from n2v.utils.lpsolver import solve_dcs_differentiable
-    HAS_DIFFERENTIABLE_SOLVER = True
-except ImportError:
-    HAS_DIFFERENTIABLE_SOLVER = False
-
 # NOTE: Runtime imports of n2v.sets.* modules are kept inline in methods
 # to avoid circular dependencies (octatope <-> hexatope <-> star <-> box)
 
@@ -51,6 +44,12 @@ class UTVPIConstraint:
     b: float  # Bound
 
     def __post_init__(self):
+        """Validate UTVPI coefficient constraints.
+
+        Raises:
+            ValueError: If coefficients are not in {-1, 0, 1}
+                or both are zero.
+        """
         if self.ai not in {-1, 0, 1} or self.aj not in {-1, 0, 1}:
             raise ValueError("UTVPI coefficients must be in {-1, 0, 1}")
         if self.ai == 0 and self.aj == 0:
@@ -66,6 +65,18 @@ class UTVPIConstraintSystem:
     """
 
     def __init__(self, num_vars: int):
+        """Initialize a UTVPI Constraint System.
+
+        Creates an empty UTVPI system over the given number
+        of variables. Constraints of the form
+        a_i*x_i + a_j*x_j <= b (with a_i, a_j in {-1, 0, 1})
+        can be added via add_constraint().
+
+        See Section 4 of [Bak et al., FMSD 2024].
+
+        Args:
+            num_vars: Number of variables in the system.
+        """
         self.num_vars = num_vars
         self.constraints: List[UTVPIConstraint] = []
 
@@ -250,6 +261,7 @@ class Octatope:
         return self.generators.shape[1]
 
     def __repr__(self) -> str:
+        """Return string representation of the Octatope."""
         return (f"Octatope(dim={self.dim}, nVar={self.nVar}, "
                 f"nConstraints={len(self.utvpi.constraints)})")
 
@@ -328,7 +340,7 @@ class Octatope:
 
     # ======================== Bounds Computation ========================
 
-    def get_range(self, index: int, use_mcf: bool = True) -> Tuple[float, float]:
+    def get_range(self, index: int, solver: str) -> Tuple[float, float]:
         """
         Compute exact range at specific dimension
 
@@ -338,7 +350,7 @@ class Octatope:
 
         Args:
             index: Dimension index (0-based)
-            use_mcf: If True, use min-cost flow; else use LP
+            solver: Solver to use: 'lp' or 'mcf'
 
         Returns:
             Tuple of (min, max) values
@@ -351,21 +363,21 @@ class Octatope:
         objective[index] = 1.0
 
         # Minimize and maximize
-        xmin = self.optimize_linear(objective, maximize=False, use_mcf=use_mcf)
-        xmax = self.optimize_linear(objective, maximize=True, use_mcf=use_mcf)
+        xmin = self.optimize_linear(objective, maximize=False, solver=solver)
+        xmax = self.optimize_linear(objective, maximize=True, solver=solver)
 
         if xmin is None or xmax is None:
             return None, None
 
         return xmin, xmax
 
-    def get_ranges(self, use_mcf: bool = True, parallel: bool = False,
+    def get_ranges(self, solver: str, parallel: bool = False,
                    n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute exact ranges for all dimensions
 
         Args:
-            use_mcf: If True, use min-cost flow via DCS; else use direct LP
+            solver: Solver to use: 'lp' or 'mcf'
             parallel: If True, use parallel computation
             n_workers: Number of parallel workers
 
@@ -376,44 +388,49 @@ class Octatope:
         ub = np.zeros((self.dim, 1))
 
         if parallel and self.dim > 1:
-            return self._get_ranges_parallel(use_mcf, n_workers)
+            return self._get_ranges_parallel(solver=solver, n_workers=n_workers)
 
-        # Sequential version - use MCF by default with LP fallback
+        # Sequential version with LP fallback
         for i in range(self.dim):
-            lb_i, ub_i = self.get_range(i, use_mcf=use_mcf)
-            if lb_i is None or ub_i is None:
-                # Try LP fallback if MCF failed
-                if use_mcf:
-                    lb_i, ub_i = self.get_range(i, use_mcf=False)
+            lb_i, ub_i = self.get_range(i, solver=solver)
+            if (lb_i is None or ub_i is None
+                    or not (np.isfinite(lb_i) and np.isfinite(ub_i))
+                    or lb_i > ub_i + 1e-10):
+                # Try LP fallback if solver failed, returned non-finite, or lb > ub
+                if solver != 'lp':
+                    lb_i, ub_i = self.get_range(i, solver='lp')
                 # Final fallback to estimation if both failed
-                if lb_i is None or ub_i is None:
+                if (lb_i is None or ub_i is None
+                        or not (np.isfinite(lb_i) and np.isfinite(ub_i))
+                        or lb_i > ub_i + 1e-10):
                     lb_i, ub_i = self.estimate_range(i)
             lb[i] = lb_i
             ub[i] = ub_i
 
         return lb, ub
 
-    def get_bounds(self, use_mcf: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+    def get_bounds(self, solver: str) -> Tuple[np.ndarray, np.ndarray]:
         """
         Alias for get_ranges() for API consistency with other set types.
 
         Args:
-            use_mcf: If True, use min-cost flow; else use LP
+            solver: Solver to use: 'lp' or 'mcf'
 
         Returns:
             Tuple of (lb, ub) arrays
         """
-        return self.get_ranges(use_mcf=use_mcf)
+        return self.get_ranges(solver=solver)
 
-    def _get_ranges_parallel(self, use_mcf: bool = True,
+    def _get_ranges_parallel(self, solver: str,
                             n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
         """Compute ranges in parallel"""
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
         def compute_range(i):
+            """Compute range for dimension i, returning (i, (lb, ub))."""
             try:
-                return i, self.get_range(i, use_mcf)
+                return i, self.get_range(i, solver=solver)
             except Exception:
                 return i, (None, None)
 
@@ -422,7 +439,8 @@ class Octatope:
 
             for future in futures:
                 i, (lb_i, ub_i) = future.result()
-                if lb_i is not None and ub_i is not None:
+                if (lb_i is not None and ub_i is not None
+                        and np.isfinite(lb_i) and np.isfinite(ub_i)):
                     lb[i] = lb_i
                     ub[i] = ub_i
                 else:
@@ -464,23 +482,23 @@ class Octatope:
 
         return lb, ub
 
-    def get_box(self, use_mcf: bool = True) -> 'Box':
+    def get_box(self, solver: str) -> 'Box':
         """
         Compute exact bounding box
 
         Args:
-            use_mcf: If True, use min-cost flow; else use LP
+            solver: Solver to use: 'lp' or 'mcf'
 
         Returns:
             Box object
         """
         from n2v.sets.box import Box
 
-        lb, ub = self.get_ranges(use_mcf=use_mcf)
+        lb, ub = self.get_ranges(solver=solver)
         return Box(lb, ub)
 
     def optimize_linear(self, objective: np.ndarray, maximize: bool = True,
-                       use_mcf: bool = True, use_differentiable: bool = False) -> Optional[float]:
+                       solver: str = None) -> Optional[float]:
         """
         Optimize linear objective over octatope
 
@@ -493,12 +511,14 @@ class Octatope:
         Args:
             objective: Objective vector f ∈ ℝⁿ
             maximize: If True, maximize; else minimize
-            use_mcf: If True, use min-cost flow via DCS conversion; else use LP
-            use_differentiable: If True, use differentiable solver (MCF or LP)
+            solver: Solver to use: 'lp' or 'mcf'
 
         Returns:
             Optimal value, or None if infeasible
         """
+        if solver not in ('lp', 'mcf'):
+            raise ValueError(f"Unknown solver '{solver}'. Must be 'lp' or 'mcf'.")
+
         objective = np.asarray(objective, dtype=np.float64).flatten()
 
         if objective.shape[0] != self.dim:
@@ -510,15 +530,15 @@ class Octatope:
         constant_term = objective @ self.center  # f^T c
 
         # Now optimize w^T x over UTVPI system
-        if use_mcf:
-            result = self._optimize_utvpi_mcf(composed_obj, constant_term, maximize, use_differentiable)
-        else:
-            result = self._optimize_utvpi_lp(composed_obj, constant_term, maximize, use_differentiable)
+        if solver == 'mcf':
+            result = self._optimize_utvpi_mcf(composed_obj, constant_term, maximize)
+        else:  # solver == 'lp'
+            result = self._optimize_utvpi_lp(composed_obj, constant_term, maximize)
 
         return result
 
     def _optimize_utvpi_mcf(self, w: np.ndarray, constant: float,
-                           maximize: bool, use_differentiable: bool = False) -> Optional[float]:
+                           maximize: bool) -> Optional[float]:
         """
         Optimize linear objective w^T x + constant over UTVPI system via MCF
 
@@ -537,7 +557,6 @@ class Octatope:
             w: Objective coefficients in UTVPI/generator space
             constant: Constant term
             maximize: If True, maximize; else minimize
-            use_differentiable: If True, use differentiable solver
 
         Returns:
             Optimal value, or None if infeasible
@@ -564,10 +583,10 @@ class Octatope:
                            dcs=dcs)
 
         # Step 4: Optimize using hexatope's MCF solver (now with corrected sign handling)
-        return temp_hex._optimize_dcs_mcf(w_expanded, constant, maximize, use_differentiable)
+        return temp_hex._optimize_dcs_mcf(w_expanded, constant, maximize)
 
     def _optimize_utvpi_lp(self, w: np.ndarray, constant: float,
-                          maximize: bool, use_differentiable: bool = False) -> Optional[float]:
+                          maximize: bool) -> Optional[float]:
         """
         Optimize linear objective w^T x + constant over UTVPI system using LP
 
@@ -578,47 +597,8 @@ class Octatope:
             w: Objective coefficients
             constant: Constant term
             maximize: If True, maximize; else minimize
-            use_differentiable: If True, use differentiable Gumbel-Softmax solver
         """
         A, b = self.utvpi.to_matrix_form()
-
-        # Use differentiable DCS solver if requested
-        if use_differentiable:
-            if not HAS_DIFFERENTIABLE_SOLVER:
-                print("Differentiable DCS solver not available, falling back to CVXPY")
-            else:
-                try:
-                    # Convert UTVPI to DCS
-                    dcs = self.utvpi.to_dcs()
-
-                    # Transform objective to DCS variable space
-                    # For each variable x_i, we have x+_i and x-_i where x_i = (1/2)(x+_i - x-_i)
-                    # So objective w^T * x becomes w^T * (1/2)(x+ - x-) = (1/2) * w^T * (x+ - x-)
-                    # This is (1/2) * sum_i w[i] * (x+_i - x-_i) = sum_i (w[i]/2)*x+_i - (w[i]/2)*x-_i
-                    w_dcs = np.zeros(2 * self.utvpi.num_vars)
-                    for i in range(self.utvpi.num_vars):
-                        w_dcs[2*i] = 0.5 * w[i]       # Coefficient for x+_i (scaled by 1/2)
-                        w_dcs[2*i + 1] = -0.5 * w[i]  # Coefficient for x-_i (scaled by 1/2)
-
-                    # Build constraint graph
-                    G = dcs.to_constraint_graph()
-
-                    # Solve using differentiable DCS solver
-                    optimal_value, info = solve_dcs_differentiable(
-                        constraint_graph=G,
-                        objective_coef=w_dcs,
-                        constant_term=constant,
-                        maximize=maximize,
-                        num_epochs=50,
-                        batch_size=16,
-                        verbose=False
-                    )
-
-                    return optimal_value
-                except Exception as e:
-                    # Fall back to standard LP if differentiable solver fails
-                    print(f"Differentiable DCS solver failed: {e}, falling back to CVXPY")
-                    pass
 
         # Standard CVXPY solver
         x = cp.Variable(self.utvpi.num_vars)
@@ -650,7 +630,7 @@ class Octatope:
 
     # ======================== Set Operations ========================
 
-    def intersect_half_space(self, H: np.ndarray, g: np.ndarray) -> 'Octatope':
+    def intersect_half_space(self, H: np.ndarray, g: np.ndarray, solver=None) -> 'Octatope':
         """
         Intersect octatope with half-space: H*x <= g
 
@@ -669,6 +649,7 @@ class Octatope:
         Args:
             H: Half-space matrix (m × n)
             g: Half-space vector (m × 1)
+            solver: Optional solver method (currently unused, reserved for future use).
 
         Returns:
             New Octatope (over-approximation of intersection)
@@ -692,13 +673,14 @@ class Octatope:
             row_bound = constraint_bound[k:k+1, :]  # Keep 2D: (1 × 1)
 
             # Compute bounding box with this constraint
-            current_utvpi = self._utvpi_bounding_box(current_utvpi, row_coef, row_bound)
+            current_utvpi = self._utvpi_bounding_box(current_utvpi, row_coef, row_bound, solver=solver)
 
         return Octatope(self.center, self.generators, current_utvpi)
 
     def _utvpi_bounding_box(self, U: UTVPIConstraintSystem,
                            constraint_coef: np.ndarray,
-                           constraint_bound: np.ndarray) -> UTVPIConstraintSystem:
+                           constraint_bound: np.ndarray,
+                           solver=None) -> UTVPIConstraintSystem:
         """
         Algorithm 5.1: UTVPIBoundingBox
 
@@ -708,6 +690,7 @@ class Octatope:
             U: Original UTVPI system
             constraint_coef: Coefficients of new constraint (should be single row)
             constraint_bound: Bound of new constraint (should be single value)
+            solver: Optional solver method (currently unused, reserved for future use).
 
         Returns:
             New UTVPI system over-approximating the intersection
@@ -754,39 +737,32 @@ class Octatope:
         # This is expensive: O(n²) optimizations
         new_utvpi = U.copy()
 
-        # For all pairs of variables x_i, x_j
+        # Single-variable bounds: +x_i and -x_i for each variable
+        for i in range(U.num_vars):
+            for ai in [1, -1]:
+                obj = np.zeros(U.num_vars)
+                obj[i] = ai
+                u = self._optimize_with_constraint(U, obj, constraint_coef,
+                                                   constraint_bound, maximize=True,
+                                                   use_mcf=True)
+                if u is not None:
+                    new_utvpi.add_constraint(i, i, ai, 0, u)
+
+        # Two-variable bounds: ai*x_i + aj*x_j for all i != j pairs
         for i in range(U.num_vars):
             for j in range(U.num_vars):
                 if i == j:
-                    # Bound for x_i
-                    # Maximize x_i over U ∪ {constraint}
-                    obj = np.zeros(U.num_vars)
-                    obj[i] = 1.0
-                    u_plus = self._optimize_with_constraint(U, obj, constraint_coef,
-                                                            constraint_bound, maximize=True,
-                                                            use_mcf=True)
-                    if u_plus is not None:
-                        new_utvpi.add_constraint(i, i, 1, 0, u_plus)
-
-                    # Maximize -x_i
-                    u_minus = self._optimize_with_constraint(U, -obj, constraint_coef,
-                                                             constraint_bound, maximize=True,
-                                                             use_mcf=True)
-                    if u_minus is not None:
-                        new_utvpi.add_constraint(i, i, -1, 0, u_minus)
-                else:
-                    # Bounds for x_i ± x_j
-                    for ai in [1, -1]:
-                        for aj in [1, -1]:
-                            obj = np.zeros(U.num_vars)
-                            obj[i] = ai
-                            obj[j] = aj
-
-                            u_ij = self._optimize_with_constraint(U, obj, constraint_coef,
-                                                                  constraint_bound, maximize=True,
-                                                                  use_mcf=True)
-                            if u_ij is not None:
-                                new_utvpi.add_constraint(i, j, ai, aj, u_ij)
+                    continue
+                for ai in [1, -1]:
+                    for aj in [1, -1]:
+                        obj = np.zeros(U.num_vars)
+                        obj[i] = ai
+                        obj[j] = aj
+                        u_ij = self._optimize_with_constraint(U, obj, constraint_coef,
+                                                              constraint_bound, maximize=True,
+                                                              use_mcf=True)
+                        if u_ij is not None:
+                            new_utvpi.add_constraint(i, j, ai, aj, u_ij)
 
         return new_utvpi
 
@@ -874,7 +850,7 @@ class Octatope:
                 temp_hex = Hexatope(temp_center, temp_generators, dcs)
 
                 # Use MCF to optimize
-                result = temp_hex._optimize_dcs_mcf(w_expanded, 0.0, maximize, use_differentiable=False)
+                result = temp_hex._optimize_dcs_mcf(w_expanded, 0.0, maximize)
                 if result is not None:
                     return result
             except Exception:
@@ -1023,6 +999,37 @@ class Octatope:
         except Exception:
             return False
 
+    def sample(self, n_samples: int = 1) -> np.ndarray:
+        """
+        Sample points from the Octatope using rejection sampling.
+
+        Samples alpha vectors uniformly from [-1, 1]^nVar and rejects those
+        that violate UTVPI constraints. Maps accepted alphas to state space.
+
+        Args:
+            n_samples: Number of samples to generate
+
+        Returns:
+            Array of shape (n_samples, dim) with points in state space
+        """
+        A, b_vec = self.utvpi.to_matrix_form()
+        samples = []
+        max_attempts = n_samples * 200
+
+        for _ in range(max_attempts):
+            if len(samples) >= n_samples:
+                break
+            alpha = np.random.uniform(-1, 1, self.nVar)
+            # Check UTVPI constraints
+            if A.shape[0] == 0 or np.all(A @ alpha <= b_vec + 1e-10):
+                point = self.generators @ alpha + self.center.flatten()
+                samples.append(point)
+
+        while len(samples) < n_samples:
+            samples.append(self.center.flatten())
+
+        return np.array(samples)
+
     # ======================== Conversion Methods ========================
 
     def to_star(self) -> 'Star':
@@ -1094,5 +1101,3 @@ class Octatope:
     #     input_oct = Octatope.from_bounds(lb, ub)
     #     # Standard exact method with CVXPY
     #     output_octs = net.reach(input_oct, method='exact')
-    #     # Exact method with differentiable solver
-    #     output_octs = net.reach(input_oct, method='exact-differentiable')

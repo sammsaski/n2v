@@ -8,9 +8,12 @@ expensive and potentially singular), we iteratively find principal directions
 using gradient ascent and deflation.
 """
 
+import logging
 import numpy as np
 from typing import Optional
 import warnings
+
+logger = logging.getLogger(__name__)
 
 
 class DeflationPCA:
@@ -52,6 +55,7 @@ class DeflationPCA:
         max_iter: int = 1000,
         tol: float = 1e-6,
         learning_rate: float = 0.1,
+        variance_threshold: Optional[float] = None,
         verbose: bool = False
     ):
         """
@@ -62,6 +66,8 @@ class DeflationPCA:
             max_iter: Maximum gradient ascent iterations per component
             tol: Convergence tolerance (stop when change < tol)
             learning_rate: Step size for gradient ascent
+            variance_threshold: If set, stop extracting components when remaining
+                variance falls below this value (Algorithm 1 J_threshold)
             verbose: Print progress during fitting
         """
         self.n_components = n_components
@@ -69,6 +75,8 @@ class DeflationPCA:
         self.tol = tol
         self.learning_rate = learning_rate
         self.verbose = verbose
+        self.variance_threshold = variance_threshold
+        self.n_components_fitted_ = None  # Actual number extracted (may be < n_components)
 
         self.components_ = None  # Shape: (n_components, n)
         self.mean_ = None  # Shape: (n,)
@@ -113,10 +121,19 @@ class DeflationPCA:
 
         for idx in range(actual_components):
             if self.verbose:
-                print(f"Finding component {idx + 1}/{actual_components}")
+                logger.debug(f"Finding component {idx + 1}/{actual_components}")
 
             # Find principal direction for current (deflated) data
             a = self._find_principal_direction(Z)
+
+            # Check if remaining variance is negligible (Algorithm 1 threshold)
+            variance = np.mean((Z @ a) ** 2)
+            if self.variance_threshold is not None and variance < self.variance_threshold:
+                if self.verbose:
+                    logger.debug(f"  Variance {variance:.2e} below threshold {self.variance_threshold:.2e}, stopping")
+                self.components_ = self.components_[:idx]
+                break
+
             self.components_[idx] = a
 
             # Deflate: remove component along this direction
@@ -124,6 +141,7 @@ class DeflationPCA:
             projections = Z @ a  # Shape: (t,), projection coefficients
             Z = Z - np.outer(projections, a)  # Remove projections
 
+        self.n_components_fitted_ = self.components_.shape[0]
         self._is_fitted = True
         return self
 
@@ -184,14 +202,14 @@ class DeflationPCA:
             objective = np.mean((Z @ a_new) ** 2)
             if abs(objective - prev_objective) < self.tol:
                 if self.verbose:
-                    print(f"  Converged at iteration {iteration + 1}")
+                    logger.debug(f"  Converged at iteration {iteration + 1}")
                 return a_new
 
             a = a_new
             prev_objective = objective
 
         if self.verbose:
-            print(f"  Max iterations reached")
+            logger.warning("  Max iterations reached")
 
         return a
 

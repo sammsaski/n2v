@@ -4,13 +4,13 @@ Global configuration for N2V (Neural Network Verification).
 This module provides global settings for parallelization, LP solvers, and other options.
 """
 
-from typing import Optional
+from typing import Optional, Union
 
 
 class Config:
     """Global configuration for N2V."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         # Parallelization settings
         self._parallel_lp = False
         self._n_workers = 4
@@ -26,7 +26,7 @@ class Config:
         return self._parallel_lp
 
     @parallel_lp.setter
-    def parallel_lp(self, value: bool):
+    def parallel_lp(self, value: bool) -> None:
         """Set parallel LP solving."""
         self._parallel_lp = bool(value)
 
@@ -36,7 +36,7 @@ class Config:
         return self._n_workers
 
     @n_workers.setter
-    def n_workers(self, value: int):
+    def n_workers(self, value: int) -> None:
         """Set number of parallel workers."""
         if value < 1:
             raise ValueError("n_workers must be at least 1")
@@ -48,7 +48,7 @@ class Config:
         return self._auto_parallel
 
     @auto_parallel.setter
-    def auto_parallel(self, value: bool):
+    def auto_parallel(self, value: bool) -> None:
         """Set auto parallel mode."""
         self._auto_parallel = bool(value)
 
@@ -58,7 +58,7 @@ class Config:
         return self._parallel_threshold
 
     @parallel_threshold.setter
-    def parallel_threshold(self, value: int):
+    def parallel_threshold(self, value: int) -> None:
         """Set parallel threshold."""
         if value < 1:
             raise ValueError("parallel_threshold must be at least 1")
@@ -70,7 +70,7 @@ class Config:
         return self._default_lp_solver
 
     @lp_solver.setter
-    def lp_solver(self, value: str):
+    def lp_solver(self, value: str) -> None:
         """Set default LP solver."""
         self._default_lp_solver = str(value)
 
@@ -80,7 +80,7 @@ class Config:
         return self._default_lp_solver
 
     @default_lp_solver.setter
-    def default_lp_solver(self, value: str):
+    def default_lp_solver(self, value: str) -> None:
         """Set default LP solver (alias for lp_solver)."""
         self._default_lp_solver = str(value)
 
@@ -118,7 +118,7 @@ class Config:
         else:
             return self.n_workers
 
-    def reset(self):
+    def reset(self) -> None:
         """Reset configuration to defaults."""
         self._parallel_lp = False
         self._n_workers = 4
@@ -126,7 +126,7 @@ class Config:
         self._parallel_threshold = 10
         self._default_lp_solver = 'default'
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return (f"Config(parallel_lp={self.parallel_lp}, "
                 f"n_workers={self.n_workers}, "
                 f"auto_parallel={self.auto_parallel}, "
@@ -138,7 +138,7 @@ class Config:
 config = Config()
 
 
-def set_parallel(enabled = True, n_workers: Optional[int] = None, threshold: Optional[int] = None):
+def set_parallel(enabled: Union[bool, str] = True, n_workers: Optional[int] = None, threshold: Optional[int] = None) -> None:
     """
     Enable or disable parallel LP solving globally.
 
@@ -171,7 +171,7 @@ def set_parallel(enabled = True, n_workers: Optional[int] = None, threshold: Opt
             config.n_workers = n_workers
 
 
-def set_lp_solver(solver: str):
+def set_lp_solver(solver: str) -> None:
     """
     Set default LP solver globally.
 
@@ -193,5 +193,5 @@ def get_config() -> dict:
         'n_workers': config.n_workers,
         'auto_parallel': config.auto_parallel,
         'parallel_threshold': config.parallel_threshold,
-        'lp_solver': config.lp_solver
+        'lp_solver': config.lp_solver,
     }

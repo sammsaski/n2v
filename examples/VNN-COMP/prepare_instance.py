@@ -34,7 +34,15 @@ def get_input_shape(onnx_path: str) -> tuple:
         raise ImportError("onnx package is required: pip install onnx")
 
     model = onnx.load(onnx_path)
-    input_tensor = model.graph.input[0]
+
+    # Filter out initializers (weights) — only keep true inputs
+    init_names = {init.name for init in model.graph.initializer}
+    true_inputs = [inp for inp in model.graph.input if inp.name not in init_names]
+
+    if not true_inputs:
+        raise ValueError(f"No true input tensors found in {onnx_path}")
+
+    input_tensor = true_inputs[0]
     dims = input_tensor.type.tensor_type.shape.dim
 
     # Strip batch dimension (first dim), extract remaining

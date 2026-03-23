@@ -171,7 +171,7 @@ class TestProbabilisticBoxWithVerifySpecification:
 
     def test_verify_specification_accepts_probabilistic_box(self):
         """Test that verify_specification() accepts ProbabilisticBox."""
-        from n2v.utils import verify_specification
+        from n2v.utils.verify_specification import verify_specification
         from n2v.sets import HalfSpace
 
         # Create a ProbabilisticBox

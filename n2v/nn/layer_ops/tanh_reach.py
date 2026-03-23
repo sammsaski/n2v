@@ -19,11 +19,11 @@ from n2v.nn.layer_ops.sigmoid_reach import (
 )
 
 
-def _tanh(x):
+def _tanh(x: np.ndarray) -> np.ndarray:
     """Numpy tanh."""
     return np.tanh(x)
 
-def _tanh_deriv(x):
+def _tanh_deriv(x: np.ndarray) -> np.ndarray:
     """Tanh derivative: 1 - tanh^2(x)."""
     t = np.tanh(x)
     return 1.0 - t * t
@@ -59,8 +59,16 @@ def tanh_star_approx(
 
 
 def tanh_zono_approx(input_zonos: List[Zono]) -> List[Zono]:
-    """Approximate Tanh for Zonotopes."""
-    return [_s_curve_single_zono(z, _tanh) for z in input_zonos]
+    """Approximate Tanh for Zonotopes, preserving ImageZono type."""
+    from n2v.sets.image_zono import ImageZono
+
+    output = []
+    for z in input_zonos:
+        result = _s_curve_single_zono(z, _tanh)
+        if isinstance(z, ImageZono) and not isinstance(result, ImageZono):
+            result = ImageZono(result.c, result.V, z.height, z.width, z.num_channels)
+        output.append(result)
+    return output
 
 
 def tanh_box(input_boxes: List) -> List:

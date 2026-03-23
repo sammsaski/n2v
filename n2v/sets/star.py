@@ -160,6 +160,7 @@ class Star:
         self.Z = outer_zono
 
     def __repr__(self) -> str:
+        """Return string representation of the Star set."""
         return f"Star(dim={self.dim}, nVar={self.nVar}, nConstraints={self.C.shape[0]})"
 
     @classmethod

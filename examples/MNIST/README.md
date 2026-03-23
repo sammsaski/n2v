@@ -468,8 +468,6 @@ On a typical laptop (CPU):
 
 ### NNV-Python Documentation
 - Main README: `../../README.md`
-- Testing Guide: `../../TESTING.md`
-- Development Log: `../../CHANGELOG.md`
 
 ### Key Papers
 - NNV Tool: [MATLAB NNV Repository](https://github.com/verivital/nnv)

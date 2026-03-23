@@ -55,6 +55,7 @@ class ImageZono(Zono):
             )
 
     def __repr__(self) -> str:
+        """Return string representation of the ImageZono."""
         return (
             f"ImageZono(height={self.height}, width={self.width}, "
             f"channels={self.num_channels}, n_generators={self.V.shape[1]})"

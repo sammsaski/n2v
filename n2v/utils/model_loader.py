@@ -126,7 +126,9 @@ def get_model_summary(model: nn.Module, input_shape: tuple) -> dict:
     hooks = []
 
     def register_hook(module):
+        """Register a forward hook on a module to capture shape info."""
         def hook(module, input, output):
+            """Forward hook that records input/output shapes and param counts."""
             class_name = str(module.__class__).split(".")[-1].split("'")[0]
             module_idx = len(summary)
 

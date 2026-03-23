@@ -125,15 +125,15 @@ HiGHS (High-performance Interior-point and Simplex) is well-suited because:
 
 ## Benchmarking
 
-To compare LP solver performance on your specific workload, use the benchmark suite:
+To compare LP solver performance, use the ACAS Xu benchmark:
 
 ```bash
-# Compare default (CVXPY) vs scipy linprog
-python benchmarks/run_benchmarks.py --lp-solver default
-python benchmarks/run_benchmarks.py --lp-solver linprog
+cd examples/ACASXu
+./run_benchmark.sh --timeout 120
 ```
 
-See [benchmarks/README.md](../benchmarks/README.md) for more options.
+See [benchmarks/README.md](../benchmarks/README.md) for plans on a
+dedicated benchmark suite.
 
 ---
 

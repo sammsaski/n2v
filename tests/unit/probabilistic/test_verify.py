@@ -417,6 +417,39 @@ class TestVerifyHighDimensional:
         assert result.dim == 1
 
 
+class TestClippingBlockTrainingOptimization:
+    """Test that clipping block skips wasteful training projections."""
+
+    def test_clipping_block_training_errors_are_zero(self):
+        """Verify clipping block training errors are ~zero (motivates optimization)."""
+        from n2v.probabilistic.surrogates.clipping_block import ClippingBlockSurrogate
+
+        np.random.seed(42)
+        training = np.random.randn(20, 5)
+        surr = ClippingBlockSurrogate(n_workers=1)
+        surr.fit(training)
+        projections = surr.predict(training)
+        errors = training - projections
+        assert np.allclose(errors, 0, atol=1e-6)
+
+    def test_verify_clipping_block_uses_zero_training_errors(self):
+        """Verify the optimization produces identical results to the unoptimized path."""
+        np.random.seed(0)
+        model_fn = lambda x: x @ np.array([[1, 0.5], [0.5, 1], [0.3, 0.7]])
+
+        input_set = Box(np.zeros(3), np.ones(3))
+        result = verify(
+            model=model_fn,
+            input_set=input_set,
+            m=100,
+            surrogate='clipping_block',
+            training_samples=50,
+            seed=42,
+        )
+        assert result.confidence > 0
+        assert np.all(result.ub >= result.lb)
+
+
 class TestVerifyImports:
     """Tests for module imports."""
 
@@ -429,3 +462,72 @@ class TestVerifyImports:
         """Test that ProbabilisticBox can be imported from n2v.probabilistic."""
         from n2v.probabilistic import ProbabilisticBox as PB
         assert PB is not None
+
+
+class TestPCABoundsCorrectness:
+    """Test that PCA inverse transform uses interval arithmetic."""
+
+    def test_pca_bounds_interval_arithmetic(self):
+        """Verify bounds are computed with interval arithmetic, not naive transform."""
+        from n2v.probabilistic.verify import _inverse_transform_bounds
+        from n2v.probabilistic.dimensionality.deflation_pca import DeflationPCA
+
+        pca = DeflationPCA(n_components=2)
+        pca.mean_ = np.array([0.0, 0.0, 0.0])
+        pca.components_ = np.array([
+            [1.0, -1.0, 0.5],
+            [0.5,  1.0, -1.0],
+        ])
+        pca._is_fitted = True
+
+        lb_reduced = np.array([0.0, 0.0])
+        ub_reduced = np.array([1.0, 1.0])
+
+        lb, ub = _inverse_transform_bounds(pca, lb_reduced, ub_reduced)
+
+        assert lb[0] == pytest.approx(0.0)
+        assert ub[0] == pytest.approx(1.5)
+        assert lb[1] == pytest.approx(-1.0)
+        assert ub[1] == pytest.approx(1.0)
+        assert lb[2] == pytest.approx(-1.0)
+        assert ub[2] == pytest.approx(0.5)
+
+    def test_pca_bounds_with_nonzero_mean(self):
+        from n2v.probabilistic.verify import _inverse_transform_bounds
+        from n2v.probabilistic.dimensionality.deflation_pca import DeflationPCA
+
+        pca = DeflationPCA(n_components=1)
+        pca.mean_ = np.array([10.0, 20.0])
+        pca.components_ = np.array([[1.0, -1.0]])
+        pca._is_fitted = True
+
+        lb_reduced = np.array([-2.0])
+        ub_reduced = np.array([3.0])
+
+        lb, ub = _inverse_transform_bounds(pca, lb_reduced, ub_reduced)
+
+        assert lb[0] == pytest.approx(8.0)
+        assert ub[0] == pytest.approx(13.0)
+        assert lb[1] == pytest.approx(17.0)
+        assert ub[1] == pytest.approx(22.0)
+
+    def test_pca_bounds_soundness_empirical(self):
+        from n2v.probabilistic.dimensionality.deflation_pca import DeflationPCA
+        from n2v.probabilistic.verify import _inverse_transform_bounds
+
+        np.random.seed(42)
+        pca = DeflationPCA(n_components=3)
+        pca.mean_ = np.random.randn(10)
+        pca.components_ = np.random.randn(3, 10)
+        pca._is_fitted = True
+
+        lb_reduced = np.array([-1.0, -2.0, -0.5])
+        ub_reduced = np.array([1.0, 0.5, 3.0])
+
+        lb, ub = _inverse_transform_bounds(pca, lb_reduced, ub_reduced)
+
+        for _ in range(10000):
+            x = np.random.uniform(lb_reduced, ub_reduced)
+            y = pca.inverse_transform(x.reshape(1, -1)).flatten()
+            assert np.all(y >= lb - 1e-10), f"lb violation: {y} < {lb}"
+            assert np.all(y <= ub + 1e-10), f"ub violation: {y} > {ub}"

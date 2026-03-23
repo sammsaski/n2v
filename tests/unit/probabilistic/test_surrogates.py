@@ -444,6 +444,26 @@ class TestSurrogateInterface:
         assert issubclass(BatchedClippingBlockSurrogate, ClippingBlockSurrogate)
 
 
+class TestClippingBlockProcessPool:
+    """Test that clipping block uses process-based parallelism."""
+
+    def test_parallel_predict_matches_sequential(self):
+        """Parallel and sequential predictions should give identical results."""
+        np.random.seed(42)
+        training = np.random.randn(15, 4)
+        calibration = np.random.randn(10, 4)
+
+        surr_seq = ClippingBlockSurrogate(n_workers=1)
+        surr_seq.fit(training)
+        proj_seq = surr_seq.predict(calibration)
+
+        surr_par = ClippingBlockSurrogate(n_workers=2)
+        surr_par.fit(training)
+        proj_par = surr_par.predict(calibration)
+
+        np.testing.assert_allclose(proj_seq, proj_par, atol=1e-6)
+
+
 class TestParallelization:
     """Tests for parallel processing in ClippingBlockSurrogate."""
 

@@ -6,13 +6,59 @@ calibration outputs onto this hull using linear programming. This produces
 tighter bounds than the naive approach by exploiting correlation structure.
 """
 
+import logging
 import numpy as np
 from scipy.optimize import linprog
 from typing import Tuple, Optional
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 import warnings
 
 from n2v.probabilistic.surrogates.base import Surrogate
+
+logger = logging.getLogger(__name__)
+
+
+def _project_single_standalone(y: np.ndarray, vertices: np.ndarray) -> np.ndarray:
+    """
+    Standalone projection function for ProcessPoolExecutor (must be picklable).
+
+    Solves the same LP as ClippingBlockSurrogate._project_single.
+    """
+    n = vertices.shape[1]
+    t = vertices.shape[0]
+
+    c = np.zeros(1 + t)
+    c[0] = 1.0
+
+    A_ub = np.zeros((2 * n, 1 + t))
+    b_ub = np.zeros(2 * n)
+
+    for k in range(n):
+        A_ub[k, 0] = -1
+        A_ub[k, 1:] = -vertices[:, k]
+        b_ub[k] = -y[k]
+        A_ub[n + k, 0] = -1
+        A_ub[n + k, 1:] = vertices[:, k]
+        b_ub[n + k] = y[k]
+
+    A_eq = np.zeros((1, 1 + t))
+    A_eq[0, 1:] = 1
+    b_eq = np.array([1.0])
+
+    bounds = [(0, None)] + [(0, None)] * t
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        result = linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+                         bounds=bounds, method='highs')
+
+    if not result.success:
+        distances = np.max(np.abs(vertices - y), axis=1)
+        closest_idx = np.argmin(distances)
+        return vertices[closest_idx].copy()
+
+    alpha = result.x[1:]
+    return vertices.T @ alpha
 
 
 class ClippingBlockSurrogate(Surrogate):
@@ -108,20 +154,21 @@ class ClippingBlockSurrogate(Surrogate):
         projections = np.zeros_like(outputs)
 
         if self.n_workers > 1 and m > 1:
-            with ThreadPoolExecutor(max_workers=self.n_workers) as executor:
+            vertices = self.vertices
+            with ProcessPoolExecutor(max_workers=self.n_workers) as executor:
                 futures = [
-                    executor.submit(self._project_single, outputs[i])
+                    executor.submit(_project_single_standalone, outputs[i], vertices)
                     for i in range(m)
                 ]
                 for i, future in enumerate(futures):
                     projections[i] = future.result()
                     if self.verbose and (i + 1) % 1000 == 0:
-                        print(f"Projected {i + 1}/{m} samples")
+                        logger.debug(f"Projected {i + 1}/{m} samples")
         else:
             for i in range(m):
                 projections[i] = self._project_single(outputs[i])
                 if self.verbose and (i + 1) % 1000 == 0:
-                    print(f"Projected {i + 1}/{m} samples")
+                    logger.debug(f"Projected {i + 1}/{m} samples")
 
         return projections
 
@@ -234,6 +281,13 @@ class BatchedClippingBlockSurrogate(ClippingBlockSurrogate):
     """
 
     def __init__(self, batch_size: int = 1000, **kwargs):
+        """Initialize BatchedClippingBlockSurrogate.
+
+        Args:
+            batch_size: Number of samples per batch.
+            **kwargs: Arguments forwarded to
+                ClippingBlockSurrogate (n_workers, verbose).
+        """
         super().__init__(**kwargs)
         self.batch_size = batch_size
 
@@ -263,7 +317,7 @@ class BatchedClippingBlockSurrogate(ClippingBlockSurrogate):
             end = min(start + self.batch_size, m)
 
             if self.verbose:
-                print(f"Processing batch {batch_idx + 1}/{n_batches} (samples {start}-{end})")
+                logger.debug(f"Processing batch {batch_idx + 1}/{n_batches} (samples {start}-{end})")
 
             batch_outputs = outputs[start:end]
             # Use parent's predict for this batch

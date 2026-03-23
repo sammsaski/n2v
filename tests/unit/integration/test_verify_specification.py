@@ -5,7 +5,8 @@ Tests for verify_specification function.
 import pytest
 import numpy as np
 from n2v.utils.verify_specification import verify_specification
-from n2v.sets import Star, HalfSpace
+from n2v.sets import Star, Box, HalfSpace
+from n2v.sets.probabilistic_box import ProbabilisticBox
 
 
 class TestVerifySpecificationBasic:
@@ -292,3 +293,222 @@ class TestVerifySpecificationRealWorld:
         # max(class1 - class0) = 0.15 - 0.7 = -0.55 < 0 ✓
         # max(class2 - class0) = 0.15 - 0.7 = -0.55 < 0 ✓
         assert result == 1
+
+
+class TestVerifySpecificationMultiGroup:
+    """Tests for multi-group property handling (AND logic across groups).
+
+    VNN-LIB properties can have multiple top-level asserts that are ANDed.
+    verify_specification must check all groups, not just the first.
+    """
+
+    def test_star_multi_group_all_disjoint_returns_satisfied(self):
+        """When each group individually doesn't intersect, result is satisfied."""
+        star = Star.from_bounds(np.array([[0.0], [0.0]]), np.array([[1.0], [1.0]]))
+
+        # Group 0: x1 >= 0.5 (intersects [0,1]^2)
+        hs0 = HalfSpace(np.array([[-1, 0]], dtype=np.float64), np.array([[-0.5]]))
+        # Group 1: x2 >= 2 (does NOT intersect [0,1]^2)
+        hs1 = HalfSpace(np.array([[0, -1]], dtype=np.float64), np.array([[-2.0]]))
+
+        prop = [{'Hg': hs0}, {'Hg': hs1}]
+        result = verify_specification([star], prop)
+
+        # Group 1 is infeasible → no input satisfies both → satisfied
+        assert result == 1
+
+    def test_star_multi_group_all_intersect_returns_unknown(self):
+        """When all groups individually intersect, result is unknown."""
+        star = Star.from_bounds(np.array([[0.0], [0.0]]), np.array([[1.0], [1.0]]))
+
+        # Group 0: x1 >= 0.5 (intersects)
+        hs0 = HalfSpace(np.array([[-1, 0]], dtype=np.float64), np.array([[-0.5]]))
+        # Group 1: x2 >= 0.5 (intersects)
+        hs1 = HalfSpace(np.array([[0, -1]], dtype=np.float64), np.array([[-0.5]]))
+
+        prop = [{'Hg': hs0}, {'Hg': hs1}]
+        result = verify_specification([star], prop)
+
+        # Both groups feasible simultaneously (e.g., x=(0.7, 0.7)) → unknown
+        assert result == 2
+
+    def test_box_multi_group_second_group_infeasible(self):
+        """Box with multi-group property where second group is infeasible."""
+        box = Box(np.array([0.0, 0.0]), np.array([1.0, 1.0]))
+
+        # Group 0: x1 >= 0.3 (intersects)
+        hs0 = HalfSpace(np.array([[-1, 0]], dtype=np.float64), np.array([[-0.3]]))
+        # Group 1: x2 >= 5.0 (impossible in [0,1]^2)
+        hs1 = HalfSpace(np.array([[0, -1]], dtype=np.float64), np.array([[-5.0]]))
+
+        prop = [{'Hg': hs0}, {'Hg': hs1}]
+        result = verify_specification([box], prop)
+
+        assert result == 1, "Second group infeasible → satisfied"
+
+    def test_multi_group_with_or_within_group(self):
+        """Multi-group where one group has OR of halfspaces."""
+        star = Star.from_bounds(np.array([[0.0], [0.0]]), np.array([[1.0], [1.0]]))
+
+        # Group 0: x1 >= 0.8 OR x1 <= 0.2 (partially intersects)
+        hs0a = HalfSpace(np.array([[-1, 0]], dtype=np.float64), np.array([[-0.8]]))
+        hs0b = HalfSpace(np.array([[1, 0]], dtype=np.float64), np.array([[0.2]]))
+        # Group 1: x2 >= 5.0 (impossible)
+        hs1 = HalfSpace(np.array([[0, -1]], dtype=np.float64), np.array([[-5.0]]))
+
+        prop = [{'Hg': [hs0a, hs0b]}, {'Hg': hs1}]
+        result = verify_specification([star], prop)
+
+        assert result == 1, "Group 1 infeasible → satisfied despite group 0 intersecting"
+
+    def test_single_group_backwards_compatible(self):
+        """Single-group property (list with one dict) should work as before."""
+        star = Star.from_bounds(np.array([[0.0], [0.0]]), np.array([[1.0], [1.0]]))
+
+        hs = HalfSpace(np.array([[-1, 0]], dtype=np.float64), np.array([[-2.0]]))
+        prop = [{'Hg': hs}]
+        result = verify_specification([star], prop)
+
+        assert result == 1
+
+
+class TestVerifySpecificationBox:
+    """Tests for verify_specification with Box inputs (no Star conversion)."""
+
+    def test_box_disjoint_single_halfspace(self):
+        """Box clearly disjoint from halfspace should return 1 (satisfied)."""
+        box = Box(np.array([0.0, 0.0]), np.array([1.0, 1.0]))
+
+        # x1 >= 2 → -x1 <= -2: impossible for [0,1]^2
+        G = np.array([[-1, 0]], dtype=np.float64)
+        g = np.array([[-2]], dtype=np.float64)
+        hs = HalfSpace(G, g)
+
+        result = verify_specification([box], hs)
+        assert result == 1
+
+    def test_box_intersecting_single_halfspace(self):
+        """Box intersecting halfspace should return 2 (unknown)."""
+        box = Box(np.array([0.0, 0.0]), np.array([1.0, 1.0]))
+
+        # x1 <= 0.5: intersects [0,1]^2
+        G = np.array([[1, 0]], dtype=np.float64)
+        g = np.array([[0.5]], dtype=np.float64)
+        hs = HalfSpace(G, g)
+
+        result = verify_specification([box], hs)
+        assert result == 2
+
+    def test_box_multirow_halfspace_disjoint(self):
+        """Box disjoint from multi-row halfspace (like yolo's 5x21125)."""
+        box = Box(np.array([0.0, 0.0, 0.0]), np.array([1.0, 1.0, 1.0]))
+
+        # Two constraints: x1 >= 5 AND x2 >= 5
+        # Neither can be satisfied in [0,1]^3
+        G = np.array([[-1, 0, 0], [0, -1, 0]], dtype=np.float64)
+        g = np.array([[-5], [-5]], dtype=np.float64)
+        hs = HalfSpace(G, g)
+
+        result = verify_specification([box], hs)
+        assert result == 1
+
+    def test_box_multirow_halfspace_intersecting(self):
+        """Box intersects multi-row halfspace (all rows feasible simultaneously)."""
+        box = Box(np.array([0.0, 0.0, 0.0]), np.array([1.0, 1.0, 1.0]))
+
+        # x1 <= 0.5 AND x2 <= 0.5: both satisfiable in [0,1]^3 at e.g. (0,0,0)
+        G = np.array([[1, 0, 0], [0, 1, 0]], dtype=np.float64)
+        g = np.array([[0.5], [0.5]], dtype=np.float64)
+        hs = HalfSpace(G, g)
+
+        result = verify_specification([box], hs)
+        assert result == 2
+
+    def test_box_multiple_halfspaces_or_logic(self):
+        """Box with multiple halfspaces (OR logic) — one intersects."""
+        box = Box(np.array([0.0, 0.0]), np.array([1.0, 1.0]))
+
+        # hs1: x1 >= 2 (disjoint)
+        hs1 = HalfSpace(np.array([[-1, 0]]), np.array([[-2]]))
+        # hs2: x1 <= 0.5 (intersects)
+        hs2 = HalfSpace(np.array([[1, 0]]), np.array([[0.5]]))
+
+        result = verify_specification([box], [hs1, hs2])
+        assert result == 2
+
+    def test_box_multiple_halfspaces_all_disjoint(self):
+        """Box with multiple halfspaces (OR logic) — all disjoint."""
+        box = Box(np.array([0.0, 0.0]), np.array([1.0, 1.0]))
+
+        hs1 = HalfSpace(np.array([[-1, 0]]), np.array([[-2]]))
+        hs2 = HalfSpace(np.array([[0, -1]]), np.array([[-2]]))
+
+        result = verify_specification([box], [hs1, hs2])
+        assert result == 1
+
+    def test_box_dict_property_format(self):
+        """Box works with dict property format from vnnlib."""
+        box = Box(np.array([0.0, 0.0]), np.array([1.0, 1.0]))
+
+        G = np.array([[-1, 0]], dtype=np.float64)
+        g = np.array([[-2]], dtype=np.float64)
+        hs = HalfSpace(G, g)
+
+        result = verify_specification([box], [{'Hg': hs}])
+        assert result == 1
+
+    def test_probabilistic_box_uses_box_path(self):
+        """ProbabilisticBox (inherits Box) should use the Box fast path."""
+        pbox = ProbabilisticBox(
+            lb=np.array([0.0, 0.0]),
+            ub=np.array([1.0, 1.0]),
+            m=100, ell=99, epsilon=0.01
+        )
+
+        # Disjoint: x1 >= 2
+        G = np.array([[-1, 0]], dtype=np.float64)
+        g = np.array([[-2]], dtype=np.float64)
+        hs = HalfSpace(G, g)
+
+        result = verify_specification([pbox], hs)
+        assert result == 1
+
+    def test_box_high_dimensional_disjoint(self):
+        """High-dimensional Box should be fast (no Star conversion).
+
+        At 21K dims (yolo scale), Star conversion takes ~55s due to creating
+        a 21K x 21K matrix. Box interval arithmetic should take < 1s.
+        """
+        import time
+        n = 21125  # yolo output dimension
+
+        box = Box(np.zeros(n), np.ones(n))
+
+        # sum(x) >= 2*n: impossible for [0,1]^n (max sum = n)
+        G = -np.ones((1, n), dtype=np.float64)
+        g = np.array([[-2 * n]], dtype=np.float64)
+        hs = HalfSpace(G, g)
+
+        t0 = time.time()
+        result = verify_specification([box], hs)
+        elapsed = time.time() - t0
+
+        assert result == 1
+        assert elapsed < 5.0, f"Box verify_specification took {elapsed:.1f}s, expected < 5s"
+
+    def test_box_matches_star_result(self):
+        """Box path should give same result as Star path for equivalent sets."""
+        lb = np.array([[0.7], [0.1]])
+        ub = np.array([[0.9], [0.3]])
+
+        box = Box(lb, ub)
+        star = Star.from_bounds(lb, ub)
+
+        # Robustness: class0 - class1 <= 0 (unsafe region)
+        G = np.array([[1, -1]], dtype=np.float32)
+        g = np.array([[0]], dtype=np.float32)
+        hs = HalfSpace(G, g)
+
+        result_box = verify_specification([box], hs)
+        result_star = verify_specification([star], hs)
+        assert result_box == result_star

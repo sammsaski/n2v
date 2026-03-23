@@ -178,7 +178,7 @@ def get_benchmark_config(category: str) -> List[ReachOptions]:
 # Parallel region verification
 # =============================================================================
 
-def _verify_single_region(args):
+def _verify_single_region(args: tuple) -> Dict:
     """Worker function for multiprocessing. Verifies one input region.
 
     Args:
@@ -265,7 +265,7 @@ def verify_regions_parallel(
     return _aggregate_results(per_region)
 
 
-def _verify_regions_sequential(model, regions, property_spec, method, **kwargs):
+def _verify_regions_sequential(model: nn.Module, regions: List[Tuple[np.ndarray, np.ndarray]], property_spec: Union[List, 'HalfSpace'], method: str, **kwargs: Dict) -> Dict:
     """Sequential fallback for region verification."""
     per_region = []
     for lb, ub in regions:

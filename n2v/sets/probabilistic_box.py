@@ -102,6 +102,7 @@ class ProbabilisticBox(Box):
         return 1 - beta.cdf(1 - self.epsilon, self.ell, self.m + 1 - self.ell)
 
     def __repr__(self) -> str:
+        """Return string representation with guarantee metadata."""
         return (
             f"ProbabilisticBox(dim={self.dim}, "
             f"coverage={self.coverage:.4f}, confidence={self.confidence:.4f}, "
