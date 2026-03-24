@@ -191,13 +191,16 @@ if __name__ == "__main__":
         overall_lb_approx[true_label] > overall_ub_approx[i]
         for i in range(num_classes) if i != true_label
     )
-    approx_decision = "verified" if approx_verified else "unknown"
+    approx_decision = "verified robust" if approx_verified else "unknown"
 
     exact_verified = all(
         overall_lb_exact[true_label] > overall_ub_exact[i]
         for i in range(num_classes) if i != true_label
     )
-    exact_decision = "verified" if exact_verified else "not robust"
+    exact_decision = (
+        "verified robust" if exact_verified
+        else "verified non-robust"
+    )
 
     # --- Save Output Ranges Figure ---
     print("\nSaving output ranges figure...")
@@ -220,9 +223,12 @@ if __name__ == "__main__":
                bottom=overall_lb_exact[i], width=width, color=color,
                alpha=0.7, label='Exact' if i == 0 else '')
 
-    # Highlight true class
-    ax.axvline(true_label, color='green', linestyle='--', linewidth=2,
-               alpha=0.5, label=f'True class ({true_label})')
+    # Horizontal line at the approx lower bound of the true class
+    ax.axhline(
+        overall_lb_approx[true_label], color='red',
+        linestyle='--', linewidth=1.5, alpha=0.7,
+        label=f'True class ({true_label}) approx LB',
+    )
 
     ax.set_xlabel('Output Class')
     ax.set_ylabel('Output Value')
