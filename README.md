@@ -124,6 +124,7 @@ Counterexample search via random sampling and Projected Gradient Descent (PGD) t
 
 <!-- List contributors here -->
 - [Samuel Sasaki](https://sammsaski.github.io/)
+- [Ben Wooding](https://woodingben.com)
 
 ## References
 
