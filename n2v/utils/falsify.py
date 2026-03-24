@@ -32,7 +32,7 @@ Usage:
 import numpy as np
 import torch
 from typing import Union, List, Optional, Tuple, Literal
-from n2v.sets import HalfSpace
+from n2v.sets.halfspace import HalfSpace
 
 
 # Type alias for falsification results
@@ -345,7 +345,7 @@ def _extract_halfspace_groups(property: Union[dict, List[dict], 'HalfSpace', Lis
     Returns:
         List of groups, where each group is a list of HalfSpace objects (OR within group).
     """
-    from n2v.sets import HalfSpace
+    from n2v.sets.halfspace import HalfSpace
 
     # Handle list of dicts (from vnnlib) — each dict is a property group
     if isinstance(property, list) and len(property) > 0 and isinstance(property[0], dict):

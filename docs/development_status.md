@@ -175,7 +175,7 @@ Soundness test coverage exists for: Linear, ReLU, LeakyReLU, Sigmoid, Tanh, Conv
 
 6. **Sigmoid/Tanh have no exact Star method** — Only approximation is available. A warning is emitted if `method='exact'` is requested.
 
-7. **Approx ReLU uses LP for neuron classification** — The approximate Star ReLU refines uncertain neuron bounds with LP solves (`get_range()`) before applying triangle relaxation. MATLAB NNV uses only `estimate_ranges()` (no LP) for approx, which is much faster on large layers (e.g., 6,272-neuron CNN ReLU) but produces looser bounds. Investigating which approach yields a better speed-tightness trade-off is future work.
+7. **Approx ReLU neuron classification strategy** — The approximate Star ReLU currently uses `estimate_ranges()` (predicate bounds, no LP solves) to classify neurons as active/inactive/unstable. This is fast but may over-count unstable neurons, adding unnecessary triangle relaxation constraints. An alternative is using `get_range()` (LP per neuron) for tighter classification, which MATLAB NNV uses in `reach_star_approx2`. Investigating the speed-tightness trade-off between these approaches is future work, especially for deep networks where over-approximation error compounds across layers.
 
 ---
 
