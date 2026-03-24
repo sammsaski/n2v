@@ -8,33 +8,39 @@ and ONNX GraphModules.
 
 import logging
 import operator
+import time
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
-import torch
-import torch.nn as nn
 import numpy as np
-from typing import Dict, List, Tuple, Type, Union, Optional, Any
+import torch
+import torch.fx as fx
+import torch.nn as nn
+import torch.nn.functional as F
 
-# Import set types
 from n2v.sets import Star, Zono, Box, Hexatope, Octatope
 from n2v.sets.image_star import ImageStar
 from n2v.sets.image_zono import ImageZono
-
-# Import layer ops
 from n2v.nn.layer_ops.dispatcher import reach_layer
 from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
-
-# Import model preprocessing
 from n2v.utils.model_preprocessing import fuse_batchnorm, has_batchnorm
-
-import torch.fx as fx
-
-# ONNX types (onnx2torch is a required dependency)
+from n2v.utils.bounds_precomputation import compute_intermediate_bounds
+from n2v.probabilistic import verify
 from onnx2torch.node_converters.reshape import OnnxReshape
 from onnx2torch.node_converters.concat import OnnxConcat
 from onnx2torch.node_converters.slice import OnnxSlice, OnnxSliceV9
 from onnx2torch.node_converters.split import OnnxSplit, OnnxSplit13
 
 logger = logging.getLogger(__name__)
+
+# Maps torch functional ops to their nn.Module equivalents.
+#   Used by _function_node_to_module to convert call_function
+#   fx nodes into modules for the reachability dispatcher.
+FUNCTION_TO_MODULE_CLS: dict[type, type[nn.Module]] = {
+    F.relu: nn.ReLU,
+    torch.relu: nn.ReLU,
+    torch.sigmoid: nn.Sigmoid,
+    torch.tanh: nn.Tanh,
+}
 
 
 def reach_pytorch_model(
@@ -121,71 +127,61 @@ def reach_pytorch_model(
             f"Supported types: Star, ImageStar, Zono, Box, Hexatope, Octatope"
         )
 
-    # Check if model is a GraphModule (from torch.fx / onnx2torch)
-    if isinstance(model, fx.GraphModule):
-        return _handle_graphmodule(model, [input_set], method, **kwargs)
+    # Trace non-GraphModule models with torch.fx
+    if not isinstance(model, fx.GraphModule):
+        try:
+            model = torch.fx.symbolic_trace(model)
+        except Exception as e:
+            raise TypeError(
+                f"n2v requires models to be traceable by torch.fx. "
+                f"Models with data-dependent control flow (e.g., "
+                f"'if x.sum() > 0') or inline module instantiation "
+                f"(e.g., 'nn.ReLU()(x)') are not supported. "
+                f"For inline activations, use functional equivalents "
+                f"(e.g., F.relu(x) instead of nn.ReLU()(x)). "
+                f"Tracing failed with: {e}"
+            ) from e
 
-    # Standard sequential model processing
-    return _reach_sequential(model, [input_set], method, **kwargs)
+    return _handle_graphmodule(model, [input_set], method, **kwargs)
 
 
-def _reach_sequential(
-    model: nn.Module,
-    input_sets: List,
-    method: str,
-    **kwargs
-) -> List:
-    """
-    Propagate sets through a sequential model layer by layer.
+def _function_node_to_module(
+    node: fx.Node,
+) -> Optional[nn.Module]:
+    """Convert a call_function fx node to an nn.Module equivalent.
 
     Args:
-        model: PyTorch model
-        input_sets: List of input sets (all same type)
-        method: Reachability method
-        **kwargs: Additional arguments. Special keys:
-            - precompute_bounds (bool): If True, run Zono pre-pass first
-            - _precomputed_layer_bounds (dict): Internal -- pre-computed bounds dict
+        node: torch.fx.Node with op == 'call_function'.
 
     Returns:
-        List of output sets
+        Equivalent nn.Module, or None if the function is not
+        a dispatchable activation or operation.
     """
-    current_sets = input_sets
-    verbose = kwargs.get('verbose', False)
+    fn = node.target
 
-    # Handle precompute_bounds option ('ibp', 'zono', True, or False)
-    precompute = kwargs.pop('precompute_bounds', False)
-    layer_bounds = kwargs.pop('_precomputed_layer_bounds', None)
+    if fn in FUNCTION_TO_MODULE_CLS:
+        return FUNCTION_TO_MODULE_CLS[fn]()
 
-    if precompute and layer_bounds is None:
-        from n2v.utils.bounds_precomputation import compute_intermediate_bounds
-        precompute_method = precompute if isinstance(precompute, str) else 'ibp'
-        layer_bounds = compute_intermediate_bounds(model, input_sets[0], method=precompute_method)
+    # Parameterized functions
+    if fn is F.leaky_relu:
+        slope = node.kwargs.get('negative_slope', 0.01)
+        if (len(node.args) > 1
+                and not isinstance(node.args[1], fx.Node)):
+            slope = node.args[1]
+        return nn.LeakyReLU(negative_slope=slope)
 
-    # Get all layers from the model
-    layers = list(model.children())
-    if not layers:
-        # Model might be a single layer
-        layers = [model]
+    if fn is torch.flatten:
+        start_dim = node.kwargs.get('start_dim', 1)
+        end_dim = node.kwargs.get('end_dim', -1)
+        if (len(node.args) > 1
+                and not isinstance(node.args[1], fx.Node)):
+            start_dim = node.args[1]
+        if (len(node.args) > 2
+                and not isinstance(node.args[2], fx.Node)):
+            end_dim = node.args[2]
+        return nn.Flatten(start_dim=start_dim, end_dim=end_dim)
 
-    # Propagate through each layer
-    for i, layer in enumerate(layers):
-        if verbose:
-            set_type = type(current_sets[0]).__name__
-            logger.info(f'Layer {i+1}/{len(layers)}: {type(layer).__name__}')
-
-        # Build per-layer kwargs with precomputed bounds if available
-        layer_kwargs = dict(kwargs)
-        if layer_bounds is not None and i in layer_bounds:
-            layer_kwargs['precomputed_bounds'] = layer_bounds[i]
-        else:
-            layer_kwargs.pop('precomputed_bounds', None)
-
-        current_sets = reach_layer(layer, current_sets, method, **layer_kwargs)
-
-        if verbose:
-            logger.debug(f'  Output: {len(current_sets)} {set_type} sets')
-
-    return current_sets
+    return None
 
 
 def _handle_graphmodule(
@@ -214,7 +210,6 @@ def _handle_graphmodule(
     layer_bounds = kwargs.pop('_precomputed_layer_bounds', None)
 
     if precompute and layer_bounds is None:
-        from n2v.utils.bounds_precomputation import compute_intermediate_bounds
         precompute_method = precompute if isinstance(precompute, str) else 'ibp'
         layer_bounds = compute_intermediate_bounds(graph_module, input_sets[0], method=precompute_method)
 
@@ -336,6 +331,85 @@ def _handle_graphmodule(
                                 and isinstance(src_val[0], list)):
                             node_values[node.name] = src_val[index]
                             current_sets = src_val[index]
+            else:
+                # Try to convert function to module equivalent
+                equiv_module = _function_node_to_module(node)
+                if equiv_module is not None:
+                    # Resolve input from first argument
+                    first_arg = node.args[0]
+                    if hasattr(first_arg, 'name') and first_arg.name in node_values:
+                        input_sets_op = node_values[first_arg.name]
+                    else:
+                        input_sets_op = current_sets
+
+                    layer_kwargs = dict(kwargs)
+                    if layer_bounds is not None and node.name in layer_bounds:
+                        layer_kwargs['precomputed_bounds'] = layer_bounds[node.name]
+                    else:
+                        layer_kwargs.pop('precomputed_bounds', None)
+
+                    output_sets = reach_layer(
+                        equiv_module, input_sets_op,
+                        method, **layer_kwargs,
+                    )
+                    node_values[node.name] = output_sets
+                    current_sets = output_sets
+
+                elif verbose:
+                    logger.debug(
+                        f'  Skipping call_function: '
+                        f'{node.target}'
+                    )
+
+        elif node.op == 'call_method':
+            method_name = node.target  # e.g., 'flatten', 'view', 'reshape'
+
+            # Resolve input from first argument (the tensor/self)
+            first_arg = node.args[0]
+            if hasattr(first_arg, 'name') and first_arg.name in node_values:
+                input_sets_op = node_values[first_arg.name]
+            else:
+                input_sets_op = current_sets
+
+            if method_name == 'flatten':
+                start_dim = (
+                    node.args[1]
+                    if len(node.args) > 1
+                    else node.kwargs.get('start_dim', 1)
+                )
+                end_dim = (
+                    node.args[2]
+                    if len(node.args) > 2
+                    else node.kwargs.get('end_dim', -1)
+                )
+                equiv_module = nn.Flatten(
+                    start_dim=start_dim, end_dim=end_dim,
+                )
+
+                layer_kwargs = dict(kwargs)
+                layer_kwargs.pop('precomputed_bounds', None)
+                output_sets = reach_layer(
+                    equiv_module, input_sets_op,
+                    method, **layer_kwargs,
+                )
+                node_values[node.name] = output_sets
+                current_sets = output_sets
+
+            elif method_name in ('view', 'reshape'):
+                shape_args = node.args[1:]
+                if (len(shape_args) == 1
+                        and isinstance(
+                            shape_args[0], (tuple, list),
+                        )):
+                    target_shape = tuple(shape_args[0])
+                else:
+                    target_shape = tuple(shape_args)
+                result_sets = _handle_reshape(input_sets_op, target_shape)
+                node_values[node.name] = result_sets
+                current_sets = result_sets
+
+            elif verbose:
+                logger.debug(f'  Skipping call_method: {method_name}')
 
         elif node.op == 'output':
             # Output node - extract final result
@@ -1751,8 +1825,6 @@ def _reach_probabilistic(model: nn.Module, input_set: Any, **kwargs: Any) -> Lis
 
     This is a model-agnostic approach that works with any PyTorch model.
     """
-    from n2v.probabilistic import verify
-
     # Convert input_set to Box if needed
     if isinstance(input_set, Box):
         box = input_set
@@ -1811,22 +1883,50 @@ def _reach_hybrid(model: nn.Module, input_set: Any, **kwargs: Any) -> List:
     max_stars or time exceeds timeout_per_layer, switches to probabilistic
     verification for the remaining layers.
     """
-    import time
-
     max_stars = kwargs.get('max_stars', 1000)
     timeout_per_layer = kwargs.get('timeout_per_layer', 30.0)
     verbose = kwargs.get('verbose', False)
 
-    # Get layers
-    layers = list(model.children())
-    if not layers:
-        layers = [model]
+    # Trace the model if needed
+    if not isinstance(model, fx.GraphModule):
+        try:
+            model = torch.fx.symbolic_trace(model)
+        except Exception as e:
+            raise TypeError(
+                f"n2v requires models to be traceable by torch.fx. "
+                f"Models with data-dependent control flow (e.g., "
+                f"'if x.sum() > 0') or inline module instantiation "
+                f"(e.g., 'nn.ReLU()(x)') are not supported. "
+                f"For inline activations, use functional equivalents "
+                f"(e.g., F.relu(x) instead of nn.ReLU()(x)). "
+                f"Tracing failed with: {e}"
+            ) from e
+
+    # Extract ordered list of modules from fx graph
+    named_modules = dict(model.named_modules())
+    layer_entries = []
+    for node in model.graph.nodes:
+        if node.op == 'call_module':
+            module = named_modules.get(node.target)
+            if module is not None:
+                layer_entries.append(module)
+        elif node.op == 'call_function' and node.target is not operator.getitem:
+            equiv = _function_node_to_module(node)
+            if equiv is not None:
+                layer_entries.append(equiv)
+        elif node.op == 'call_method':
+            if node.target == 'flatten':
+                start_dim = node.args[1] if len(node.args) > 1 else 1
+                layer_entries.append(nn.Flatten(start_dim=start_dim))
+
+    if not layer_entries:
+        layer_entries = [model]
 
     current_sets = [input_set]
 
-    for i, layer in enumerate(layers):
+    for i, layer in enumerate(layer_entries):
         if verbose:
-            logger.info(f"Layer {i+1}/{len(layers)}: {type(layer).__name__}")
+            logger.info(f"Layer {i+1}/{len(layer_entries)}: {type(layer).__name__}")
 
         start_time = time.time()
 
@@ -1850,7 +1950,7 @@ def _reach_hybrid(model: nn.Module, input_set: Any, **kwargs: Any) -> List:
 
         except (_SwitchToProbabilistic, MemoryError):
             # Switch to probabilistic for remaining layers
-            remaining_model = nn.Sequential(*layers[i:])
+            remaining_model = nn.Sequential(*layer_entries[i:])
 
             # Get bounds from current sets
             all_lb = []

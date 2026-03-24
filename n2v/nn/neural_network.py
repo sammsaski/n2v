@@ -4,10 +4,14 @@ Neural Network wrapper for verification.
 Wraps PyTorch models to enable reachability analysis and verification.
 """
 
+from typing import Union, List, Optional
+
+import numpy as np
 import torch
 import torch.nn as nn
-from typing import Union, List, Optional
-import numpy as np
+import torch.fx as fx
+
+from n2v.nn.reach import _function_node_to_module, reach_pytorch_model
 
 
 class NeuralNetwork:
@@ -50,30 +54,79 @@ class NeuralNetwork:
 
     def _extract_layers(self, model: nn.Module) -> List[nn.Module]:
         """
-        Extract individual layers from the model.
+        Extract individual layers from the model using torch.fx tracing.
+
+        Traces the model's forward() to capture all operations including
+        functional calls (e.g., ``F.relu``).
 
         Args:
             model: PyTorch model
 
         Returns:
             List of layers
+
+        Raises:
+            TypeError: If the model cannot be traced by torch.fx
         """
+        # GraphModules (from onnx2torch or prior tracing)
+        #   already have a graph
+        if isinstance(model, fx.GraphModule):
+            return self._extract_layers_from_graph(model)
+
+        try:
+            gm = torch.fx.symbolic_trace(model)
+            return self._extract_layers_from_graph(gm)
+        except Exception as e:
+            raise TypeError(
+                f"n2v requires models to be traceable by torch.fx. "
+                f"Models with data-dependent control flow (e.g., "
+                f"'if x.sum() > 0') or inline module instantiation "
+                f"(e.g., 'nn.ReLU()(x)') are not supported. "
+                f"For inline activations, use functional equivalents "
+                f"(e.g., F.relu(x) instead of nn.ReLU()(x)). "
+                f"Tracing failed with: {e}"
+            ) from e
+
+    def _extract_layers_from_graph(
+        self, gm: fx.GraphModule,
+    ) -> List[nn.Module]:
+        """Extract layers from a torch.fx.GraphModule's graph.
+
+        Walks the graph nodes and collects call_module targets
+        plus call_function / call_method ops that map to
+        nn.Module equivalents.
+        """
+        named_modules = dict(gm.named_modules())
         layers = []
 
-        def extract_recursive(module):
-            # Handle Sequential and ModuleList
-            if isinstance(module, (nn.Sequential, nn.ModuleList)):
-                for child in module.children():
-                    extract_recursive(child)
-            # Handle container modules
-            elif list(module.children()):
-                for child in module.children():
-                    extract_recursive(child)
-            # Leaf layer
-            else:
-                layers.append(module)
+        for node in gm.graph.nodes:
+            if node.op == 'call_module':
+                mod = named_modules.get(node.target)
+                if mod is not None:
+                    layers.append(mod)
+            elif node.op == 'call_function':
+                equiv = _function_node_to_module(node)
+                if equiv is not None:
+                    layers.append(equiv)
+            elif node.op == 'call_method':
+                if node.target == 'flatten':
+                    start_dim = (
+                        node.args[1]
+                        if len(node.args) > 1
+                        else node.kwargs.get('start_dim', 1)
+                    )
+                    end_dim = (
+                        node.args[2]
+                        if len(node.args) > 2
+                        else node.kwargs.get('end_dim', -1)
+                    )
+                    layers.append(
+                        nn.Flatten(
+                            start_dim=start_dim,
+                            end_dim=end_dim,
+                        )
+                    )
 
-        extract_recursive(model)
         return layers
 
     def _validate_input_size(self, input_size: tuple) -> None:
@@ -147,8 +200,6 @@ class NeuralNetwork:
             >>> input_star = Star.from_bounds(lb, ub)
             >>> output_stars = net.reach(input_star, method='exact')
         """
-        from n2v.nn.reach import reach_pytorch_model
-
         return reach_pytorch_model(
             self.model,
             input_set,
