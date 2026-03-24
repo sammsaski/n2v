@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'examples', 'vnncomp'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..', 'examples', 'VNN-COMP'))
 
 
 class TestVNNCOMPRunnerEndToEnd:
