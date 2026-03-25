@@ -124,7 +124,7 @@ class Config:
         self._n_workers = 4
         self._auto_parallel = True
         self._parallel_threshold = 10
-        self._default_lp_solver = 'default'
+        self._default_lp_solver = 'linprog'  # HiGHS via SciPy (fast C++ solver)
 
     def __repr__(self) -> str:
         return (f"Config(parallel_lp={self.parallel_lp}, "

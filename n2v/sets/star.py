@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # to avoid circular dependencies
 
 # Import utility modules
-from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch, SCIPY_SOLVERS
+from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch, SCIPY_SOLVERS, HIGHSPY_BATCH_SOLVERS
 
 from n2v.config import config as global_config
 
@@ -362,7 +362,7 @@ class Star:
         if resolved_solver == 'default':
             resolved_solver = global_config.lp_solver
 
-        if resolved_solver in SCIPY_SOLVERS:
+        if resolved_solver in HIGHSPY_BATCH_SOLVERS:
             # Batch min+max: build model once, solve twice
             A = self.C if self.C.size > 0 else None
             b_vec = self.d if self.C.size > 0 else None
