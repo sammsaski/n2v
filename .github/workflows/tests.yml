@@ -22,7 +22,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch==2.8.0+cpu torchvision==0.23.0+cpu --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
           pip install -e third_party/onnx2torch
 

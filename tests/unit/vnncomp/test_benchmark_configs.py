@@ -4,7 +4,7 @@ import sys
 import os
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'examples', 'vnncomp'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'examples', 'VNN-COMP'))
 from benchmark_configs import get_config, BENCHMARK_CONFIGS, DEFAULT_CONFIG
 
 
