@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # to avoid circular dependencies
 
 # Import utility modules
-from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch, SCIPY_SOLVERS, HIGHSPY_BATCH_SOLVERS
+from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch, HIGHSPY_BATCH_SOLVERS
 
 from n2v.config import config as global_config
 
