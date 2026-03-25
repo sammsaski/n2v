@@ -164,7 +164,7 @@ def _solve_batch_highspy(
         h.run()
 
         status = h.getInfoValue("primal_solution_status")[1]
-        if status == 2:  # kSolutionStatusFeasible
+        if status == highspy.kSolutionStatusFeasible:
             results.append(h.getInfoValue("objective_function_value")[1])
         else:
             results.append(None)
