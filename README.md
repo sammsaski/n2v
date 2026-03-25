@@ -12,22 +12,56 @@ This toolbox is a translation of the MATLAB [NNV](https://github.com/verivital/n
 
 ## Installation
 
-### Step 1: Clone with Submodules
+### Quick Install (from GitHub)
 
 ```bash
-git clone --recurse-submodules <repository-url>
+# Core package
+pip install git+https://github.com/sammsaski/n2v.git
+
+# With HiGHS acceleration (recommended — 7x faster exact verification)
+pip install "n2v[accel] @ git+https://github.com/sammsaski/n2v.git"
+
+# With everything (HiGHS, ONNX, visualization, dev tools)
+pip install "n2v[all] @ git+https://github.com/sammsaski/n2v.git"
+```
+
+### Install from Source (for development)
+
+```bash
+# Clone with submodules
+git clone --recurse-submodules https://github.com/sammsaski/n2v.git
+cd n2v
 
 # If already cloned without submodules:
 git submodule update --init --recursive
+
+# Install in editable mode with dev dependencies
+pip install -e ".[dev]"
+
+# Install onnx2torch from submodule (for ONNX model support)
+pip install -e third_party/onnx2torch
+
+# Or use the install script (installs everything):
+bash install.sh
 ```
 
-### Step 2: Install
+### Optional Dependency Groups
+
+| Extra | Install command | What it adds |
+|-------|----------------|-------------|
+| `accel` | `pip install "n2v[accel] @ ..."` | `highspy` — direct HiGHS C++ API for ~7× LP speedup |
+| `onnx` | `pip install "n2v[onnx] @ ..."` | `onnx`, `onnxruntime` — ONNX model loading |
+| `viz` | `pip install "n2v[viz] @ ..."` | `matplotlib` — plotting |
+| `examples` | `pip install "n2v[examples] @ ..."` | `torchvision`, `pandas`, `jupyter` |
+| `dev` | `pip install "n2v[dev] @ ..."` | `pytest`, `build`, `twine` + all above |
+| `all` | `pip install "n2v[all] @ ..."` | Everything |
+
+> **Performance note:** The base install uses SciPy's built-in HiGHS wrapper for LP solving (~5.5× faster than CVXPY). Installing `[accel]` adds `highspy` for direct C++ API access, reaching ~7× speedup on exact verification.
+
+### Verify Installation
 
 ```bash
-cd n2v
-pip install -r requirements.txt
-pip install -e third_party/onnx2torch
-pip install -e .
+python -c "import n2v; print(f'n2v {n2v.__version__} installed successfully')"
 ```
 
 ### Dependencies
@@ -37,7 +71,6 @@ pip install -e .
 - NumPy >= 1.20.0
 - SciPy >= 1.7.0
 - CVXPY >= 1.2.0
-- onnx2torch (from submodule)
 
 ---
 
