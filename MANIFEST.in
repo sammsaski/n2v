@@ -1,0 +1,8 @@
+include README.md
+recursive-include benchmarks *.py
+recursive-include tests *.py
+recursive-include examples *.py *.ipynb
+recursive-include docs *
+prune build
+prune .pytest_cache
+prune __pycache__

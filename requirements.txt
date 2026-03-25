@@ -1,4 +1,6 @@
 # NNV-Python Dependencies
+# NOTE: pyproject.toml is the source of truth for package dependencies.
+# This file is kept for convenience. Prefer: pip install ".[all]"
 # Install with: pip install -r requirements.txt
 
 # Core dependencies

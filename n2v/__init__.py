@@ -7,7 +7,11 @@ analysis and robustness verification using set-based methods.
 Translated from the original MATLAB NNV tool by the VeriVital research group.
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import version, PackageNotFoundError
+try:
+    __version__ = version("n2v")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"  # neutral fallback when package metadata is unavailable
 __author__ = "NNV Team"
 
 from n2v.sets import Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope, HalfSpace, ProbabilisticBox

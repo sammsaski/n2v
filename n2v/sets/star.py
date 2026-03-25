@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # to avoid circular dependencies
 
 # Import utility modules
-from n2v.utils.lpsolver import solve_lp, check_feasibility
+from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch, SCIPY_SOLVERS, HIGHSPY_BATCH_SOLVERS
 
 from n2v.config import config as global_config
 
@@ -351,20 +351,43 @@ class Star:
         if index < 0 or index >= self.dim:
             raise ValueError(f"Invalid index {index}, dimension is {self.dim}")
 
-        # Minimize and maximize V[index, :] * [1; alpha]
-        # This is equivalent to: V[index, 0] + V[index, 1:] * alpha
+        if self.nVar == 0:
+            return self.V[index, 0], self.V[index, 0]
 
-        # Define LP: min/max f^T * alpha subject to C * alpha <= d
+        # Objective: V[index, 1:] * alpha
         f = self.V[index, 1:].reshape(-1, 1)
 
+        # Check if we should use batch solver (builds HiGHS model once for min+max)
+        resolved_solver = lp_solver
+        if resolved_solver == 'default':
+            resolved_solver = global_config.lp_solver
+
+        if resolved_solver in HIGHSPY_BATCH_SOLVERS:
+            # Batch min+max: build model once, solve twice
+            A = self.C if self.C.size > 0 else None
+            b_vec = self.d if self.C.size > 0 else None
+            lb_vec = self.predicate_lb if self.predicate_lb is not None else None
+            ub_vec = self.predicate_ub if self.predicate_ub is not None else None
+
+            results = solve_lp_batch(
+                objectives=[f.flatten(), f.flatten()],
+                A=A, b=b_vec, lb=lb_vec, ub=ub_vec,
+                minimize_flags=[True, False],
+            )
+
+            xmin_val, xmax_val = results[0], results[1]
+            if xmin_val is None or xmax_val is None:
+                return None, None
+
+            return xmin_val + self.V[index, 0], xmax_val + self.V[index, 0]
+
+        # Fallback: original sequential path for CVXPY/other solvers
         xmin = self._solve_lp(f, minimize=True, lp_solver=lp_solver)
         xmax = self._solve_lp(f, minimize=False, lp_solver=lp_solver)
 
         if xmin is None or xmax is None:
-            # Infeasible or unbounded
             return None, None
 
-        # Add constant term
         xmin = xmin + self.V[index, 0]
         xmax = xmax + self.V[index, 0]
 
