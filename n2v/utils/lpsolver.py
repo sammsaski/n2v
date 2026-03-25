@@ -11,7 +11,7 @@ Supports:
 import numpy as np
 import cvxpy as cp
 from scipy.optimize import linprog as scipy_linprog
-from scipy.sparse import issparse, csr_matrix
+from scipy.sparse import issparse
 from typing import Optional, Tuple, Dict, Any, List
 
 # Try to import highspy for direct HiGHS API access
