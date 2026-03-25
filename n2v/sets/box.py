@@ -250,7 +250,7 @@ class Box:
             # Convert i to binary and use as selector for lb/ub
             binary = [(i >> j) & 1 for j in range(self.dim)]
             for j in range(self.dim):
-                vertices[j, i] = self.ub[j] if binary[j] else self.lb[j]
+                vertices[j, i] = self.ub.flat[j] if binary[j] else self.lb.flat[j]
 
         # Remove duplicate vertices
         vertices = np.unique(vertices, axis=1)
