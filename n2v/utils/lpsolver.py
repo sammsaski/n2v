@@ -24,6 +24,11 @@ except ImportError:
 # Solvers that use scipy linprog backend
 SCIPY_SOLVERS = {'linprog', 'highs', 'highs-ds', 'highs-ipm'}
 
+# Solvers eligible for the direct highspy batch path
+# Specific variants (highs-ds, highs-ipm) are routed through scipy to preserve
+# the user's method choice.
+HIGHSPY_BATCH_SOLVERS = {'linprog', 'highs'}
+
 
 def solve_lp_batch(
     objectives: List[np.ndarray],
@@ -54,9 +59,19 @@ def solve_lp_batch(
     if not objectives:
         return []
 
+    # Normalize and validate objectives
+    objectives = [np.asarray(obj, dtype=np.float64).flatten() for obj in objectives]
     n = len(objectives[0])
+    if not all(len(obj) == n for obj in objectives):
+        raise ValueError("All objectives must have the same length")
+
     if minimize_flags is None:
         minimize_flags = [True] * len(objectives)
+    elif len(minimize_flags) != len(objectives):
+        raise ValueError(
+            f"minimize_flags length ({len(minimize_flags)}) must match "
+            f"objectives length ({len(objectives)})"
+        )
 
     # ── Direct HiGHS path (fast) ──
     if _HAS_HIGHSPY:
@@ -102,9 +117,12 @@ def _solve_batch_highspy(
     h = highspy.Highs()
     h.silent()
 
+    # Use HiGHS infinity constant instead of hardcoded values
+    inf = highspy.kHighsInf
+
     # Set column bounds
-    col_lb = np.asarray(lb, dtype=np.float64).flatten() if lb is not None else np.full(n, -1e30)
-    col_ub = np.asarray(ub, dtype=np.float64).flatten() if ub is not None else np.full(n, 1e30)
+    col_lb = np.asarray(lb, dtype=np.float64).flatten() if lb is not None else np.full(n, -inf)
+    col_ub = np.asarray(ub, dtype=np.float64).flatten() if ub is not None else np.full(n, inf)
 
     # Initial dummy cost (will be overwritten per solve)
     h.addVars(n, col_lb, col_ub)
@@ -115,21 +133,17 @@ def _solve_batch_highspy(
         b_flat = np.asarray(b, dtype=np.float64).flatten()
         m = A_dense.shape[0]
 
-        # Add rows: -inf <= A @ x <= b (i.e., A @ x <= b)
-        row_lb = np.full(m, -1e30)
-        row_ub = b_flat
-
         # Build sparse representation row by row
         for i in range(m):
             row = A_dense[i, :]
             nz_idx = np.nonzero(row)[0]
             if len(nz_idx) > 0:
-                h.addRow(-1e30, b_flat[i],
+                h.addRow(-inf, b_flat[i],
                          len(nz_idx),
                          nz_idx.astype(np.int32),
                          row[nz_idx])
             else:
-                h.addRow(-1e30, b_flat[i], 0, np.array([], dtype=np.int32), np.array([]))
+                h.addRow(-inf, b_flat[i], 0, np.array([], dtype=np.int32), np.array([]))
 
     results = []
     col_indices = np.arange(n, dtype=np.int32)

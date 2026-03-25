@@ -36,29 +36,37 @@ def benchmark_solver(net, input_star, solver_name, n_runs, method='exact'):
     orig_solver = config._default_lp_solver
     orig_highspy = lps._HAS_HIGHSPY
 
-    if solver_name == 'CVXPY':
-        config._default_lp_solver = 'default'
-    elif solver_name == 'SciPy linprog':
-        config._default_lp_solver = 'linprog'
-        lps._HAS_HIGHSPY = False
-    elif solver_name == 'highspy batch':
-        config._default_lp_solver = 'linprog'
-        lps._HAS_HIGHSPY = True
+    try:
+        if solver_name == 'CVXPY':
+            config._default_lp_solver = 'default'
+        elif solver_name == 'SciPy linprog':
+            config._default_lp_solver = 'linprog'
+            lps._HAS_HIGHSPY = False
+        elif solver_name == 'highspy batch':
+            # Verify highspy is actually importable before enabling
+            try:
+                import highspy  # noqa: F401
+            except ImportError:
+                raise RuntimeError(
+                    "highspy is not installed. Install with: pip install highspy"
+                )
+            config._default_lp_solver = 'linprog'
+            lps._HAS_HIGHSPY = True
 
-    # Warm up
-    result = net.reach(input_star, method=method)
-
-    times = []
-    for _ in range(n_runs):
-        t0 = time.perf_counter()
+        # Warm up
         result = net.reach(input_star, method=method)
-        times.append(time.perf_counter() - t0)
 
-    # Restore
-    config._default_lp_solver = orig_solver
-    lps._HAS_HIGHSPY = orig_highspy
+        times = []
+        for _ in range(n_runs):
+            t0 = time.perf_counter()
+            result = net.reach(input_star, method=method)
+            times.append(time.perf_counter() - t0)
 
-    return times, len(result)
+        return times, len(result)
+    finally:
+        # Always restore original solver configuration
+        config._default_lp_solver = orig_solver
+        lps._HAS_HIGHSPY = orig_highspy
 
 
 def main():
