@@ -18,7 +18,7 @@ class Config:
         self._parallel_threshold = 10  # Minimum dimension to use parallel
 
         # LP solver settings
-        self._default_lp_solver = 'default'
+        self._default_lp_solver = 'linprog'  # HiGHS via SciPy (fast C++ solver)
 
     @property
     def parallel_lp(self) -> bool:
