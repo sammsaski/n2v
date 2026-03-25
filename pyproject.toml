@@ -4,14 +4,37 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "n2v"
-version = "0.1.0"
+version = "0.1.1"
 description = "Neural network verification using set-based reachability analysis and probabilistic verification"
 readme = "README.md"
 requires-python = ">=3.8"
 authors = [
     {name = "VeriVITAL Team", email = "samuel.sasaki@vanderbilt.edu"}
 ]
-keywords = ["neural networks", "verification", "reachability", "formal methods", "pytorch"]
+keywords = [
+    "neural networks",
+    "verification",
+    "reachability",
+    "formal methods",
+    "formal verification",
+    "pytorch",
+    "safety",
+    "robustness",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Topic :: Security",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+]
 
 dependencies = [
     "numpy>=1.20.0",
@@ -21,14 +44,42 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+accel = [
+    "highspy>=1.7.0",  # Direct HiGHS C++ API for ~7x LP speedup
+]
+onnx = [
+    "onnx>=1.12.0",
+    "onnxruntime>=1.12.0",
+]
+viz = [
+    "matplotlib>=3.3.0",
+]
+examples = [
+    "n2v[viz]",
+    "torchvision>=0.15.0",
+    "pandas>=1.3.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.0.0",
+]
 dev = [
+    "n2v[accel,onnx,viz]",
     "pytest>=7.0.0",
     "pytest-cov>=3.0.0",
+    "build",
+    "twine",
+]
+all = [
+    "n2v[accel,onnx,examples,dev]",
 ]
 
 [project.urls]
+Homepage = "https://github.com/sammsaski/n2v"
 Repository = "https://github.com/sammsaski/n2v"
+Issues = "https://github.com/sammsaski/n2v/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["n2v*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

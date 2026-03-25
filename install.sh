@@ -28,21 +28,9 @@ pip install -e third_party/onnx2torch
 echo "✓ onnx2torch installed"
 echo ""
 
-# Install core dependencies
-echo "Installing core dependencies..."
-pip install torch numpy scipy cvxpy
-echo "✓ Core dependencies installed"
-echo ""
-
-# Install optional dependencies
-echo "Installing optional dependencies..."
-pip install onnx onnxruntime matplotlib torchvision pandas jupyter ipykernel
-echo "✓ Optional dependencies installed"
-echo ""
-
-# Install n2v in editable mode
-echo "Installing n2v in editable mode..."
-pip install -e .
+# Install n2v with all optional dependencies in editable mode
+echo "Installing n2v with all dependencies..."
+pip install -e ".[all]"
 echo "✓ n2v installed"
 echo ""
 
@@ -50,13 +38,23 @@ echo ""
 echo "Verifying installation..."
 python -c "import n2v; print(f'n2v version: {n2v.__version__}')"
 python -c "import onnx2torch; print(f'onnx2torch: {onnx2torch.__file__}')"
+python -c "
+from n2v.utils.lpsolver import _HAS_HIGHSPY
+print(f'highspy (direct HiGHS API): {_HAS_HIGHSPY}')
+"
 echo ""
 
 echo "=================================================="
 echo "Installation complete!"
 echo "=================================================="
 echo ""
-echo "You can now use n2v:"
+echo "Usage:"
 echo "  import n2v"
 echo "  from n2v.sets import Star, Zono"
+echo ""
+echo "Install modes:"
+echo "  pip install .              # core only"
+echo "  pip install '.[accel]'     # + HiGHS speedup"
+echo "  pip install '.[dev]'       # + testing tools"
+echo "  pip install '.[all]'       # everything"
 echo ""
