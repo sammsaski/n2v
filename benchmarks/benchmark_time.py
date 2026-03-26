@@ -1,8 +1,10 @@
 """
-Benchmark: LP Solver Ablation Study for n2v Exact Verification.
+Benchmark: LP Solver Ablation Study for n2v Verification.
 
 Compares three LP backends (CVXPY, SciPy linprog, highspy batch)
-across multiple network sizes and reports mean ± std over N runs.
+across multiple network sizes and reports mean +/- std over N runs.
+
+Runs approx mode first (all sizes), then exact mode (smaller nets only).
 
 Usage:
     python benchmarks/benchmark_time.py
@@ -10,12 +12,14 @@ Usage:
 """
 import argparse
 import time
+
 import numpy as np
 import torch
 import torch.nn as nn
+
+from n2v.config import config
 from n2v.nn import NeuralNetwork
 from n2v.sets import Star
-from n2v.config import config
 import n2v.utils.lpsolver as lps
 
 
@@ -73,42 +77,34 @@ def benchmark_solver(
         lps._HAS_HIGHSPY = orig_highspy
 
 
-def main():
-    parser = argparse.ArgumentParser(description='n2v LP Solver Ablation')
-    parser.add_argument('--runs', type=int, default=5, help='Number of runs per config')
-    args = parser.parse_args()
-    N_RUNS = args.runs
+# (label, layer dims, input perturbation epsilon)
+NETWORKS = [
+    ('Tiny   (2->5->2)', [2, 5, 2], 0.5),
+    ('Small  (5->20->10->2)', [5, 20, 10, 2], 0.1),
+    ('Medium (5->50->30->5)', [5, 50, 30, 5], 0.1),
+    ('Large  (10->100->50->10)', [10, 100, 50, 10], 0.05),
+    ('Deep   (5->30->20->15->5)', [5, 30, 20, 15, 5], 0.1),
+    ('XL     (10->200->100->10)', [10, 200, 100, 10], 0.02),
+]
 
-    print('=' * 90)
-    print('n2v LP Solver Ablation Study — Exact Verification')
-    print('=' * 90)
-    print(f'Runs per config: {N_RUNS}')
-    print(f'highspy available: {lps._HAS_HIGHSPY}')
-    print()
+SOLVERS = ['CVXPY', 'SciPy linprog', 'highspy batch']
 
-    # ── Network configurations ──
-    # (label, layer dims, input perturbation epsilon)
-    networks = [
-        # Tiny: few LP calls, tests dispatch overhead
-        ('Tiny   (2->5->2)',             [2, 5, 2],           0.5),
-        # Small: moderate LP calls
-        ('Small  (5->20->10->2)',        [5, 20, 10, 2],      0.1),
-        # Medium: many LP calls, crossing ReLUs
-        ('Medium (5->50->30->5)',        [5, 50, 30, 5],      0.1),
-        # Large: stress test LP solving
-        ('Large  (10->100->50->10)',     [10, 100, 50, 10],   0.05),
-        # Deep: 4 hidden layers
-        ('Deep   (5->30->20->15->5)',    [5, 30, 20, 15, 5],  0.1),
-        # XL: wide layers (skip CVXPY — too slow)
-        ('XL     (10->200->100->10)',    [10, 200, 100, 10],  0.02),
-    ]
 
-    solvers = ['CVXPY', 'SciPy linprog', 'highspy batch']
+def make_input(dims, eps):
+    """Create input star from bounds."""
+    lb = -eps * np.ones((dims[0], 1))
+    ub = eps * np.ones((dims[0], 1))
+    return Star.from_bounds(lb, ub)
 
-    # Print header
-    print(f'{"Network":<32} {"Solver":<16} {"Mean (ms)":>10} {"Std (ms)":>10} '
-          f'{"Speedup":>10} {"Stars":>6} {"LPs (est)":>10}')
-    print('-' * 96)
+
+def print_solver_table(networks, n_runs, method):
+    """Run and print solver comparison table."""
+    header = (
+        f'{"Network":<32} {"Solver":<16} {"Mean (ms)":>10} '
+        f'{"Std (ms)":>10} {"Speedup":>10} {"Stars":>6}'
+    )
+    print(header)
+    print('-' * len(header))
 
     for net_label, dims, eps in networks:
         np.random.seed(42)
@@ -116,31 +112,35 @@ def main():
 
         model = build_network(dims)
         net = NeuralNetwork(model)
-
-        lb = -eps * np.ones((dims[0], 1))
-        ub = eps * np.ones((dims[0], 1))
-        input_star = Star.from_bounds(lb, ub)
+        input_star = make_input(dims, eps)
 
         results = {}
-        for solver in solvers:
-            # Skip CVXPY for XL (would take >30s)
+        for solver in SOLVERS:
+            # Skip CVXPY for XL (too slow)
             if solver == 'CVXPY' and 'XL' in net_label:
                 results[solver] = (None, None, None)
                 continue
 
-            times, n_stars = benchmark_solver(net, input_star, solver, N_RUNS)
-            results[solver] = (np.mean(times), np.std(times), n_stars)
+            times, n_stars = benchmark_solver(
+                net, input_star, solver, n_runs, method,
+            )
+            results[solver] = (
+                np.mean(times), np.std(times), n_stars,
+            )
 
-        # Get CVXPY baseline for speedup calculation
         cvxpy_mean = results['CVXPY'][0]
+        label = net_label
 
-        for solver in solvers:
+        for solver in SOLVERS:
             mean_t, std_t, n_stars = results[solver]
 
             if mean_t is None:
-                print(f'{net_label:<32} {solver:<16} {"(skipped)":>10} {"":>10} '
-                      f'{"":>10} {"":>6} {"":>10}')
-                net_label = ''  # Don't repeat label
+                print(
+                    f'{label:<32} {solver:<16} '
+                    f'{"(skipped)":>10} {"":>10} '
+                    f'{"":>10} {"":>6}'
+                )
+                label = ''
                 continue
 
             if cvxpy_mean is not None:
@@ -148,53 +148,53 @@ def main():
             else:
                 speedup = '-'
 
-            # Estimate LP calls: ~2 * n_stars * avg_crossing_neurons
-            lp_est = f'~{n_stars * 2 * (dims[1] // 3)}'
-
-            print(f'{net_label:<32} {solver:<16} {mean_t*1000:>10.1f} {std_t*1000:>10.1f} '
-                  f'{speedup:>10} {n_stars:>6} {lp_est:>10}')
-            net_label = ''  # Don't repeat label for subsequent solvers
+            print(
+                f'{label:<32} {solver:<16} '
+                f'{mean_t*1000:>10.1f} {std_t*1000:>10.1f} '
+                f'{speedup:>10} {n_stars:>6}'
+            )
+            label = ''
 
         print()
 
-    # ── Approx mode comparison (no LP splitting) ──
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='n2v LP Solver Ablation',
+    )
+    parser.add_argument(
+        '--runs', type=int, default=5,
+        help='Number of runs per config',
+    )
+    args = parser.parse_args()
+    n_runs = args.runs
+
     print('=' * 90)
-    print('Approx Mode (no LP splitting — baseline for non-LP overhead)')
+    print('n2v LP Solver Ablation Study')
     print('=' * 90)
+    print(f'Runs per config: {n_runs}')
+    print(f'highspy available: {lps._HAS_HIGHSPY}')
     print()
 
-    approx_nets = [
-        ('Small  (5->20->10->2)',     [5, 20, 10, 2],    0.1),
-        ('Medium (5->50->30->5)',     [5, 50, 30, 5],    0.1),
-        ('Large  (10->100->50->10)', [10, 100, 50, 10], 0.05),
+    # -- Approx mode (all networks, no LP splitting) --
+    print('=' * 90)
+    print('Approx Mode (no LP splitting)')
+    print('=' * 90)
+    print()
+    print_solver_table(NETWORKS, n_runs, method='approx')
+
+    # -- Exact mode (smaller networks only) --
+    exact_networks = [
+        n for n in NETWORKS
+        if 'Large' not in n[0] and 'XL' not in n[0] and 'Deep' not in n[0]
     ]
 
-    print(f'{"Network":<32} {"Mean (ms)":>10} {"Std (ms)":>10}')
-    print('-' * 54)
-
-    for net_label, dims, eps in approx_nets:
-        np.random.seed(42)
-        torch.manual_seed(42)
-
-        model = build_network(dims)
-        net = NeuralNetwork(model)
-
-        lb = -eps * np.ones((dims[0], 1))
-        ub = eps * np.ones((dims[0], 1))
-        input_star = Star.from_bounds(lb, ub)
-
-        config._default_lp_solver = 'linprog'
-        _ = net.reach(input_star, method='approx')
-
-        times = []
-        for _ in range(N_RUNS):
-            t0 = time.perf_counter()
-            net.reach(input_star, method='approx')
-            times.append(time.perf_counter() - t0)
-
-        print(f'{net_label:<32} {np.mean(times)*1000:>10.2f} {np.std(times)*1000:>10.2f}')
-
+    print('=' * 90)
+    print('Exact Mode (LP splitting)')
+    print('=' * 90)
     print()
+    print_solver_table(exact_networks, n_runs, method='exact')
+
     print('Done.')
 
 

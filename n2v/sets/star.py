@@ -350,15 +350,16 @@ class Star:
         if self.nVar == 0:
             return self.V[index, 0], self.V[index, 0]
 
-        f = self.V[index, 1:].reshape(-1, 1)
+        f = self.V[index, 1:].flatten()
+        results = self._solve_lp_batch(
+            [f, f], [True, False], lp_solver,
+        )
 
-        xmin = self._solve_lp(f, minimize=True, lp_solver=lp_solver)
-        xmax = self._solve_lp(f, minimize=False, lp_solver=lp_solver)
-
-        if xmin is None or xmax is None:
+        xmin_val, xmax_val = results[0], results[1]
+        if xmin_val is None or xmax_val is None:
             return None, None
 
-        return xmin + self.V[index, 0], xmax + self.V[index, 0]
+        return xmin_val + self.V[index, 0], xmax_val + self.V[index, 0]
 
     def get_min(self, index: int, lp_solver: str = 'default') -> Optional[float]:
         """
@@ -527,16 +528,8 @@ class Star:
             objectives.extend([f, f])
             minimize_flags.extend([True, False])
 
-        A = self.C if self.C.size > 0 else None
-        b = self.d if self.C.size > 0 else None
-        lb_bounds = self.predicate_lb if self.predicate_lb is not None else None
-        ub_bounds = self.predicate_ub if self.predicate_ub is not None else None
-
-        results = solve_lp_batch(
-            objectives=objectives, A=A, b=b,
-            lb=lb_bounds, ub=ub_bounds,
-            minimize_flags=minimize_flags,
-            lp_solver=lp_solver,
+        results = self._solve_lp_batch(
+            objectives, minimize_flags, lp_solver,
         )
 
         lb = np.zeros((self.dim, 1))
@@ -621,6 +614,38 @@ class Star:
         self.state_ub = ub
 
         return lb, ub
+
+    def _solve_lp_batch(
+        self,
+        objectives: List[np.ndarray],
+        minimize_flags: List[bool],
+        lp_solver: str = 'default',
+    ) -> List[Optional[float]]:
+        """
+        Batch solve LPs sharing this star's constraints.
+
+        Args:
+            objectives: List of objective vectors
+            minimize_flags: List of booleans (True=minimize)
+            lp_solver: Solver to use
+
+        Returns:
+            List of optimal objective values (None if infeasible)
+        """
+        if self.nVar == 0:
+            return [0.0] * len(objectives)
+
+        A = self.C if self.C.size > 0 else None
+        b = self.d if self.C.size > 0 else None
+        lb = self.predicate_lb
+        ub = self.predicate_ub
+
+        return solve_lp_batch(
+            objectives=objectives, A=A, b=b,
+            lb=lb, ub=ub,
+            minimize_flags=minimize_flags,
+            lp_solver=lp_solver,
+        )
 
     def _solve_lp(
         self, f: np.ndarray, minimize: bool = True, lp_solver: str = 'default'
