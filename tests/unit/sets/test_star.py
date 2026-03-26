@@ -1142,6 +1142,30 @@ class TestStar:
         np.testing.assert_allclose(lb_par, lb_seq, atol=1e-6)
         np.testing.assert_allclose(ub_par, ub_seq, atol=1e-6)
 
+    def test_get_ranges_batch_matches_sequential(self):
+        """Batch get_ranges matches per-dimension get_range."""
+        lb = np.array([[0.0], [1.0], [2.0]])
+        ub = np.array([[1.0], [3.0], [5.0]])
+        star = Star.from_bounds(lb, ub)
+
+        W = np.array([[1.0, 0.5, 0.0],
+                      [0.0, 1.0, 0.5],
+                      [0.0, 0.0, 1.0]])
+        b = np.array([[1.0], [2.0], [3.0]])
+        star_t = star.affine_map(W, b)
+
+        # Per-dimension sequential via get_range
+        lb_seq = np.zeros((star_t.dim, 1))
+        ub_seq = np.zeros((star_t.dim, 1))
+        for i in range(star_t.dim):
+            lb_seq[i], ub_seq[i] = star_t.get_range(i)
+
+        # Batch via get_ranges (uses _get_ranges_batch)
+        lb_batch, ub_batch = star_t.get_ranges(parallel=False)
+
+        np.testing.assert_allclose(lb_batch, lb_seq, atol=1e-6)
+        np.testing.assert_allclose(ub_batch, ub_seq, atol=1e-6)
+
     def test_get_ranges_consistency_with_get_box(self):
         """Test that get_ranges() and get_box() give consistent results."""
         lb = np.array([[0.0], [1.0]])

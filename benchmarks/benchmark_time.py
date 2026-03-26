@@ -31,24 +31,29 @@ def build_network(dims):
     return model
 
 
-def benchmark_solver(net, input_star, solver_name, n_runs, method='exact'):
-    """Benchmark a single solver configuration. Returns (times_list, n_stars)."""
+def benchmark_solver(
+    net, input_star, solver_name, n_runs, method='exact',
+):
+    """Benchmark a single solver configuration.
+
+    Returns (times_list, n_stars).
+    """
     orig_solver = config._default_lp_solver
     orig_highspy = lps._HAS_HIGHSPY
 
     try:
         if solver_name == 'CVXPY':
-            config._default_lp_solver = 'default'
+            config._default_lp_solver = 'CLARABEL'
         elif solver_name == 'SciPy linprog':
             config._default_lp_solver = 'linprog'
             lps._HAS_HIGHSPY = False
         elif solver_name == 'highspy batch':
-            # Verify highspy is actually importable before enabling
             try:
                 import highspy  # noqa: F401
             except ImportError:
                 raise RuntimeError(
-                    "highspy is not installed. Install with: pip install highspy"
+                    "highspy is not installed. "
+                    "Install with: pip install highspy"
                 )
             config._default_lp_solver = 'linprog'
             lps._HAS_HIGHSPY = True
@@ -64,7 +69,6 @@ def benchmark_solver(net, input_star, solver_name, n_runs, method='exact'):
 
         return times, len(result)
     finally:
-        # Always restore original solver configuration
         config._default_lp_solver = orig_solver
         lps._HAS_HIGHSPY = orig_highspy
 

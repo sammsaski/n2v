@@ -8,11 +8,12 @@ Represents a star set: x = c + sum_{i=1}^n alpha_i * v_i
 Translated from MATLAB NNV Star.m
 """
 
-import numpy as np
-from typing import Optional, Tuple, List, Union, TYPE_CHECKING
-import cvxpy as cp
-from scipy.linalg import block_diag
 from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional, Tuple, TYPE_CHECKING
+
+import cvxpy as cp
+import numpy as np
+from scipy.linalg import block_diag
 
 # TYPE_CHECKING imports for type hints (avoid circular import at runtime)
 if TYPE_CHECKING:
@@ -23,7 +24,7 @@ if TYPE_CHECKING:
 # to avoid circular dependencies
 
 # Import utility modules
-from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch, HIGHSPY_BATCH_SOLVERS
+from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch
 
 from n2v.config import config as global_config
 
@@ -329,12 +330,7 @@ class Star:
             Box object
         """
         from .box import Box
-        lb = np.zeros((self.dim, 1))
-        ub = np.zeros((self.dim, 1))
-
-        for i in range(self.dim):
-            lb[i], ub[i] = self.get_range(i, lp_solver)
-
+        lb, ub = self.get_ranges(lp_solver=lp_solver)
         return Box(lb, ub)
 
     def get_range(self, index: int, lp_solver: str = 'default') -> Tuple[float, float]:
@@ -354,44 +350,15 @@ class Star:
         if self.nVar == 0:
             return self.V[index, 0], self.V[index, 0]
 
-        # Objective: V[index, 1:] * alpha
         f = self.V[index, 1:].reshape(-1, 1)
 
-        # Check if we should use batch solver (builds HiGHS model once for min+max)
-        resolved_solver = lp_solver
-        if resolved_solver == 'default':
-            resolved_solver = global_config.lp_solver
-
-        if resolved_solver in HIGHSPY_BATCH_SOLVERS:
-            # Batch min+max: build model once, solve twice
-            A = self.C if self.C.size > 0 else None
-            b_vec = self.d if self.C.size > 0 else None
-            lb_vec = self.predicate_lb if self.predicate_lb is not None else None
-            ub_vec = self.predicate_ub if self.predicate_ub is not None else None
-
-            results = solve_lp_batch(
-                objectives=[f.flatten(), f.flatten()],
-                A=A, b=b_vec, lb=lb_vec, ub=ub_vec,
-                minimize_flags=[True, False],
-            )
-
-            xmin_val, xmax_val = results[0], results[1]
-            if xmin_val is None or xmax_val is None:
-                return None, None
-
-            return xmin_val + self.V[index, 0], xmax_val + self.V[index, 0]
-
-        # Fallback: original sequential path for CVXPY/other solvers
         xmin = self._solve_lp(f, minimize=True, lp_solver=lp_solver)
         xmax = self._solve_lp(f, minimize=False, lp_solver=lp_solver)
 
         if xmin is None or xmax is None:
             return None, None
 
-        xmin = xmin + self.V[index, 0]
-        xmax = xmax + self.V[index, 0]
-
-        return xmin, xmax
+        return xmin + self.V[index, 0], xmax + self.V[index, 0]
 
     def get_min(self, index: int, lp_solver: str = 'default') -> Optional[float]:
         """
@@ -489,14 +456,8 @@ class Star:
         if use_parallel:
             return self._get_ranges_parallel(lp_solver, n_workers)
 
-        # Sequential version
-        lb = np.zeros((self.dim, 1))
-        ub = np.zeros((self.dim, 1))
-
-        for i in range(self.dim):
-            lb[i], ub[i] = self.get_range(i, lp_solver)
-
-        return lb, ub
+        # Batch path: single solve_lp_batch call for all dimensions
+        return self._get_ranges_batch(lp_solver)
 
     def _get_ranges_parallel(self, lp_solver: str = 'default',
                             n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
@@ -536,6 +497,59 @@ class Star:
                 else:
                     # LP failed for this dimension, use estimate
                     lb[i], ub[i] = self.estimate_range(i)
+
+        return lb, ub
+
+    def _get_ranges_batch(
+        self, lp_solver: str = 'default',
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute ranges for all dimensions using a single batched LP call.
+
+        Builds all 2*dim objectives and solves them in one solve_lp_batch call.
+        When highspy is available, this builds the HiGHS model once.
+
+        Args:
+            lp_solver: LP solver to use
+
+        Returns:
+            Tuple of (lb, ub) arrays, each shape (dim, 1)
+        """
+        if self.nVar == 0:
+            center = self.V[:, 0:1]
+            return center.copy(), center.copy()
+
+        # Build all objectives: min and max for each dimension
+        objectives = []
+        minimize_flags = []
+        for i in range(self.dim):
+            f = self.V[i, 1:].flatten()
+            objectives.extend([f, f])
+            minimize_flags.extend([True, False])
+
+        A = self.C if self.C.size > 0 else None
+        b = self.d if self.C.size > 0 else None
+        lb_bounds = self.predicate_lb if self.predicate_lb is not None else None
+        ub_bounds = self.predicate_ub if self.predicate_ub is not None else None
+
+        results = solve_lp_batch(
+            objectives=objectives, A=A, b=b,
+            lb=lb_bounds, ub=ub_bounds,
+            minimize_flags=minimize_flags,
+            lp_solver=lp_solver,
+        )
+
+        lb = np.zeros((self.dim, 1))
+        ub = np.zeros((self.dim, 1))
+
+        for i in range(self.dim):
+            xmin_val = results[2 * i]
+            xmax_val = results[2 * i + 1]
+            if xmin_val is None or xmax_val is None:
+                lb[i], ub[i] = self.estimate_range(i)
+            else:
+                lb[i] = xmin_val + self.V[i, 0]
+                ub[i] = xmax_val + self.V[i, 0]
 
         return lb, ub
 

@@ -13,17 +13,17 @@ Key design decisions:
 Translated from MATLAB NNV ImageStar.m
 """
 
-import numpy as np
-from typing import Optional, Tuple, List, Union, TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional, Tuple, TYPE_CHECKING
+
+import numpy as np
 
 # TYPE_CHECKING imports to avoid circular imports at runtime
 if TYPE_CHECKING:
     from n2v.sets.star import Star
-    from n2v.sets.zono import Zono
 
 # Import LP solver utilities
-from n2v.utils.lpsolver import solve_lp, check_feasibility
+from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch
 
 from n2v.config import config as global_config
 
@@ -408,16 +408,8 @@ class ImageStar:
         if use_parallel:
             return self._get_ranges_parallel(lp_solver, n_workers)
 
-        # Sequential computation
-        lb = np.zeros((self.dim, 1))
-        ub = np.zeros((self.dim, 1))
-
-        for i in range(self.dim):
-            lb[i, 0], ub[i, 0] = self.get_range_flat(i, lp_solver)
-
-        self.state_lb = lb
-        self.state_ub = ub
-        return lb, ub
+        # Batch path
+        return self._get_ranges_batch(lp_solver)
 
     def _get_ranges_parallel(self, lp_solver: str = 'default',
                              n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
@@ -438,6 +430,62 @@ class ImageStar:
                 i, (lb_i, ub_i) = future.result()
                 lb[i, 0] = lb_i
                 ub[i, 0] = ub_i
+
+        self.state_lb = lb
+        self.state_ub = ub
+        return lb, ub
+
+    def _get_ranges_batch(
+        self, lp_solver: str = 'default',
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute ranges for all pixels using a single batched LP call.
+
+        Args:
+            lp_solver: LP solver to use
+
+        Returns:
+            Tuple of (lb, ub) arrays, each shape (dim, 1)
+        """
+        if self.nVar == 0:
+            flat_center = self.V[:, :, :, 0].reshape(-1, 1)
+            return flat_center.copy(), flat_center.copy()
+
+        # Flatten generators: (H, W, C, nVar) -> (dim, nVar)
+        generators_flat = self.V[:, :, :, 1:].reshape(-1, self.nVar)
+        centers_flat = self.V[:, :, :, 0].flatten()
+
+        # Build all objectives: min and max for each pixel
+        objectives = []
+        minimize_flags = []
+        for i in range(self.dim):
+            f = generators_flat[i, :]
+            objectives.extend([f, f])
+            minimize_flags.extend([True, False])
+
+        A = self.C if self.C.size > 0 else None
+        b = self.d if self.C.size > 0 else None
+        lb_bounds = self.predicate_lb if self.predicate_lb is not None else None
+        ub_bounds = self.predicate_ub if self.predicate_ub is not None else None
+
+        results = solve_lp_batch(
+            objectives=objectives, A=A, b=b,
+            lb=lb_bounds, ub=ub_bounds,
+            minimize_flags=minimize_flags,
+            lp_solver=lp_solver,
+        )
+
+        lb = np.zeros((self.dim, 1))
+        ub = np.zeros((self.dim, 1))
+
+        for i in range(self.dim):
+            xmin_val = results[2 * i]
+            xmax_val = results[2 * i + 1]
+            if xmin_val is None or xmax_val is None:
+                lb[i, 0], ub[i, 0] = self.estimate_range(i)
+            else:
+                lb[i, 0] = xmin_val + centers_flat[i]
+                ub[i, 0] = xmax_val + centers_flat[i]
 
         self.state_lb = lb
         self.state_ub = ub
