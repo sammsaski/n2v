@@ -1,0 +1,106 @@
+/* n2v Documentation Custom Styles */
+
+/* Brand colors */
+:root {
+    --color-brand-primary: #1565C0;
+    --color-brand-content: #1565C0;
+    --n2v-blue: #1565C0;
+    --n2v-blue-light: rgba(21, 101, 192, 0.08);
+}
+
+/* Dark mode brand colors */
+@media (prefers-color-scheme: dark) {
+    :root {
+        --color-brand-primary: #42A5F5;
+        --color-brand-content: #42A5F5;
+        --n2v-blue: #42A5F5;
+        --n2v-blue-light: rgba(66, 165, 245, 0.1);
+    }
+}
+
+/* Furo dark mode override */
+body[data-theme="dark"] {
+    --color-brand-primary: #42A5F5;
+    --color-brand-content: #42A5F5;
+    --n2v-blue: #42A5F5;
+    --n2v-blue-light: rgba(66, 165, 245, 0.1);
+}
+
+/* All headings in brand blue */
+.content h1,
+.content h2,
+.content h3,
+.content h4,
+.content h5,
+.content h6,
+article h1,
+article h2,
+article h3,
+article h4,
+article h5,
+article h6,
+.document h1,
+.document h2,
+.document h3,
+.document h4,
+.document h5,
+.document h6 {
+    color: var(--n2v-blue);
+}
+
+/* Card titles also blue */
+.sd-card .sd-card-title {
+    color: var(--n2v-blue);
+}
+
+/* Admonition titles in blue */
+.admonition > .admonition-title {
+    color: var(--n2v-blue);
+}
+
+/* Lead paragraph style */
+.lead p {
+    font-size: 1.15em;
+    color: var(--color-foreground-secondary);
+    line-height: 1.6;
+}
+
+/* Horizontal rule as section divider */
+hr {
+    border: none;
+    border-top: 1px solid var(--color-background-border);
+    margin: 1.5rem 0;
+}
+
+/* Soundness guarantee admonition */
+.admonition.soundness {
+    border-color: #2E7D32;
+}
+
+.admonition.soundness > .admonition-title {
+    background-color: rgba(46, 125, 50, 0.1);
+}
+
+.admonition.soundness > .admonition-title::before {
+    content: "\2713";
+    color: #2E7D32;
+}
+
+/* Coverage guarantee admonition */
+.admonition.coverage {
+    border-color: #F57F17;
+}
+
+.admonition.coverage > .admonition-title {
+    background-color: rgba(245, 127, 23, 0.1);
+}
+
+/* Limit "On this page" right sidebar to 2 levels deep */
+.toc-tree li ul li ul {
+    display: none;
+}
+
+/* Table styling */
+table.docutils {
+    font-size: 0.9em;
+}
