@@ -99,7 +99,9 @@ All set types support: `from_bounds()`, `affine_map()`, `get_ranges()`, `estimat
 
 | Feature | Description |
 |---------|-------------|
-| scipy linprog (HiGHS) | 1.5-2x faster than CVXPY; `n2v.set_lp_solver('linprog')` |
+| Direct HiGHS API (highspy) | Batch LP solving via `solve_lp_batch()`; builds HiGHS model once for all objectives. Install: `pip install n2v[highs]` |
+| scipy linprog (HiGHS) | Default solver; fast C++ backend via scipy. Fallback when highspy not installed |
+| Dimension-level batching | `get_ranges()` and `get_box()` batch all min/max LPs into a single `solve_lp_batch()` call |
 | Parallel LP solving | Multi-worker via ThreadPoolExecutor; `n2v.set_parallel(True, n_workers=N)` |
 | Zono pre-pass | Precompute intermediate bounds to eliminate stable neurons before exact ReLU splitting |
 | BatchNorm fusion | Fuse BatchNorm into preceding Linear/Conv for fewer layers |
@@ -223,6 +225,7 @@ These are operations that work for Star/ImageStar but not yet for other set type
 
 - [ ] **GitHub Actions CI/CD** — Automated test runs on push/PR.
 - [ ] **Gurobi LP solver backend** — 10-100x faster than open-source solvers. Free for academics.
+- [ ] **LP strategy benchmarking** — Benchmark parallel-only vs batch-only vs parallel+batch on high-core-count machines to determine optimal default strategy for `get_ranges()`.
 - [ ] **Approx ReLU neuron classification** — Evaluate using `estimate_ranges()` instead of LP-based `get_range()` for neuron classification in approximate Star ReLU. Compare speed and tightness trade-off against current hybrid approach. See Known Limitations #7.
 
 ### Documentation

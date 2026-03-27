@@ -176,6 +176,33 @@ class TestImageStar:
         with pytest.raises(ValueError):
             img_star.contains(wrong_shape)
 
+    def test_image_star_get_ranges_batch_matches_sequential(self):
+        """ImageStar batch get_ranges matches sequential computation."""
+        from n2v.sets import ImageStar
+        H, W, C = 2, 2, 1
+        nVar = 3
+
+        np.random.seed(42)
+        V = np.random.randn(H, W, C, nVar + 1)
+        C_mat = np.eye(nVar)
+        d = np.ones((nVar, 1))
+        pred_lb = -np.ones((nVar, 1))
+        pred_ub = np.ones((nVar, 1))
+
+        istar = ImageStar(V, C_mat, d, pred_lb, pred_ub, H, W, C)
+
+        # Sequential: compute each range individually
+        lb_seq = np.zeros((istar.dim, 1))
+        ub_seq = np.zeros((istar.dim, 1))
+        for i in range(istar.dim):
+            lb_seq[i, 0], ub_seq[i, 0] = istar.get_range_flat(i)
+
+        # Batch via get_ranges
+        lb_batch, ub_batch = istar.get_ranges(parallel=False)
+
+        np.testing.assert_allclose(lb_batch, lb_seq, atol=1e-6)
+        np.testing.assert_allclose(ub_batch, ub_seq, atol=1e-6)
+
 
 class TestImageZono:
     """Tests for ImageZono set."""

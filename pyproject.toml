@@ -26,6 +26,9 @@ dev = [
     "pytest-cov>=3.0.0",
     "onnxscript>=0.1.0",
 ]
+highs = [
+    "highspy>=1.5.0",
+]
 
 [project.urls]
 Repository = "https://github.com/sammsaski/n2v"
