@@ -88,37 +88,52 @@ def solve_lp_batch(
     if _HAS_HIGHSPY and lp_solver in _HIGHSPY_BATCH_SOLVERS:
         return _solve_batch_highspy(objectives, A, b, lb, ub, minimize_flags, n)
 
-    # Fallback: sequential scipy.linprog
-    # Prepare shared constraint data once (invariant across objectives)
-    if lb is not None:
-        lb_arr = np.asarray(lb, dtype=np.float64).flatten()
-    else:
-        lb_arr = np.full(n, -np.inf)
-    if ub is not None:
-        ub_arr = np.asarray(ub, dtype=np.float64).flatten()
-    else:
-        ub_arr = np.full(n, np.inf)
-    bounds = list(zip(lb_arr, ub_arr))
-    A_ub = np.asarray(A, dtype=np.float64) if A is not None else None
-    b_ub = np.asarray(b, dtype=np.float64).flatten() if b is not None else None
+    # SciPy linprog fallback (for highs, highs-ds, highs-ipm, linprog)
+    if lp_solver in SCIPY_SOLVERS:
+        if lb is not None:
+            lb_arr = np.asarray(lb, dtype=np.float64).flatten()
+        else:
+            lb_arr = np.full(n, -np.inf)
+        if ub is not None:
+            ub_arr = np.asarray(ub, dtype=np.float64).flatten()
+        else:
+            ub_arr = np.full(n, np.inf)
+        bounds = list(zip(lb_arr, ub_arr))
+        A_ub = np.asarray(A, dtype=np.float64) if A is not None else None
+        b_ub = np.asarray(b, dtype=np.float64).flatten() if b is not None else None
 
-    results = []
-    for i, (f_obj, do_min) in enumerate(zip(objectives, minimize_flags)):
-        f = f_obj if do_min else -f_obj
+        results = []
+        for i, (f_obj, do_min) in enumerate(zip(objectives, minimize_flags)):
+            f = f_obj if do_min else -f_obj
 
-        try:
-            res = scipy_linprog(c=f, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
-            if res.success:
-                fval = -res.fun if not do_min else res.fun
-                results.append(fval)
-            else:
+            try:
+                res = scipy_linprog(c=f, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+                if res.success:
+                    fval = -res.fun if not do_min else res.fun
+                    results.append(fval)
+                else:
+                    results.append(None)
+            except Exception as e:
+                warnings.warn(
+                    f"LP solve failed for objective {i}: {e}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 results.append(None)
-        except Exception as e:
-            warnings.warn(
-                f"LP solve failed for objective {i}: {e}",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+
+        return results
+
+    # CVXPY / other solvers: sequential via solve_lp() which routes properly
+    results = []
+    for f_obj, do_min in zip(objectives, minimize_flags):
+        f_col = f_obj.reshape(-1, 1)
+        _, fval, status, _ = solve_lp(
+            f=f_col, A=A, b=b, lb=lb, ub=ub,
+            lp_solver=lp_solver, minimize=do_min,
+        )
+        if status in ('optimal', 'optimal_inaccurate'):
+            results.append(fval)
+        else:
             results.append(None)
 
     return results
