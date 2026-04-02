@@ -126,7 +126,7 @@ class TestConfigurationSystem:
         assert config.auto_parallel is True
         assert config.parallel_threshold == 10
         assert config.n_workers >= 1  # Should auto-detect
-        assert config.lp_solver == 'default'
+        assert config.lp_solver == 'linprog'
 
     def test_set_parallel_boolean(self):
         """Test setting parallel mode with boolean."""
@@ -216,7 +216,7 @@ class TestConfigurationSystem:
         # Should be back to defaults
         assert config.parallel_lp is False
         assert config.auto_parallel is True
-        assert config.lp_solver == 'default'
+        assert config.lp_solver == 'linprog'
 
 
 class TestParallelIntegration:
