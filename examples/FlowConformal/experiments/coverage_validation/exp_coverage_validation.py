@@ -25,7 +25,7 @@ import pandas as pd
 import torch
 
 project_root = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), '..', '..')
+    os.path.join(os.path.dirname(__file__), '..', '..', '..', '..')
 )
 sys.path.insert(0, project_root)
 sys.path.insert(0, os.path.join(project_root, 'examples'))
@@ -170,8 +170,7 @@ def compute_n2v_ground_truth(classifier, x_center, true_class, radius,
         }
 
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'outputs')
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(OUTPUT_DIR, 'exp_coverage_validation.csv')
 
 # ---- Experiment configuration (preliminary scale) ----

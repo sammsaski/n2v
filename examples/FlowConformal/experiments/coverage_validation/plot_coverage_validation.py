@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), 'outputs')
+OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(OUTPUT_DIR, 'exp_coverage_validation.csv')
 HISTOGRAM_PATH = os.path.join(OUTPUT_DIR, 'exp_coverage_validation_histograms.png')
 CALIBRATION_PATH = os.path.join(OUTPUT_DIR, 'exp_coverage_validation_calibration.png')
