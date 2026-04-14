@@ -450,6 +450,142 @@ class TestClippingBlockTrainingOptimization:
         assert np.all(result.ub >= result.lb)
 
 
+class TestClippingBlockPerComponentInflation:
+    """Regression tests for audit Finding 1: tau must come from train + calib
+    so per-component structure is preserved for the clipping block."""
+
+    def test_clipping_block_inflation_is_per_component_not_uniform(self):
+        """For anisotropic outputs, clipping-block inflation should track
+        the per-dimension error scale, not degenerate to a uniform scalar."""
+        def anisotropic_model(x):
+            # y_0 ~ unit scale, y_1 ~ 1/10 unit scale
+            return np.column_stack([x[:, 0], 0.1 * x[:, 1]])
+
+        input_set = Box(np.zeros(2), np.ones(2))
+        result = verify(
+            model=anisotropic_model,
+            input_set=input_set,
+            m=500,
+            epsilon=0.05,
+            surrogate='clipping_block',
+            training_samples=200,
+            seed=42,
+        )
+        # Widths should differ by roughly the same 10x as the model output scale.
+        width = (result.ub - result.lb).flatten()
+        ratio = width[0] / max(width[1], 1e-12)
+        assert ratio > 3.0, (
+            f"clipping block produced near-uniform inflation "
+            f"(width ratio {ratio:.2f}) — per-component structure was lost"
+        )
+
+    def test_clipping_block_tighter_than_pre_fix_uniform_inflation(self):
+        """Clipping block with anisotropic outputs should produce a smaller
+        total volume than a uniform-inflation baseline would have."""
+        def anisotropic_model(x):
+            return np.column_stack([x[:, 0], 0.1 * x[:, 1]])
+
+        input_set = Box(np.zeros(2), np.ones(2))
+        result = verify(
+            model=anisotropic_model,
+            input_set=input_set,
+            m=500,
+            epsilon=0.05,
+            surrogate='clipping_block',
+            training_samples=200,
+            seed=42,
+        )
+        width = (result.ub - result.lb).flatten()
+        volume = float(np.prod(width))
+        # If inflation were uniform at the max scale (pre-fix), volume would
+        # be at least ~ (max_err * 2)^2 ≈ 4 in a 2D box. With per-component
+        # inflation, volume should be well under that.
+        assert volume < 0.8, (
+            f"clipping block volume {volume:.3f} too large — "
+            f"suggests uniform inflation regression"
+        )
+
+
+class TestPCASoundness:
+    """Regression tests for audit Finding 3: PCA must compute errors in the
+    full output space so the PCA residual is covered by the final bounds."""
+
+    def test_pca_clipping_block_covers_pca_residual(self):
+        """Outputs with meaningful variance outside the PCA subspace must still
+        be covered by the final bounds. Before the fix, the PCA residual was
+        silently dropped."""
+        # Model produces a 5D output with rank-2 signal plus orthogonal noise.
+        # PCA with n_components=2 captures the signal; the noise is residual.
+        rng = np.random.RandomState(0)
+        basis = rng.randn(2, 5)
+
+        def lowrank_plus_noise(x):
+            # x is shape (batch, 2); lift to 5D rank-2 signal plus noise
+            signal = x @ basis
+            # Deterministic noise derived from input so the model is reproducible
+            noise = 0.4 * np.sin(10 * x @ np.array([[1, 0, 1, 0, 1], [0, 1, 0, 1, 0]]))
+            return signal + noise
+
+        input_set = Box(np.zeros(2), np.ones(2))
+
+        result = verify(
+            model=lowrank_plus_noise,
+            input_set=input_set,
+            m=500,
+            epsilon=0.05,
+            surrogate='clipping_block',
+            training_samples=200,
+            pca_components=2,
+            seed=42,
+        )
+
+        # Check empirical coverage in full space.
+        rng_test = np.random.RandomState(1)
+        test_inputs = rng_test.uniform(0, 1, size=(5000, 2))
+        test_outputs = lowrank_plus_noise(test_inputs)
+
+        inside = np.all(
+            (test_outputs >= result.lb.flatten()) & (test_outputs <= result.ub.flatten()),
+            axis=1,
+        )
+        empirical_coverage = float(np.mean(inside))
+
+        # Should clear the target coverage; before the fix this dropped far
+        # below because the PCA residual was not accounted for.
+        assert empirical_coverage > 0.92, (
+            f"Empirical full-space coverage {empirical_coverage:.3f} below "
+            f"target {1 - 0.05:.3f} — PCA residual not covered"
+        )
+
+    def test_pca_naive_still_valid(self):
+        """The naive surrogate with PCA should still produce valid bounds."""
+        rng = np.random.RandomState(0)
+        basis = rng.randn(2, 4)
+
+        def lowrank_plus_noise(x):
+            return x @ basis + 0.2 * np.cos(5 * x[:, :1] + x[:, 1:])
+
+        input_set = Box(np.zeros(2), np.ones(2))
+        result = verify(
+            model=lowrank_plus_noise,
+            input_set=input_set,
+            m=500,
+            epsilon=0.1,
+            surrogate='naive',
+            pca_components=2,
+            seed=42,
+        )
+
+        rng_test = np.random.RandomState(2)
+        test_inputs = rng_test.uniform(0, 1, size=(5000, 2))
+        test_outputs = lowrank_plus_noise(test_inputs)
+        inside = np.all(
+            (test_outputs >= result.lb.flatten()) & (test_outputs <= result.ub.flatten()),
+            axis=1,
+        )
+        assert float(np.mean(inside)) > 0.85
+
+
 class TestVerifyImports:
     """Tests for module imports."""
 

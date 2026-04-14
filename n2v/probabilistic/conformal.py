@@ -59,18 +59,31 @@ def compute_confidence(m: int, ell: int, epsilon: float) -> float:
 
 def compute_normalization(
     training_errors: np.ndarray,
+    calibration_errors: Optional[np.ndarray] = None,
     tau_star_factor: float = 1e-5
 ) -> np.ndarray:
     """
     Compute per-dimension normalization factors τ.
 
-    τ[k] = max(τ*, max_j |training_errors[j, k]|)
+    Faithful to Paper 1 equation (6) / Paper 2 section 3.1:
 
-    Where τ* is a small value to prevent division by zero.
+        τ[k] = max(τ*, max_{j ∈ train ∪ calib} |err[j, k]|)
+        τ* = τ_star_factor * mean(|training_errors|)
+
+    The max is taken over the union of training and calibration errors,
+    not training errors alone. This matters for surrogates whose training
+    errors are zero by construction (e.g., the clipping block, where
+    training outputs are the convex hull vertices and project to themselves):
+    without the calibration-error contribution, τ degenerates to τ*,
+    erasing the per-component structure and producing uniform scalar
+    inflation instead of per-component inflation.
 
     Args:
         training_errors: Array of shape (t, n) where t is number of training
                          samples and n is output dimension
+        calibration_errors: Optional array of shape (m, n). If provided,
+                            its per-component max |err| is unioned with the
+                            training errors' per-component max.
         tau_star_factor: Factor for computing τ* (default: 1e-5)
 
     Returns:
@@ -83,14 +96,22 @@ def compute_normalization(
     if training_errors.ndim == 1:
         training_errors = training_errors.reshape(1, -1)
 
-    # Compute τ* to prevent division by zero
-    # τ* = tau_star_factor * mean(|training_errors|)
+    if calibration_errors is not None and calibration_errors.ndim == 1:
+        calibration_errors = calibration_errors.reshape(1, -1)
+
+    # Compute τ* from training errors (Paper 1 eq 6)
     mean_abs = np.mean(np.abs(training_errors))
     tau_star = tau_star_factor * mean_abs if mean_abs > 0 else 1e-10
     tau_star = max(tau_star, 1e-10)  # Absolute minimum
 
-    # τ[k] = max(τ*, max_j |training_errors[j, k]|)
-    max_abs_errors = np.max(np.abs(training_errors), axis=0)  # Shape: (n,)
+    # τ[k] = max(τ*, max_{j ∈ train ∪ calib} |err[j, k]|)
+    max_abs_train = np.max(np.abs(training_errors), axis=0)  # Shape: (n,)
+    if calibration_errors is not None:
+        max_abs_calib = np.max(np.abs(calibration_errors), axis=0)
+        max_abs_errors = np.maximum(max_abs_train, max_abs_calib)
+    else:
+        max_abs_errors = max_abs_train
+
     tau = np.maximum(tau_star, max_abs_errors)
 
     return tau
@@ -220,8 +241,10 @@ def conformal_inference(
     if not 0 < epsilon < 1:
         raise ValueError(f"epsilon must be in (0, 1), got {epsilon}")
 
-    # Step 1: Compute normalization
-    tau = compute_normalization(training_errors)
+    # Step 1: Compute normalization over train ∪ calib errors
+    # (Paper 1 eq 6 / Paper 2 §3.1 — τ_k is the max |err| over the union,
+    #  critical for surrogates with zero training errors like the clipping block)
+    tau = compute_normalization(training_errors, calibration_errors)
 
     # Step 2: Compute nonconformity scores
     scores = compute_nonconformity_scores(calibration_errors, tau)

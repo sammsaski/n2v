@@ -238,17 +238,19 @@ def verify(
         surr = BatchedClippingBlockSurrogate(batch_size=1000, verbose=verbose)
 
     surr.fit(training_outputs_reduced)
-    surrogate_lb, surrogate_ub = surr.get_bounds()
+    surrogate_lb_reduced, surrogate_ub_reduced = surr.get_bounds()
 
-    # Compute training errors for normalization.
-    # For clipping block, training outputs are the convex hull vertices,
-    # so predict() returns them unchanged — training errors are zero.
-    # Skip the expensive LP projections in that case.
-    if surrogate == 'clipping_block':
-        training_errors = np.zeros_like(training_outputs_reduced)
+    # Lift the surrogate bounding box to full output space. Without PCA,
+    # the reduced and full spaces are the same and no lift is needed.
+    # With PCA, the reduced-space bbox becomes a box in full space via
+    # interval arithmetic on the inverse linear map.
+    if pca is not None:
+        surrogate_lb_full, surrogate_ub_full = _inverse_transform_bounds(
+            pca, surrogate_lb_reduced, surrogate_ub_reduced
+        )
     else:
-        training_projections = surr.predict(training_outputs_reduced)
-        training_errors = training_outputs_reduced - training_projections
+        surrogate_lb_full = surrogate_lb_reduced
+        surrogate_ub_full = surrogate_ub_reduced
 
     if verbose:
         logger.debug("  Surrogate bounds computed")
@@ -269,16 +271,46 @@ def verify(
         calibration_outputs_reduced = calibration_outputs
 
     # =========================================
-    # Step 5: Compute calibration errors
+    # Step 5: Compute errors in full output space
     # =========================================
+    # Faithful to Paper 2 §3.2: the prediction error is
+    #   q(x) = f(x) - g(x), where g(x) = A · CLP(A^T · f(x))
+    # which lives in full output space. Computing errors in reduced
+    # space would silently drop the PCA residual (I - A A^T) f(x),
+    # breaking the coverage guarantee for outputs with nonzero residual.
     if verbose:
-        logger.info("Step 5: Computing calibration errors...")
+        logger.info("Step 5: Computing calibration errors (full space)...")
 
-    calibration_projections = surr.predict(calibration_outputs_reduced)
-    calibration_errors = calibration_outputs_reduced - calibration_projections
+    calibration_projections_reduced = surr.predict(calibration_outputs_reduced)
+    if pca is not None:
+        calibration_projections_full = pca.inverse_transform(
+            calibration_projections_reduced
+        )
+    else:
+        calibration_projections_full = calibration_projections_reduced
+    calibration_errors = calibration_outputs - calibration_projections_full
+
+    # Training errors in full output space.
+    # Fast path: clipping block without PCA — training outputs are
+    # convex hull vertices in the same space where the projection lives,
+    # so they project to themselves exactly and errors are zero.
+    # With PCA, even the clipping block has nonzero full-space training
+    # errors (the PCA residual of the centered training points), so we
+    # must compute them.
+    if surrogate == 'clipping_block' and pca is None:
+        training_errors = np.zeros_like(training_outputs)
+    else:
+        training_projections_reduced = surr.predict(training_outputs_reduced)
+        if pca is not None:
+            training_projections_full = pca.inverse_transform(
+                training_projections_reduced
+            )
+        else:
+            training_projections_full = training_projections_reduced
+        training_errors = training_outputs - training_projections_full
 
     # =========================================
-    # Step 6: Conformal inference
+    # Step 6: Conformal inference (in full output space)
     # =========================================
     if verbose:
         logger.info("Step 6: Running conformal inference...")
@@ -297,22 +329,13 @@ def verify(
         logger.info(f"  Threshold R_ell: {guarantee.threshold:.4f}")
 
     # =========================================
-    # Step 7: Compute final bounds
+    # Step 7: Compute final bounds in full space
     # =========================================
     if verbose:
         logger.info("Step 7: Computing final bounds...")
 
-    final_lb_reduced = surrogate_lb - guarantee.inflation
-    final_ub_reduced = surrogate_ub + guarantee.inflation
-
-    # Transform back to full dimension if PCA was used
-    if pca is not None:
-        final_lb, final_ub = _inverse_transform_bounds(
-            pca, final_lb_reduced, final_ub_reduced
-        )
-    else:
-        final_lb = final_lb_reduced
-        final_ub = final_ub_reduced
+    final_lb = surrogate_lb_full - guarantee.inflation
+    final_ub = surrogate_ub_full + guarantee.inflation
 
     # =========================================
     # Step 8: Create ProbabilisticBox

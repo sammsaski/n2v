@@ -110,6 +110,36 @@ class TestComputeNormalization:
         with pytest.raises(ValueError, match="cannot be empty"):
             compute_normalization(np.array([]))
 
+    def test_normalization_unions_train_and_calib(self):
+        """tau[k] = max over train + calib errors per component (Paper 1 eq 6)."""
+        training_errors = np.array([
+            [1.0, 0.0],
+            [0.5, 0.0],
+        ])
+        calibration_errors = np.array([
+            [0.0, 3.0],
+            [0.0, 1.5],
+        ])
+        tau = compute_normalization(training_errors, calibration_errors)
+        # Max over both: dim 0 max = 1.0 (train), dim 1 max = 3.0 (calib)
+        assert tau[0] >= 1.0
+        assert tau[1] >= 3.0
+
+    def test_normalization_clipping_block_scenario(self):
+        """Regression test for Finding 1: zero training errors must not
+        collapse tau to the 1e-10 floor when calibration errors are provided."""
+        training_errors = np.zeros((50, 2))  # clipping block scenario
+        calibration_errors = np.column_stack([
+            np.random.RandomState(0).randn(100) * 1.0,
+            np.random.RandomState(1).randn(100) * 0.1,
+        ])
+        tau = compute_normalization(training_errors, calibration_errors)
+        # tau should reflect the per-component calibration error scale,
+        # not the 1e-10 floor.
+        assert tau[0] > 0.5  # y_1 scale ~ 1.0
+        assert tau[1] > 0.05  # y_2 scale ~ 0.1
+        assert tau[1] < 0.5  # y_2 should NOT be inflated to the y_1 scale
+
 
 class TestComputeNonconformityScores:
     """Tests for compute_nonconformity_scores function."""
