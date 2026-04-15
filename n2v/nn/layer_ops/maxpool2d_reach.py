@@ -14,6 +14,7 @@ import torch.nn.functional as F
 import numpy as np
 from typing import List, Tuple, Optional
 from n2v.sets import Star, ImageStar, ImageZono, Hexatope, Octatope
+from n2v.utils.lp_solver_enum import LPSolver
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +23,7 @@ def maxpool2d_star(
     layer: nn.MaxPool2d,
     input_stars: List[Star],
     method: str = 'exact',
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False,
     **kwargs
 ) -> List[Star]:
@@ -51,7 +52,7 @@ def maxpool2d_star(
 def _maxpool2d_star_exact_single(
     layer: nn.MaxPool2d,
     input_star: ImageStar,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False
 ) -> List[ImageStar]:
     """
@@ -169,7 +170,7 @@ def _maxpool2d_star_exact_single(
 def _maxpool2d_star_exact_multiple(
     layer: nn.MaxPool2d,
     input_stars: List[ImageStar],
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False
 ) -> List[ImageStar]:
     """
@@ -187,7 +188,7 @@ def _maxpool2d_star_exact_multiple(
 def _maxpool2d_star_approx_single(
     layer: nn.MaxPool2d,
     input_star: ImageStar,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False
 ) -> ImageStar:
     """
@@ -331,7 +332,7 @@ def _maxpool2d_star_approx_single(
 def _maxpool2d_star_approx_multiple(
     layer: nn.MaxPool2d,
     input_stars: List[ImageStar],
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False
 ) -> List[ImageStar]:
     """
@@ -506,7 +507,7 @@ def _step_split_4d(
     original_star: ImageStar,
     pos: Tuple[int, int, int],
     max_indices: List[Tuple[int, int]],
-    lp_solver: str
+    lp_solver: "LPSolver | str"
 ) -> List[ImageStar]:
     """
     Split an ImageStar into multiple stars based on which pixel is max.

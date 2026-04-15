@@ -19,6 +19,7 @@ from n2v.sets import Star, HalfSpace
 from n2v.sets.image_star import ImageStar
 from n2v.nn import NeuralNetwork
 from n2v.utils.verify_specification import verify_specification
+from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
 
 
 # =============================================================================
@@ -34,13 +35,22 @@ class ReachOptions:
     precompute_bounds: bool = False
     parallel: bool = True
     n_workers: Optional[int] = None
-    lp_solver: str = 'linprog'
+    lp_solver: LPSolver = LPSolver.LINPROG
     extra_kwargs: dict = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Accept str/None at construction time for ergonomic call sites.
+        if not isinstance(self.lp_solver, LPSolver):
+            self.lp_solver = _resolve_lp(self.lp_solver)
+
     def to_kwargs(self) -> dict:
-        """Convert to kwargs dict for reach_pytorch_model()."""
+        """Convert to kwargs dict for reach_pytorch_model().
+
+        Emits the string value of ``lp_solver`` for serialization friendliness;
+        the downstream coercion at Layer 2/3 will turn it back into the enum.
+        """
         kw = {
-            'lp_solver': self.lp_solver,
+            'lp_solver': self.lp_solver.value,
             'precompute_bounds': self.precompute_bounds,
         }
         if self.relax_factor is not None:
@@ -49,6 +59,19 @@ class ReachOptions:
             kw['relax_method'] = self.relax_method
         kw.update(self.extra_kwargs)
         return kw
+
+    def to_dict(self) -> dict:
+        """Plain dict of this config, emitting ``lp_solver`` as its str value."""
+        return {
+            'method': self.method,
+            'relax_factor': self.relax_factor,
+            'relax_method': self.relax_method,
+            'precompute_bounds': self.precompute_bounds,
+            'parallel': self.parallel,
+            'n_workers': self.n_workers,
+            'lp_solver': self.lp_solver.value,
+            'extra_kwargs': dict(self.extra_kwargs),
+        }
 
 
 def analyze_difficulty(

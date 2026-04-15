@@ -15,6 +15,7 @@ from n2v.nn import NeuralNetwork
 from n2v import utils
 from n2v import probabilistic
 from n2v.config import config, set_parallel, set_lp_solver, get_config
+from n2v.utils.lp_solver_enum import Backend, LPSolver
 
 __all__ = [
     "Star",
@@ -33,4 +34,6 @@ __all__ = [
     "set_parallel",
     "set_lp_solver",
     "get_config",
+    "Backend",
+    "LPSolver",
 ]

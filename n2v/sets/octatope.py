@@ -21,6 +21,8 @@ from dataclasses import dataclass
 import cvxpy as cp
 from concurrent.futures import ThreadPoolExecutor
 
+from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
+
 # TYPE_CHECKING imports for type hints (avoid circular import at runtime)
 if TYPE_CHECKING:
     from n2v.sets.hexatope import DifferenceConstraintSystem, Hexatope
@@ -532,7 +534,8 @@ class Octatope:
         # Now optimize w^T x over UTVPI system
         if solver == 'mcf':
             result = self._optimize_utvpi_mcf(composed_obj, constant_term, maximize)
-        else:  # solver == 'lp'
+        else:  # solver == 'lp': cross into enum-land (hex_oct alias maps 'lp' -> DEFAULT)
+            _lp_enum = _resolve_lp(solver, hex_oct_alias=True)  # noqa: F841 - reserved for future use
             result = self._optimize_utvpi_lp(composed_obj, constant_term, maximize)
 
         return result

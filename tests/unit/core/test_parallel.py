@@ -184,7 +184,14 @@ class TestConfigurationSystem:
         assert workers_20 <= 8
 
     def test_set_lp_solver(self):
-        """Test setting LP solver."""
+        """Test setting LP solver.
+
+        After the LPSolver enum refactor, ``config.lp_solver`` is an
+        :class:`LPSolver` member. The str-mixin preserves equality against the
+        legacy string names. Setting the sentinel ``'default'`` resolves to
+        the canonical :attr:`LPSolver.LINPROG` so consumers never see the
+        sentinel at rest.
+        """
         set_lp_solver('GUROBI')
         assert config.lp_solver == 'GUROBI'
 
@@ -192,7 +199,7 @@ class TestConfigurationSystem:
         assert config.lp_solver == 'MOSEK'
 
         set_lp_solver('default')
-        assert config.lp_solver == 'default'
+        assert config.lp_solver == 'linprog'
 
     def test_get_config(self):
         """Test getting configuration as dictionary."""

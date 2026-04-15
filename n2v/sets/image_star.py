@@ -14,7 +14,7 @@ Translated from MATLAB NNV ImageStar.m
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
 
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 # Import LP solver utilities
 from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch
+from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
 
 from n2v.config import config as global_config
 
@@ -384,7 +385,8 @@ class ImageStar:
 
         return center_val + lb_contrib, center_val + ub_contrib
 
-    def get_ranges(self, lp_solver: str = 'default', parallel: bool = None,
+    def get_ranges(self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
+                   parallel: bool = None,
                    n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute exact ranges for all pixels using LP.
@@ -397,6 +399,7 @@ class ImageStar:
         Returns:
             Tuple of (lb, ub) arrays, each shape (dim, 1)
         """
+        solver = _resolve_lp(lp_solver)
         # Determine parallelism settings
         if parallel is None:
             use_parallel = global_config.should_use_parallel(self.dim)
@@ -406,12 +409,12 @@ class ImageStar:
             n_workers = global_config.get_n_workers(self.dim)
 
         if use_parallel:
-            return self._get_ranges_parallel(lp_solver, n_workers)
+            return self._get_ranges_parallel(solver, n_workers)
 
         # Batch path
-        return self._get_ranges_batch(lp_solver)
+        return self._get_ranges_batch(solver)
 
-    def _get_ranges_parallel(self, lp_solver: str = 'default',
+    def _get_ranges_parallel(self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
                              n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
         """Compute ranges in parallel using ThreadPoolExecutor."""
         lb = np.zeros((self.dim, 1))
@@ -436,7 +439,7 @@ class ImageStar:
         return lb, ub
 
     def _get_ranges_batch(
-        self, lp_solver: str = 'default',
+        self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute ranges for all pixels using a single batched LP call.
@@ -483,7 +486,8 @@ class ImageStar:
         self.state_ub = ub
         return lb, ub
 
-    def get_range(self, h: int, w: int, c: int, lp_solver: str = 'default') -> Tuple[float, float]:
+    def get_range(self, h: int, w: int, c: int,
+                  lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT) -> Tuple[float, float]:
         """
         Get exact bounds for a single pixel using LP.
 
@@ -503,11 +507,12 @@ class ImageStar:
         if c < 0 or c >= self.num_channels:
             raise ValueError(f"c={c} out of range [0, {self.num_channels})")
 
+        solver = _resolve_lp(lp_solver)
         center = self.V[h, w, c, 0]
         f = self.V[h, w, c, 1:].flatten()
 
         results = self._solve_lp_batch(
-            [f, f], [True, False], lp_solver,
+            [f, f], [True, False], solver,
         )
 
         xmin_val, xmax_val = results[0], results[1]
@@ -516,7 +521,8 @@ class ImageStar:
 
         return center + xmin_val, center + xmax_val
 
-    def get_range_flat(self, index: int, lp_solver: str = 'default') -> Tuple[float, float]:
+    def get_range_flat(self, index: int,
+                       lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT) -> Tuple[float, float]:
         """
         Get exact bounds for a pixel by flat index.
 
@@ -527,18 +533,19 @@ class ImageStar:
         Returns:
             Tuple of (min, max) values
         """
+        solver = _resolve_lp(lp_solver)
         # Convert flat index to (h, w, c)
         h = index // (self.width * self.num_channels)
         remainder = index % (self.width * self.num_channels)
         w = remainder // self.num_channels
         c = remainder % self.num_channels
-        return self.get_range(h, w, c, lp_solver)
+        return self.get_range(h, w, c, solver)
 
     def _solve_lp_batch(
         self,
         objectives: List[np.ndarray],
         minimize_flags: List[bool],
-        lp_solver: str = 'default',
+        lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
     ) -> List[Optional[float]]:
         """
         Batch solve LPs sharing this ImageStar's constraints.
@@ -567,7 +574,8 @@ class ImageStar:
         )
 
     def _solve_lp(
-        self, f: np.ndarray, minimize: bool = True, lp_solver: str = 'default'
+        self, f: np.ndarray, minimize: bool = True,
+        lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
     ) -> Optional[float]:
         """
         Solve LP: min/max f^T * alpha subject to C * alpha <= d and bounds.
@@ -617,7 +625,8 @@ class ImageStar:
         image = center + np.einsum('hwcn,n->hwc', generators, pred_val)
         return image
 
-    def contains(self, image: np.ndarray, lp_solver: str = 'default') -> bool:
+    def contains(self, image: np.ndarray,
+                 lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT) -> bool:
         """
         Check if an image is contained in the ImageStar set.
 
@@ -633,6 +642,7 @@ class ImageStar:
         """
         import cvxpy as cp
 
+        solver = _resolve_lp(lp_solver)
         image = np.asarray(image, dtype=np.float64)
 
         # Handle both image-shaped and flattened inputs
@@ -663,10 +673,10 @@ class ImageStar:
 
         prob = cp.Problem(cp.Minimize(0), constraints)
         try:
-            if lp_solver == 'default':
+            if solver is LPSolver.DEFAULT:
                 prob.solve()
             else:
-                prob.solve(solver=lp_solver)
+                prob.solve(solver=solver.cvxpy_name or solver.value)
             return prob.status in ['optimal', 'optimal_inaccurate']
         except Exception:
             return False
@@ -734,19 +744,20 @@ class ImageStar:
 
     # ======================== Set Operations ========================
 
-    def is_empty_set(self, lp_solver: str = 'default') -> bool:
+    def is_empty_set(self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT) -> bool:
         """
         Check if ImageStar is empty (constraints are infeasible).
 
         Returns:
             True if empty, False otherwise
         """
+        solver = _resolve_lp(lp_solver)
         A = self.C if self.C.size > 0 else None
         b = self.d if self.C.size > 0 else None
         lb = self.predicate_lb if self.predicate_lb is not None else None
         ub = self.predicate_ub if self.predicate_ub is not None else None
 
-        return not check_feasibility(A=A, b=b, lb=lb, ub=ub, lp_solver=lp_solver)
+        return not check_feasibility(A=A, b=b, lb=lb, ub=ub, lp_solver=solver)
 
     def affine_map(self, W: np.ndarray, b: Optional[np.ndarray] = None) -> 'ImageStar':
         """

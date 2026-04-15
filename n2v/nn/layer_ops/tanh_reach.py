@@ -12,6 +12,7 @@ import numpy as np
 from typing import List
 from n2v.sets import Star, Zono
 from n2v.sets.image_star import ImageStar
+from n2v.utils.lp_solver_enum import LPSolver
 from n2v.nn.layer_ops.sigmoid_reach import (
     _s_curve_single_star_approx,
     _s_curve_single_zono,
@@ -31,7 +32,7 @@ def _tanh_deriv(x: np.ndarray) -> np.ndarray:
 
 def tanh_star_approx(
     input_stars: List[Star],
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
 ) -> List[Star]:
     """
     Approximate Tanh reachability for Star sets.
