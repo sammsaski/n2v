@@ -13,6 +13,7 @@ import numpy as np
 from typing import List, Optional
 
 from n2v.sets import Star, Zono, Box
+from n2v.utils.lp_solver_enum import LPSolver
 
 
 def sign_box(input_sets: List[Box]) -> List[Box]:
@@ -75,7 +76,7 @@ def sign_star(
     layer,
     input_stars: List[Star],
     method: str = 'approx',
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     **kwargs,
 ) -> List[Star]:
     """Sign activation reachability for Star sets."""
@@ -85,7 +86,7 @@ def sign_star(
         return _sign_star_approx(input_stars, lp_solver)
 
 
-def _sign_star_approx(input_stars: List[Star], lp_solver: str = 'default') -> List[Star]:
+def _sign_star_approx(input_stars: List[Star], lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> List[Star]:
     """Approximate Sign reachability using linear relaxation."""
     output_stars = []
     for I in input_stars:
@@ -97,7 +98,7 @@ def _sign_star_approx(input_stars: List[Star], lp_solver: str = 'default') -> Li
     return output_stars
 
 
-def _sign_single_star_approx(I: Star, lp_solver: str = 'default') -> Optional[Star]:
+def _sign_single_star_approx(I: Star, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> Optional[Star]:
     """
     Approximate Sign for a single Star.
 
@@ -206,7 +207,7 @@ def _sign_single_star_approx(I: Star, lp_solver: str = 'default') -> Optional[St
     return Star(new_V, new_C, new_d, new_pred_lb, new_pred_ub)
 
 
-def _sign_star_exact(input_stars: List[Star], lp_solver: str = 'default') -> List[Star]:
+def _sign_star_exact(input_stars: List[Star], lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> List[Star]:
     """
     Sign reachability via 2-way splitting at x=0.
 
@@ -225,7 +226,7 @@ def _sign_star_exact(input_stars: List[Star], lp_solver: str = 'default') -> Lis
     return output_stars
 
 
-def _sign_exact_single(I: Star, lp_solver: str = 'default') -> List[Star]:
+def _sign_exact_single(I: Star, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> List[Star]:
     """Exact Sign for a single Star."""
     N = I.dim
 
@@ -273,7 +274,7 @@ def _sign_exact_single(I: Star, lp_solver: str = 'default') -> List[Star]:
     return output
 
 
-def _step_sign(I: Star, index: int, lp_solver: str = 'default') -> List[Star]:
+def _step_sign(I: Star, index: int, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> List[Star]:
     """Split a Star at x[index] = 0 for Sign activation."""
     xmin, xmax = I.get_range(index, lp_solver)
     if xmin is None or xmax is None:

@@ -16,6 +16,7 @@ from typing import List, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from n2v.sets import Star, Zono, Box, Hexatope, Octatope
 from n2v.sets.image_star import ImageStar
+from n2v.utils.lp_solver_enum import LPSolver
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
 
 def relu_star_exact(
     input_stars: List[Star],
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False,
     parallel: bool = None,
     n_workers: int = None,
@@ -79,7 +80,7 @@ def relu_star_exact(
 
 def _relu_single_star_exact(
     I: Star,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False,
     precomputed_bounds: tuple = None,
 ) -> List[Star]:
@@ -151,7 +152,7 @@ def _relu_single_star_exact(
     return current_stars
 
 
-def _step_relu(I: Star, index: int, lp_solver: str = 'default') -> List[Star]:
+def _step_relu(I: Star, index: int, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> List[Star]:
     """
     Split a single neuron in ReLU (exact step reach).
 
@@ -222,7 +223,7 @@ def _step_relu(I: Star, index: int, lp_solver: str = 'default') -> List[Star]:
 def relu_star_approx(
     input_stars: List[Star],
     relax_factor: float = 0.5,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     relax_method: str = 'standard',
     precomputed_bounds: tuple = None,
 ) -> List[Star]:
@@ -270,7 +271,7 @@ def relu_star_approx(
 
 def _relu_single_star_approx(
     I: Star,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """
@@ -535,7 +536,7 @@ def relu_box(input_boxes: List) -> List:
 def _relu_single_star_relax_range(
     I: Star,
     relax_factor: float,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """
@@ -650,7 +651,7 @@ def _relu_single_star_relax_range(
 def _relu_single_star_relax_area(
     I: Star,
     relax_factor: float,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """
@@ -754,7 +755,7 @@ def _relu_single_star_relax_area(
 def _relu_single_star_relax_bound(
     I: Star,
     relax_factor: float,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """
@@ -981,7 +982,7 @@ def _apply_triangle_approx_multi(
     return Star(new_V, new_C, new_d, new_pred_lb, new_pred_ub, outer_zono=None)
 
 
-def _get_maxs(star: Star, indices: np.ndarray, lp_solver: str = 'default') -> np.ndarray:
+def _get_maxs(star: Star, indices: np.ndarray, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> np.ndarray:
     """
     Get maximum values for multiple state dimensions.
 
@@ -1005,7 +1006,7 @@ def _get_maxs(star: Star, indices: np.ndarray, lp_solver: str = 'default') -> np
     return xmax
 
 
-def _get_mins(star: Star, indices: np.ndarray, lp_solver: str = 'default') -> np.ndarray:
+def _get_mins(star: Star, indices: np.ndarray, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> np.ndarray:
     """
     Get minimum values for multiple state dimensions.
 
@@ -1090,7 +1091,7 @@ def _get_star_workers(n_stars: int, n_workers: int = None) -> int:
 
 def _relu_star_exact_parallel(
     input_stars: List[Star],
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False,
     n_workers: int = None,
     precomputed_bounds: tuple = None,

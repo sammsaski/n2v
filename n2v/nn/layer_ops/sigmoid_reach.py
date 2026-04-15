@@ -19,6 +19,7 @@ import numpy as np
 from typing import List, Optional, Callable
 from n2v.sets import Star, Zono
 from n2v.sets.image_star import ImageStar
+from n2v.utils.lp_solver_enum import LPSolver
 
 
 def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
@@ -46,7 +47,7 @@ def _sigmoid_deriv(x: np.ndarray) -> np.ndarray:
 
 def sigmoid_star_approx(
     input_stars: List[Star],
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
 ) -> List[Star]:
     """
     Approximate Sigmoid reachability for Star sets.
@@ -105,7 +106,7 @@ def _s_curve_single_star_approx(
     func_deriv: Callable,
     f0: float,
     df0: float,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
 ) -> Optional[Star]:
     """
     Approximate reachability for an S-shaped activation using NNV's
