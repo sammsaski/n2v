@@ -91,3 +91,80 @@ class TestThreeBlobClassifier:
         x, y = net.sample_data(100, seed=0)
         assert x.shape == (100, 2)
         assert y.shape == (100,)
+
+
+class TestThreeBlobClassifier3D:
+    """Tests for ThreeBlobClassifier3D."""
+
+    def test_forward_shape(self):
+        """Network should map R^3 -> R^3 logits."""
+        from FlowConformal.networks import ThreeBlobClassifier3D
+
+        net = ThreeBlobClassifier3D()
+        x = torch.randn(4, 3)
+        y = net(x)
+        assert y.shape == (4, 3)
+
+    def test_classifies_near_blobs_correctly(self):
+        """Classifier should return the right class for points near each blob."""
+        from FlowConformal.networks import ThreeBlobClassifier3D
+
+        net = ThreeBlobClassifier3D()
+        net.eval()
+        # Near blob 0 at [1, 0, 0]
+        x = torch.tensor([[0.9, 0.0, 0.0]])
+        with torch.no_grad():
+            logits = net(x)
+        assert logits.argmax(dim=1).item() == 0
+        # Near blob 1 at [0, 1, 0]
+        x = torch.tensor([[0.0, 0.9, 0.0]])
+        with torch.no_grad():
+            logits = net(x)
+        assert logits.argmax(dim=1).item() == 1
+        # Near blob 2 at [0, 0, 1]
+        x = torch.tensor([[0.0, 0.0, 0.9]])
+        with torch.no_grad():
+            logits = net(x)
+        assert logits.argmax(dim=1).item() == 2
+
+
+class TestNetworkForwardSpotChecks:
+    def test_banana_predicts_target(self):
+        """RotatedBananaNet should approximate (x1, x1^2 + 0.3 x2)."""
+        import torch
+        from examples.FlowConformal.networks import RotatedBananaNet
+
+        torch.manual_seed(0)
+        net = RotatedBananaNet(n_train_steps=2000)
+        x = torch.rand(200, 2)
+        with torch.no_grad():
+            y_pred = net(x)
+        y_true = torch.stack([x[:, 0], x[:, 0] ** 2 + 0.3 * x[:, 1]], dim=1)
+        err = (y_pred - y_true).norm(dim=1).mean().item()
+        assert err < 0.05, f"banana net mean error {err} — training regressed"
+
+    def test_three_blob_2d_train_accuracy(self):
+        import importlib
+        import torch
+        mod = importlib.import_module('examples.FlowConformal.networks')
+        Net = getattr(mod, 'ThreeBlobClassifier')
+        torch.manual_seed(0)
+        net = Net(n_train_steps=2000)
+        x, y = net.sample_data(2000, seed=1)
+        with torch.no_grad():
+            pred = net(x).argmax(dim=1)
+        acc = (pred == y).float().mean().item()
+        assert acc > 0.80, f"ThreeBlobClassifier train-dist accuracy {acc}"
+
+    def test_three_blob_3d_train_accuracy(self):
+        import importlib
+        import torch
+        mod = importlib.import_module('examples.FlowConformal.networks')
+        Net = getattr(mod, 'ThreeBlobClassifier3D')
+        torch.manual_seed(0)
+        net = Net(n_train_steps=2000)
+        x, y = net.sample_data(2000, seed=1)
+        with torch.no_grad():
+            pred = net(x).argmax(dim=1)
+        acc = (pred == y).float().mean().item()
+        assert acc > 0.80, f"ThreeBlobClassifier3D train-dist accuracy {acc}"

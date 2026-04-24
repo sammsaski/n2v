@@ -518,6 +518,7 @@ class TestScenarioVerifyHalfspaceWithPreimage:
         assert result.genuine_input is None
         assert result.counterexample is not None
 
+    @pytest.mark.slow
     def test_falsified_outcome_with_matching_target(self):
         """Target network IS the flow inverse: preimage search succeeds."""
         from n2v.probabilistic.flow.scenario_verify import (
@@ -588,6 +589,7 @@ class TestVerifyRobustnessWithPreimage:
         assert result.outcome == 'unknown'
         assert result.verified is False
 
+    @pytest.mark.slow
     def test_non_robust_with_target_fn_is_falsified(self):
         """Flow violation + target_fn = flow itself: outcome = 'falsified'."""
         from n2v.probabilistic.flow.scenario_verify import verify_robustness
@@ -631,7 +633,7 @@ class TestSpecCheckBeforeFalsified:
         )
 
         class IdentityFlowODE:
-            def inverse(self, z, t=1.0, n_steps=100):
+            def inverse(self, z, t=1.0, n_steps=100, **kwargs):
                 return z
 
         flow = IdentityFlowODE()
@@ -664,7 +666,7 @@ class TestSpecCheckBeforeFalsified:
         )
 
         class IdentityFlowODE:
-            def inverse(self, z, t=1.0, n_steps=100):
+            def inverse(self, z, t=1.0, n_steps=100, **kwargs):
                 return z
 
         flow = IdentityFlowODE()
@@ -707,7 +709,7 @@ class TestSpecCheckBeforeFalsified:
         from n2v.probabilistic.flow.scenario_verify import verify_robustness
 
         class IdentityFlowODE:
-            def inverse(self, z, t=1.0, n_steps=100):
+            def inverse(self, z, t=1.0, n_steps=100, **kwargs):
                 return z
 
         flow = IdentityFlowODE()

@@ -14,7 +14,7 @@ from n2v.probabilistic.flow.scores import (
 )
 from n2v.probabilistic.flow.calibrate import calibrate, compute_guarantee
 from n2v.probabilistic.flow.sets import ProbabilisticSet
-from n2v.probabilistic.flow.model import VelocityField
+from n2v.probabilistic.flow.model import VelocityField, DiTLiteVelocityField
 from n2v.probabilistic.flow.ode import FlowODE
 from n2v.probabilistic.flow.train import train_flow
 from n2v.probabilistic.flow.scenario_verify import (
@@ -27,6 +27,12 @@ from n2v.probabilistic.flow.scenario_verify import (
     RobustnessResult,
     PreimageResult,
 )
+from n2v.probabilistic.flow.star_viz import (
+    render_star_union_3d,
+    render_star_convex_hull_3d,
+    render_star_union_isosurface_3d,
+    render_probabilistic_set_isosurface_3d,
+)
 
 __all__ = [
     'NonconformityScore',
@@ -38,6 +44,7 @@ __all__ = [
     'compute_guarantee',
     'ProbabilisticSet',
     'VelocityField',
+    'DiTLiteVelocityField',
     'FlowODE',
     'train_flow',
     'sample_truncated_gaussian_ball',
@@ -48,4 +55,8 @@ __all__ = [
     'ScenarioResult',
     'RobustnessResult',
     'PreimageResult',
+    'render_star_union_3d',
+    'render_star_convex_hull_3d',
+    'render_star_union_isosurface_3d',
+    'render_probabilistic_set_isosurface_3d',
 ]

@@ -49,6 +49,8 @@ Thumbs.db
 
 # Internal
 CLAUDE.md
+docs/audits/
+docs/plans/
 
 # MNIST data (auto-downloaded by PyTorch for CompareNNV experiments)
 examples/CompareNNV/data/

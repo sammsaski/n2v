@@ -132,7 +132,9 @@ class TestFlowScore:
 
         # Use a dummy flow model that just returns its input
         class DummyFlow:
-            def forward(self, y, t=1.0):
+            def forward(self, y, t=1.0, **kwargs):
+                # kwargs absorbs n_steps / method / atol / rtol that
+                # FlowScore._integrate forwards.
                 return y
 
         score_fn = FlowScore(DummyFlow(), t=1.0)
@@ -145,7 +147,9 @@ class TestFlowScore:
         from n2v.probabilistic.flow.scores import FlowScore
 
         class IdentityFlow:
-            def forward(self, y, t=1.0):
+            def forward(self, y, t=1.0, **kwargs):
+                # kwargs absorbs n_steps / method / atol / rtol that
+                # FlowScore._integrate forwards.
                 return y
 
         score_fn = FlowScore(IdentityFlow(), t=1.0)
@@ -157,7 +161,9 @@ class TestFlowScore:
         from n2v.probabilistic.flow.scores import FlowScore
 
         class DummyFlow:
-            def forward(self, y, t=1.0):
+            def forward(self, y, t=1.0, **kwargs):
+                # kwargs absorbs n_steps / method / atol / rtol that
+                # FlowScore._integrate forwards.
                 return y * t  # scale by t
 
         score_fn = FlowScore(DummyFlow(), t=1.0)

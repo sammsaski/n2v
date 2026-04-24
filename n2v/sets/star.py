@@ -702,47 +702,182 @@ class Star:
 
         return not check_feasibility(A=A, b=b, lb=lb, ub=ub, lp_solver=lp_solver)
 
-    def contains(self, x: np.ndarray, lp_solver: str = 'default') -> bool:
+    def contains(
+        self,
+        X: np.ndarray,
+        method: str = 'lp',
+        lp_solver: str = 'default',
+        _eps: float = 1e-9,
+    ):
         """
-        Check if point x is in the Star.
+        Check point containment in the Star.
 
         Args:
-            x: Point to check (dim,) or (dim, 1)
+            X: Shape (dim,) or (dim, 1) for a single point (returns bool).
+               Shape (N, dim) for a batch (returns (N,) bool ndarray).
+            method: 'lp' (authoritative, one feasibility LP per point) or
+                    'algebraic' (fast vectorized path, valid only when
+                    V[:, 1:] has full column rank).
+            lp_solver: Passed through to n2v.utils.lpsolver.check_feasibility.
+            _eps: Tolerance for inequality/residual checks in the algebraic
+                  path.
 
         Returns:
-            True if x is in the Star
+            bool for single-point input, (N,) bool ndarray for batch input.
+
+        Raises:
+            ValueError: On wrong-shape input, or when method='algebraic' is
+                requested but V[:, 1:] does not have full column rank.
         """
-        x = np.asarray(x).reshape(-1, 1)
+        X = np.asarray(X, dtype=np.float64)
 
-        if x.shape[0] != self.dim:
-            raise ValueError(f"Point dimension {x.shape[0]} doesn't match Star dim {self.dim}")
-
-        # Solve: find alpha such that V * [1; alpha] = x and C * alpha <= d
-        # This is: V[:, 0] + V[:, 1:] * alpha = x
-        # So: V[:, 1:] * alpha = x - V[:, 0]
-
-        # This is a feasibility problem
-        alpha = cp.Variable(self.nVar)
-
-        constraints = [self.V[:, 1:] @ alpha == (x - self.V[:, 0:1]).flatten()]
-
-        if self.C.size > 0:
-            constraints.append(self.C @ alpha <= self.d.flatten())
-        if self.predicate_lb is not None:
-            constraints.append(alpha >= self.predicate_lb.flatten())
-        if self.predicate_ub is not None:
-            constraints.append(alpha <= self.predicate_ub.flatten())
-
-        prob = cp.Problem(cp.Minimize(0), constraints)
-        try:
-            if lp_solver == 'default':
-                prob.solve()
+        # Dispatch on shape: (dim,) or (dim, 1) -> single; (N, dim) -> batch.
+        single_point = False
+        if X.ndim == 1:
+            # (dim,) single point
+            if X.shape[0] != self.dim:
+                raise ValueError(
+                    f"Point dimension {X.shape[0]} doesn't match Star dim {self.dim}"
+                )
+            X_batch = X.reshape(1, self.dim)
+            single_point = True
+        elif X.ndim == 2:
+            if X.shape == (self.dim, 1):
+                # Column-vector single point
+                X_batch = X.reshape(1, self.dim)
+                single_point = True
+            elif X.shape[1] == self.dim:
+                # (N, dim) batch
+                X_batch = X
             else:
-                prob.solve(solver=lp_solver)
+                raise ValueError(
+                    f"Input shape {X.shape} not compatible with Star dim {self.dim}. "
+                    f"Expected (dim,), (dim, 1), or (N, dim)."
+                )
+        else:
+            raise ValueError(
+                f"Input must be 1D or 2D, got {X.ndim}D with shape {X.shape}"
+            )
 
-            return prob.status in ['optimal', 'optimal_inaccurate']
-        except:
-            return False
+        if method == 'lp':
+            result = self._contains_lp(X_batch, lp_solver=lp_solver)
+        elif method == 'algebraic':
+            result = self._contains_algebraic(X_batch, _eps=_eps)
+        else:
+            raise ValueError(
+                f"Unknown method {method!r}; expected 'lp' or 'algebraic'."
+            )
+
+        if single_point:
+            return bool(result[0])
+        return result
+
+    def _contains_lp(
+        self, X_batch: np.ndarray, lp_solver: str = 'default'
+    ) -> np.ndarray:
+        """
+        LP-based containment check for a batch of points.
+
+        For each point y, solve a feasibility LP:
+            find alpha s.t. V[:, 1:] @ alpha = y - V[:, 0]
+                            C @ alpha <= d
+                            plb <= alpha <= pub
+        """
+        N = X_batch.shape[0]
+        Aeq = self.V[:, 1:]
+        center = self.V[:, 0]
+
+        A = self.C if self.C.size > 0 else None
+        b = self.d.flatten() if self.C.size > 0 else None
+        lb = self.predicate_lb.flatten() if self.predicate_lb is not None else None
+        ub = self.predicate_ub.flatten() if self.predicate_ub is not None else None
+
+        result = np.zeros(N, dtype=bool)
+        for i in range(N):
+            beq = X_batch[i] - center
+            try:
+                result[i] = check_feasibility(
+                    A=A, b=b, Aeq=Aeq, beq=beq, lb=lb, ub=ub, lp_solver=lp_solver
+                )
+            except Exception:
+                result[i] = False
+        return result
+
+    def _contains_algebraic(
+        self, X_batch: np.ndarray, _eps: float = 1e-9
+    ) -> np.ndarray:
+        """
+        Fast algebraic containment check. Valid only when V[:, 1:] has full
+        column rank (nVar <= dim and rank == nVar). Raises ValueError
+        otherwise.
+        """
+        basis = self.V[:, 1:]  # (dim, nVar)
+        center = self.V[:, 0]  # (dim,)
+        dim, nVar = basis.shape
+
+        if nVar > dim:
+            raise ValueError(
+                "Algebraic containment requires V[:, 1:] to have full column "
+                f"rank, but basis shape ({dim}, {nVar}) has more columns than "
+                "rows (wide basis)."
+            )
+
+        N = X_batch.shape[0]
+        # RHS for each point: (dim, N)
+        rhs = (X_batch - center).T
+
+        if nVar == dim:
+            # Square full-rank case: direct solve.
+            # Check rank first to guarantee invertibility.
+            rank = np.linalg.matrix_rank(basis)
+            if rank != nVar:
+                raise ValueError(
+                    f"Algebraic containment requires V[:, 1:] to have full "
+                    f"column rank, but rank={rank} < nVar={nVar}."
+                )
+            alpha = np.linalg.solve(basis, rhs).T  # (N, nVar)
+            residual_ok = np.ones(N, dtype=bool)
+        else:
+            # Tall case (nVar < dim): least squares + residual check.
+            alpha_ls, _, rank, _ = np.linalg.lstsq(basis, rhs, rcond=None)
+            if rank != nVar:
+                raise ValueError(
+                    f"Algebraic containment requires V[:, 1:] to have full "
+                    f"column rank, but rank={rank} < nVar={nVar}."
+                )
+            alpha = alpha_ls.T  # (N, nVar)
+            # Verify the candidate alpha actually reconstructs the point.
+            reconstructed = (basis @ alpha_ls).T  # (N, dim)
+            target = X_batch - center  # (N, dim)
+            residual_ok = np.all(
+                np.abs(reconstructed - target) <= _eps, axis=1
+            )
+
+        # Check predicate bounds (elementwise, with eps tolerance to match
+        # the LP solver's numerical slack).
+        if self.predicate_lb is not None:
+            plb = self.predicate_lb.flatten()
+            lb_ok = np.all(alpha >= plb - _eps, axis=1)
+        else:
+            lb_ok = np.ones(N, dtype=bool)
+
+        if self.predicate_ub is not None:
+            pub = self.predicate_ub.flatten()
+            ub_ok = np.all(alpha <= pub + _eps, axis=1)
+        else:
+            ub_ok = np.ones(N, dtype=bool)
+
+        # Check C @ alpha <= d.
+        if self.C is not None and self.C.size > 0:
+            C = self.C
+            d = self.d.flatten()
+            # (nConstr, N) = C @ alpha.T
+            lhs = C @ alpha.T
+            cd_ok = np.all(lhs <= d[:, None] + _eps, axis=0)
+        else:
+            cd_ok = np.ones(N, dtype=bool)
+
+        return residual_ok & lb_ok & ub_ok & cd_ok
 
     # ======================== Conversion Methods ========================
 

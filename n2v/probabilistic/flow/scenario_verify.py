@@ -118,6 +118,16 @@ def sample_truncated_gaussian_ball(
 
     if method is None:
         method = 'rejection' if dim <= _REJECTION_DIM_THRESHOLD else 'chi'
+        # Rejection sampling hangs when the rejection rate is near 100% —
+        # e.g., when the calibrated threshold q is tiny relative to the
+        # chi_dim distribution's bulk. Acceptance rate for
+        # N(0, I_dim) inside ||z|| <= q equals Pr[chi^2_dim <= q^2].
+        # Switch to the inverse-CDF chi method whenever that probability
+        # falls below 1 %; chi is exact for any q.
+        if method == 'rejection':
+            from scipy.stats import chi2 as _chi2
+            if _chi2.cdf(q * q, dim) < 0.01:
+                method = 'chi'
 
     if method == 'rejection':
         return _sample_rejection(q, dim, n_samples)
@@ -260,6 +270,9 @@ def scenario_verify_halfspace(
     preimage_tolerance: float = 1e-3,
     output_shift: Optional[np.ndarray] = None,
     latent_samples: Optional[np.ndarray] = None,
+    ode_method: str = 'dopri5',
+    ode_atol: float = 1e-5,
+    ode_rtol: float = 1e-5,
 ) -> ScenarioResult:
     """
     Verify a halfspace specification w^T y <= b on the flow reach set.
@@ -353,7 +366,10 @@ def scenario_verify_halfspace(
 
     # Map to data space via inverse flow
     with torch.no_grad():
-        y_samples = flow_ode.inverse(z_samples, t=t, n_steps=n_ode_steps)
+        y_samples = flow_ode.inverse(
+            z_samples, t=t, n_steps=n_ode_steps,
+            method=ode_method, atol=ode_atol, rtol=ode_rtol,
+        )
 
     # Convert flow outputs from centered to raw coordinates if a shift
     # was provided. When output_shift is None, raw and centered are
@@ -504,6 +520,9 @@ def verify_robustness(
     preimage_tolerance: float = 1e-3,
     output_shift: Optional[np.ndarray] = None,
     latent_samples: Optional[np.ndarray] = None,
+    ode_method: str = 'dopri5',
+    ode_atol: float = 1e-5,
+    ode_rtol: float = 1e-5,
 ) -> RobustnessResult:
     """
     Verify classification robustness via scenario optimization.
@@ -595,7 +614,10 @@ def verify_robustness(
     z_samples = torch.tensor(z_samples_np, dtype=torch.float32)
 
     with torch.no_grad():
-        y_samples = flow_ode.inverse(z_samples, t=t, n_steps=n_ode_steps)
+        y_samples = flow_ode.inverse(
+            z_samples, t=t, n_steps=n_ode_steps,
+            method=ode_method, atol=ode_atol, rtol=ode_rtol,
+        )
     y_samples_np = y_samples.numpy()
 
     # Convert flow outputs from centered to raw coordinates if a shift

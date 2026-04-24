@@ -83,17 +83,57 @@ class FlowScore(NonconformityScore):
     The sublevel set follows the geometry of the learned flow.
 
     Args:
-        flow_model: Object with forward(y, t) method (e.g., FlowODE).
+        flow_model: Object with forward(y, t, ...) method (e.g., FlowODE).
         t: Flow time parameter (default 1.0).
+        n_steps: Number of ODE integration steps.
+        method: ODE solver name passed through to flow_model.forward.
+            'dopri5' for adaptive (default), 'rk4'/'euler' for fast
+            fixed-step inference.
+        batch_size: if not None, chunk the incoming y into this size and
+            concatenate — lets callers evaluate very large batches (e.g.
+            MC volume) without OOM.
     """
 
-    def __init__(self, flow_model, t: float = 1.0):
+    def __init__(self, flow_model, t: float = 1.0, n_steps: int = 100,
+                 method: str = 'dopri5', batch_size: int | None = None,
+                 atol: float = 1e-5, rtol: float = 1e-5):
         self.flow_model = flow_model
         self.t = t
+        self.n_steps = n_steps
+        self.method = method
+        self.batch_size = batch_size
+        self.atol = atol
+        self.rtol = rtol
+
+    def _flow_device(self) -> torch.device | None:
+        """Return the device of the underlying velocity field, if any."""
+        vf = getattr(self.flow_model, 'velocity_field', self.flow_model)
+        try:
+            return next(vf.parameters()).device
+        except (StopIteration, AttributeError):
+            return None
+
+    def _integrate(self, y: Tensor) -> Tensor:
+        return self.flow_model.forward(
+            y, t=self.t, n_steps=self.n_steps, method=self.method,
+            atol=self.atol, rtol=self.rtol,
+        )
 
     def __call__(self, y: Tensor) -> Tensor:
-        z = self.flow_model.forward(y, t=self.t)
-        return z.norm(dim=1)
+        dev = self._flow_device()
+        src_device = y.device
+        if dev is not None and y.device != dev:
+            y = y.to(dev)
+        if self.batch_size is None or y.shape[0] <= self.batch_size:
+            out = self._integrate(y).norm(dim=1)
+        else:
+            outs = []
+            for i in range(0, y.shape[0], self.batch_size):
+                outs.append(self._integrate(y[i:i + self.batch_size]).norm(dim=1))
+            out = torch.cat(outs, dim=0)
+        if dev is not None and out.device != src_device:
+            out = out.to(src_device)
+        return out
 
     def set_t(self, t: float):
         """Update the flow time parameter."""

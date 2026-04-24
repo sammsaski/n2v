@@ -33,6 +33,9 @@ class FlowODE(nn.Module):
         y: torch.Tensor,
         t: float = 1.0,
         n_steps: int = 100,
+        method: str = 'dopri5',
+        atol: float = 1e-5,
+        rtol: float = 1e-5,
     ) -> torch.Tensor:
         """
         Integrate the flow from t to 0 (reverse direction).
@@ -43,7 +46,14 @@ class FlowODE(nn.Module):
         Args:
             y: (batch, dim) data points.
             t: Starting time (flow time at which y lives).
-            n_steps: Number of integration steps.
+            n_steps: Number of integration steps. For adaptive solvers
+                (dopri5) this is the number of output grid points; internal
+                stepping is chosen by the solver. For fixed-step solvers
+                (rk4, euler) this is the exact number of steps.
+            method: torchdiffeq solver. 'dopri5' (default, adaptive,
+                accurate) or 'rk4'/'euler' (fixed-step, fast inference).
+            atol, rtol: absolute/relative tolerances. Ignored by fixed-step
+                solvers.
 
         Returns:
             (batch, dim) latent points.
@@ -57,10 +67,13 @@ class FlowODE(nn.Module):
             t_batch = t_val.expand(y_val.shape[0])
             return self.velocity_field(t_batch, y_val)
 
-        trajectory = odeint(
-            odefunc, y, t_span, method='dopri5',
-            atol=1e-5, rtol=1e-5,
-        )
+        if method in ('rk4', 'euler'):
+            trajectory = odeint(odefunc, y, t_span, method=method)
+        else:
+            trajectory = odeint(
+                odefunc, y, t_span, method=method,
+                atol=atol, rtol=rtol,
+            )
         return trajectory[-1]
 
     def inverse(
@@ -68,6 +81,9 @@ class FlowODE(nn.Module):
         z: torch.Tensor,
         t: float = 1.0,
         n_steps: int = 100,
+        method: str = 'dopri5',
+        atol: float = 1e-5,
+        rtol: float = 1e-5,
     ) -> torch.Tensor:
         """
         Integrate the flow from 0 to t (forward direction).
@@ -79,6 +95,8 @@ class FlowODE(nn.Module):
             z: (batch, dim) latent points.
             t: Endpoint of integration (flow time at which to stop).
             n_steps: Number of integration steps.
+            method: torchdiffeq solver.
+            atol, rtol: tolerances for adaptive solvers.
 
         Returns:
             (batch, dim) data points.
@@ -92,10 +110,13 @@ class FlowODE(nn.Module):
             t_batch = t_val.expand(y_val.shape[0])
             return self.velocity_field(t_batch, y_val)
 
-        trajectory = odeint(
-            odefunc, z, t_span, method='dopri5',
-            atol=1e-5, rtol=1e-5,
-        )
+        if method in ('rk4', 'euler'):
+            trajectory = odeint(odefunc, z, t_span, method=method)
+        else:
+            trajectory = odeint(
+                odefunc, z, t_span, method=method,
+                atol=atol, rtol=rtol,
+            )
         return trajectory[-1]
 
     def forward_trajectory(

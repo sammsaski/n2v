@@ -72,3 +72,58 @@ class TestComputeGuarantee:
         assert len(result) == 2
         assert isinstance(result[0], float)
         assert isinstance(result[1], float)
+
+
+class TestScoreAgnosticEmpiricalCoverage:
+    """Cornerstone validity check: marginal empirical coverage must hit the
+    target 1 - alpha for any valid score function. A failure here invalidates
+    the conformal wrapper itself, not just a specific method.
+
+    Marginal coverage is the average over both calibration and test randomness,
+    which is the quantity conformal theory guarantees to be >= 1 - alpha. We
+    check the average over many (calibration, test) draws, NOT per-trial
+    floor crossings (which have Beta-distributed calibration variance that
+    will produce legitimate per-trial misses at a 3-sigma test-set floor).
+    """
+
+    def test_multiple_scores_achieve_marginal_coverage(self):
+        """1D toy: pushforward = N(0, 1). Score by ball and hyperrect. Both
+        must hit marginal empirical coverage >= 1 - alpha within Bernoulli SE."""
+        import math
+
+        from n2v.probabilistic.flow.calibrate import calibrate
+        from n2v.probabilistic.flow.scores import BallScore, HyperrectScore
+
+        d = 1
+        alpha = 0.01
+        m = 2000
+        n_test = 5000
+        n_trials = 40
+        # Total pooled test samples across all trials.
+        total_samples = n_trials * n_test
+        # Bernoulli SE on a 1 - alpha mean estimate.
+        se = math.sqrt(alpha * (1 - alpha) / total_samples)
+        floor = (1 - alpha) - 3 * se
+
+        for score_name, make_score in [
+            ('ball', lambda: BallScore(center=torch.zeros(d))),
+            ('hyperrect', lambda: HyperrectScore(
+                center=torch.zeros(d), scales=torch.ones(d))),
+        ]:
+            total_covered = 0
+            for trial in range(n_trials):
+                gen_cal = torch.Generator().manual_seed(trial)
+                gen_test = torch.Generator().manual_seed(trial + 10_000)
+                calib = torch.randn(m, d, generator=gen_cal)
+                test = torch.randn(n_test, d, generator=gen_test)
+                score_fn = make_score()
+                calib_scores = score_fn(calib)
+                ell = math.ceil((m + 1) * (1 - alpha))
+                threshold = calibrate(calib_scores, ell).item()
+                test_scores = score_fn(test)
+                total_covered += int((test_scores <= threshold).sum().item())
+            mean_cov = total_covered / total_samples
+            assert mean_cov >= floor, (
+                f"score={score_name}: marginal coverage {mean_cov:.5f} "
+                f"below floor {floor:.5f} (target {1 - alpha:.5f})"
+            )
