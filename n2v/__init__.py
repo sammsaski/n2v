@@ -11,7 +11,8 @@ __version__ = "0.1.0"
 __author__ = "NNV Team"
 
 from n2v.sets import Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope, HalfSpace, ProbabilisticBox
-from n2v.nn import NeuralNetwork, ReachConfig
+from n2v.nn import NeuralNetwork, ReachConfig, SpikingNeuralNetwork, SNNReachConfig
+from n2v.snn import SNNVerifier, F2FMLP
 from n2v.probabilistic import (
     ConformalReachConfig,
     FlowReachConfig,
@@ -38,6 +39,11 @@ __all__ = [
     # OO reach
     "NeuralNetwork",
     "ReachConfig",
+    "SpikingNeuralNetwork",
+    "SNNReachConfig",
+    # SNN training + verification
+    "SNNVerifier",
+    "F2FMLP",
     # Probabilistic reach (model-agnostic free functions + configs)
     "flow_reach",
     "FlowReachConfig",
