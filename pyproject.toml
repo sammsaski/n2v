@@ -32,6 +32,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+snn = [
+    "snntorch>=0.6",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=3.0.0",

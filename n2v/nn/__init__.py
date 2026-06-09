@@ -9,6 +9,13 @@ and provides the reach() method for reachability analysis.
 
 from n2v.nn.neural_network import NeuralNetwork
 from n2v.nn.reach import ReachConfig
-from n2v.nn.spiking_neural_network import SpikingNeuralNetwork, SNNReachConfig
 
-__all__ = ["NeuralNetwork", "ReachConfig", "SpikingNeuralNetwork", "SNNReachConfig"]
+try:
+    from n2v.nn.spiking_neural_network import SpikingNeuralNetwork, SNNReachConfig
+    _SNN_AVAILABLE = True
+except ImportError:
+    _SNN_AVAILABLE = False
+
+__all__ = ["NeuralNetwork", "ReachConfig"]
+if _SNN_AVAILABLE:
+    __all__ += ["SpikingNeuralNetwork", "SNNReachConfig"]
