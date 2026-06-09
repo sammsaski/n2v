@@ -75,10 +75,18 @@ class TestF2FMLPForward:
         s2 = tiny_model(spike_train)
         assert torch.allclose(s1, s2)
 
-    def test_no_spike_gives_zero_scores(self, tiny_model):
-        # All-zero spike train → no spikes → scores should be zero
+    def test_no_spike_gives_zero_scores(self):
+        # With zero biases, all-zero spike train produces zero membrane potential
+        # at every timestep → no neuron ever fires → scores must be exactly zero.
+        # (Cannot use tiny_model here: its biases can charge the membrane over T steps
+        # even on zero input, causing spontaneous firing and non-zero scores.)
+        import torch.nn as nn
+        model = F2FMLP(input_size=4, hidden_sizes=[8], num_classes=3, num_steps=8)
+        for fc in model.fcs:
+            nn.init.zeros_(fc.bias)
+        model.eval()
         spike_train = torch.zeros(1, 4, 8)
-        scores = tiny_model(spike_train)
+        scores = model(spike_train)
         assert torch.allclose(scores, torch.zeros(1, 3))
 
     def test_returns_float_tensor(self, tiny_model):

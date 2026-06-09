@@ -18,10 +18,6 @@ class TestSNNReachConfigDefaults:
         cfg = SNNReachConfig()
         assert cfg.parallel_workers == 0
 
-    def test_default_tight_bounds(self):
-        cfg = SNNReachConfig()
-        assert cfg.tight_bounds is False
-
     def test_default_singleton_bounds(self):
         cfg = SNNReachConfig()
         assert cfg.singleton_bounds is False
@@ -100,14 +96,12 @@ class TestSNNReachConfigFieldCombinations:
         cfg = SNNReachConfig(
             method='exact',
             parallel_workers=8,
-            tight_bounds=True,
             singleton_bounds=True,
             split_strategy='influence',
             label=2,
         )
         assert cfg.method == 'exact'
         assert cfg.parallel_workers == 8
-        assert cfg.tight_bounds is True
         assert cfg.singleton_bounds is True
         assert cfg.split_strategy == 'influence'
         assert cfg.label == 2

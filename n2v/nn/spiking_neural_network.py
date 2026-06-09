@@ -50,7 +50,6 @@ class SNNReachConfig:
                           enumeration via branch-and-bound). Mirrors ReachConfig.method.
         parallel_workers: Number of worker threads for LP solving. 0 defers to the
                           global n2v config (n2v.set_parallel / n2v.config).
-        tight_bounds:     Use LP-based tight bounds for each neuron (slower, tighter).
         singleton_bounds: Add equality constraints for neurons with a single feasible
                           firing time (can improve tightness).
         split_strategy:   How to order dimensions for the branch-and-bound split.
@@ -61,7 +60,6 @@ class SNNReachConfig:
     """
     method: Literal['approx', 'exact'] = 'approx'
     parallel_workers: int = 0
-    tight_bounds: bool = False
     singleton_bounds: bool = False
     split_strategy: str = 'choice-influence'
     label: Optional[int] = None
@@ -85,7 +83,7 @@ class SNNReachConfig:
 def _validate_snn_reach_config(method: str, config: Optional[SNNReachConfig], **kwargs):
     """Validate and build an SNNReachConfig from method + optional config + kwargs."""
     if config is not None and kwargs:
-        raise ValueError("Pass either config= or keyword arguments, not both")
+        raise TypeError("Pass either config= or keyword arguments, not both")
     if config is not None:
         return config  # config is the authority; config.method overrides the method param
     return SNNReachConfig(method=method, **kwargs)
@@ -156,7 +154,7 @@ class SpikingNeuralNetwork:
         # Infer input/output sizes from the model architecture.
         if hasattr(model, 'fcs') and len(model.fcs) > 0:
             self.input_size = model.fcs[0].in_features
-            self.output_size = model.fcs[-1].out_features
+            self.output_size = (model.fcs[-1].out_features,)
         else:
             self.input_size = input_size
             self.output_size = None
@@ -201,7 +199,7 @@ class SpikingNeuralNetwork:
     def reach(
         self,
         input_set: Union[Star, Box],
-        method: Literal['approx', 'exact'] = 'approx',
+        method: Literal['approx', 'exact'] = 'exact',
         config: Optional[SNNReachConfig] = None,
         **kwargs,
     ) -> List[Box]:
@@ -268,7 +266,7 @@ class SpikingNeuralNetwork:
                 epsilon=0.0,              # unused; input_bounds overrides this
                 k=n_symbolic,
                 num_steps=num_steps,
-                tight_bounds=cfg.tight_bounds,
+                tight_bounds=False,
                 label=cfg.label,
                 cert_only=False,
                 pixel_indices=symbolic_dims,
@@ -287,7 +285,7 @@ class SpikingNeuralNetwork:
                 num_steps=num_steps,
                 split_depth=n_symbolic,
                 label=cfg.label,
-                tight_bounds=cfg.tight_bounds,
+                tight_bounds=False,
                 parallel_workers=parallel_workers,
                 cert_only=False,
                 parallel_backend='thread',

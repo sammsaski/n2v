@@ -67,3 +67,12 @@ def partial_box():
     lb = np.array([[0.2], [0.6], [0.6], [0.6]])
     ub = np.array([[0.8], [0.9], [0.6], [0.6]])
     return Box(lb, ub)
+
+
+@pytest.fixture
+def partial_star():
+    """4-D Star with only 2 symbolic dims — same bounds as partial_box, Star container."""
+    from n2v.sets import Star
+    lb = np.array([[0.2], [0.6], [0.6], [0.6]])
+    ub = np.array([[0.8], [0.9], [0.6], [0.6]])
+    return Star.from_bounds(lb, ub)

@@ -24,7 +24,7 @@ class TestSpikingNeuralNetworkConstruction:
         snn = SpikingNeuralNetwork(tiny_model)
         assert snn.model is tiny_model
         assert snn.input_size == 4
-        assert snn.output_size == 3
+        assert snn.output_size == (3,)
 
     def test_model_set_to_eval(self, tiny_model):
         snn = SpikingNeuralNetwork(tiny_model)
@@ -48,13 +48,13 @@ class TestSpikingNeuralNetworkConstruction:
 
     def test_infers_output_size_from_model(self, tiny_model):
         snn = SpikingNeuralNetwork(tiny_model)
-        assert snn.output_size == tiny_model.fcs[-1].out_features
+        assert snn.output_size == (tiny_model.fcs[-1].out_features,)
 
     def test_repr_contains_sizes(self, tiny_model):
         snn = SpikingNeuralNetwork(tiny_model)
         r = repr(snn)
         assert "input_size=4" in r
-        assert "output_size=3" in r
+        assert "output_size=(3,)" in r
 
     def test_no_layers_attribute(self, tiny_model):
         snn = SpikingNeuralNetwork(tiny_model)
@@ -100,26 +100,26 @@ class TestSpikingNeuralNetworkForward:
 class TestSpikingNeuralNetworkReachStructure:
 
     def test_reach_returns_list(self, snn_wrapper, tiny_box):
-        result = snn_wrapper.reach(tiny_box)
+        result = snn_wrapper.reach(tiny_box, method='approx')
         assert isinstance(result, list)
 
     def test_reach_returns_single_box(self, snn_wrapper, tiny_box):
-        result = snn_wrapper.reach(tiny_box)
+        result = snn_wrapper.reach(tiny_box, method='approx')
         assert len(result) == 1
         assert isinstance(result[0], Box)
 
     def test_reach_output_shape(self, snn_wrapper, tiny_box):
-        out_box = snn_wrapper.reach(tiny_box)[0]
+        out_box = snn_wrapper.reach(tiny_box, method='approx')[0]
         # num_classes == 3, shape (3, 1)
         assert out_box.lb.shape == (3, 1)
         assert out_box.ub.shape == (3, 1)
 
     def test_reach_lb_leq_ub(self, snn_wrapper, tiny_box):
-        out_box = snn_wrapper.reach(tiny_box)[0]
+        out_box = snn_wrapper.reach(tiny_box, method='approx')[0]
         assert np.all(out_box.lb <= out_box.ub)
 
     def test_reach_scores_non_negative(self, snn_wrapper, tiny_box):
-        out_box = snn_wrapper.reach(tiny_box)[0]
+        out_box = snn_wrapper.reach(tiny_box, method='approx')[0]
         assert np.all(out_box.lb >= 0.0)
 
 
@@ -135,6 +135,11 @@ class TestSpikingNeuralNetworkReachInputTypes:
 
     def test_reach_with_star(self, snn_wrapper, tiny_star):
         result = snn_wrapper.reach(tiny_star, method='approx')
+        assert len(result) == 1 and isinstance(result[0], Box)
+
+    def test_reach_with_star_exact(self, snn_wrapper, partial_star):
+        # partial_star has only 2 symbolic dims — exercises Star.get_ranges() → LP split path
+        result = snn_wrapper.reach(partial_star, method='exact')
         assert len(result) == 1 and isinstance(result[0], Box)
 
     def test_reach_unsupported_type_raises(self, snn_wrapper):
@@ -185,23 +190,40 @@ class TestSpikingNeuralNetworkReachConfig:
         assert isinstance(result[0], Box)
 
     def test_config_method_takes_priority(self, snn_wrapper, partial_box):
-        # config says 'exact' even though method= defaults to 'approx'
+        # config.method overrides the positional method= parameter
         cfg = SNNReachConfig(method='exact')
         result = snn_wrapper.reach(partial_box, config=cfg)
         assert isinstance(result[0], Box)
 
     def test_config_and_kwargs_raises(self, snn_wrapper, tiny_box):
         cfg = SNNReachConfig(method='approx')
-        with pytest.raises(ValueError):
+        with pytest.raises(TypeError):
             snn_wrapper.reach(tiny_box, config=cfg, tight_bounds=True)
 
     def test_kwargs_style(self, snn_wrapper, tiny_box):
-        result = snn_wrapper.reach(tiny_box, method='approx', tight_bounds=False)
+        result = snn_wrapper.reach(tiny_box, method='approx', singleton_bounds=False)
         assert isinstance(result[0], Box)
 
     def test_label_kwarg_accepted(self, snn_wrapper, tiny_box):
         result = snn_wrapper.reach(tiny_box, method='approx', label=0)
         assert isinstance(result[0], Box)
+
+
+# ---------------------------------------------------------------------------
+# reach() — option flags
+# ---------------------------------------------------------------------------
+
+class TestSpikingNeuralNetworkReachOptions:
+
+    def test_singleton_bounds_accepted(self, snn_wrapper, tiny_box):
+        result = snn_wrapper.reach(tiny_box, method='approx', singleton_bounds=True)
+        assert len(result) == 1 and isinstance(result[0], Box)
+
+    def test_singleton_bounds_sound(self, snn_wrapper, tiny_box):
+        # Enabling singleton_bounds must not produce bounds that exclude valid outputs.
+        out_box = snn_wrapper.reach(tiny_box, method='approx', singleton_bounds=True)[0]
+        assert np.all(out_box.lb <= out_box.ub)
+        assert np.all(out_box.lb >= 0.0)
 
 
 # ---------------------------------------------------------------------------

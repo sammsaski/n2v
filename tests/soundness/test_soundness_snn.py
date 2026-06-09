@@ -97,15 +97,6 @@ class TestSoundnessBoxInput:
         scores = _sample_scores(snn, lb, ub, N_SAMPLES)
         _check_soundness(out_box, scores, "exact/box/two-symbolic")
 
-    def test_approx_box_tight_bounds(self, snn):
-        lb = np.array([[0.3], [0.5], [0.2], [0.5]])
-        ub = np.array([[0.6], [0.8], [0.5], [0.8]])
-        input_box = Box(lb, ub)
-
-        out_box = snn.reach(input_box, method='approx', tight_bounds=True)[0]
-        scores = _sample_scores(snn, lb, ub, N_SAMPLES)
-        _check_soundness(out_box, scores, "approx/box/tight-bounds")
-
 
 # ---------------------------------------------------------------------------
 # Star input
@@ -122,6 +113,17 @@ class TestSoundnessStarInput:
         # Sample from the STAR's bounding box (which is [lb, ub] for this Star)
         scores = _sample_scores(snn, lb, ub, N_SAMPLES)
         _check_soundness(out_box, scores, "approx/star/from-bounds")
+
+    def test_exact_star_from_bounds(self, snn):
+        # Only 2 symbolic dims so 'exact' is tractable.
+        # Exercises the full Star.get_ranges() → input_bounds → LP split path.
+        lb = np.array([[0.2], [0.6], [0.6], [0.4]])
+        ub = np.array([[0.8], [0.6], [0.6], [0.9]])
+        input_star = Star.from_bounds(lb, ub)
+
+        out_box = snn.reach(input_star, method='exact')[0]
+        scores = _sample_scores(snn, lb, ub, N_SAMPLES)
+        _check_soundness(out_box, scores, "exact/star/from-bounds")
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +153,19 @@ class TestExactTighterThanApprox:
 # ---------------------------------------------------------------------------
 # Point input (degenerate case — lb == ub)
 # ---------------------------------------------------------------------------
+
+class TestSoundnessOptions:
+
+    def test_singleton_bounds_sound(self, snn):
+        lb = np.array([[0.2], [0.3], [0.1], [0.4]])
+        ub = np.array([[0.5], [0.7], [0.6], [0.9]])
+        input_box = Box(lb, ub)
+
+        out_box = snn.reach(input_box, method='approx', singleton_bounds=True)[0]
+        scores = _sample_scores(snn, lb, ub, N_SAMPLES)
+        _check_soundness(out_box, scores, "approx/box/singleton-bounds")
+
+
 
 class TestSoundnessPointInput:
 
