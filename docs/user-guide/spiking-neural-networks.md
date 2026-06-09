@@ -26,15 +26,21 @@ This model structure enables LP-based verification because the at-most-once cons
 
 ### `n2v/snn/model.py`
 
-Contains `F2FMLP`, the snntorch-based SNN architecture. You do not typically instantiate this directly — `SNNVerifier.train()` creates and trains it, and `torch.load("snn_model.pt")` restores it.
+Contains `F2FMLP`, the snntorch-based SNN architecture. You can use it in three ways:
+
+- **Instantiate directly**: `F2FMLP(input_size=784, hidden_sizes=[256], num_classes=10, num_steps=16)` and train with your own loop.
+- **Load from a file**: `torch.load("your_model.pt")` — any file saved with `torch.save(model, ...)` where `model` is an `F2FMLP` instance works.
+- **Use `SNNVerifier.train()`**: trains an `F2FMLP` and saves it to `snn_model.pt` in the output directory.
+
+All three paths produce the same thing: an `F2FMLP` object that `SpikingNeuralNetwork` can wrap.
 
 ### `n2v/snn/encoding.py`
 
 Three functions for converting real-valued inputs into spike trains:
 
-- `latency_from_values(x, num_steps)` — maps values in `[0, 1]` to integer spike times in `{1, ..., num_steps}`. Lower value → later spike (higher latency).
-- `encode_batch(x_batch, num_steps)` — converts a `(B, D)` tensor of values into a `(T, B, D)` binary spike train tensor.
-- `spike_train_from_latencies(latencies, num_steps)` — converts a latency array to a binary spike train.
+- `latency_from_values(x, num_steps)` — maps values in `[0, 1]` to integer spike times in `{0, ..., num_steps-1}`. Higher value → earlier spike (lower latency). Zero/negative values are silent (assigned sentinel `num_steps`, never fire).
+- `encode_batch(x_batch, num_steps)` — converts a `(B, D)` tensor of values into a `(B, D, T)` binary spike train tensor.
+- `spike_train_from_latencies(latencies, num_steps)` — converts a `(D,)` integer latency array to a `(D, T)` binary spike train tensor.
 
 These are used internally by `SpikingNeuralNetwork.forward()` and by `SNNVerifier`.
 
@@ -69,7 +75,7 @@ import torch
 import n2v
 from n2v import SpikingNeuralNetwork, SNNReachConfig, Box, Star
 
-# Load a trained SNN (saved by SNNVerifier.train())
+# Load any F2FMLP saved with torch.save(model, path)
 model = torch.load("path/to/snn_model.pt")
 snn = SpikingNeuralNetwork(model)
 
@@ -90,7 +96,40 @@ print("Output score upper bounds:", out_box.ub.flatten())
 
 ## Training an SNN
 
-`SNNVerifier` trains an F2FMLP and saves it to disk. The saved file is what `SpikingNeuralNetwork` loads.
+`SpikingNeuralNetwork` accepts any `F2FMLP` instance. You can train it with your own loop or use `SNNVerifier` as a convenience wrapper.
+
+### Training with your own loop
+
+```python
+import torch
+from n2v.snn.model import F2FMLP
+from n2v.snn.encoding import encode_batch
+
+model = F2FMLP(input_size=784, hidden_sizes=[256], num_classes=10, num_steps=16)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+loss_fn = torch.nn.CrossEntropyLoss()
+
+for images, labels in train_loader:
+    spikes = encode_batch(images.view(images.size(0), -1), model.num_steps)
+    scores = model(spikes)
+    loss = loss_fn(scores, labels)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+torch.save(model, "my_snn.pt")
+```
+
+Load it later with:
+
+```python
+model = torch.load("my_snn.pt")
+snn = SpikingNeuralNetwork(model)
+```
+
+### Training with `SNNVerifier`
+
+`SNNVerifier` handles the training loop, checkpointing, and saving for you:
 
 ```python
 from n2v.snn import SNNVerifier
@@ -112,41 +151,58 @@ verifier = SNNVerifier(
 
 verifier.train(train_loader, test_loader)
 # Saves to results/mnist_snn/:
-#   snn_model.pt        <- full model object for SpikingNeuralNetwork
+#   snn_model.pt        <- full model object (torch.save(model, ...))
 #   snn_checkpoint.pt   <- state dict + optimizer state
 #   training_log.json
 ```
 
-After training:
+### Loading any saved model
+
+Any file saved with `torch.save(model, path)` works — no matter whether it came from `SNNVerifier` or your own loop:
 
 ```python
 model = torch.load("results/mnist_snn/snn_model.pt")
 snn = SpikingNeuralNetwork(model)
 ```
 
-The `snn_model.pt` file stores the **full model object** (not just weights). This is a `torch.save(model, ...)` save, not a state-dict save. Loading it requires the same Python environment (same snntorch version, same `F2FMLP` class available).
+Full-object saves require the same Python environment (same snntorch version, same `F2FMLP` class) at load time. If you need environment-independence, save and load using state dicts instead (see [Loading a Model](#loading-a-model)).
 
 ---
 
-## Loading a Trained Model
+## Loading a Model
+
+`SpikingNeuralNetwork` wraps any `F2FMLP` instance, regardless of where it came from. The only requirement is that the file was saved with `torch.save(model, path)` (full object save, not a state-dict checkpoint).
 
 ```python
 import torch
 from n2v import SpikingNeuralNetwork
 
+# Works for any F2FMLP saved with torch.save(model, path)
 model = torch.load("snn_model.pt")
 
 # Optional: validate that the model accepts the expected input size
 snn = SpikingNeuralNetwork(model, input_size=784)  # raises ValueError on mismatch
 
-# Or just let the wrapper infer it from model.fcs[0].in_features
+# Or let the wrapper infer sizes from model.fcs[0] and model.fcs[-1]
 snn = SpikingNeuralNetwork(model)
 
 print(snn)
-# SpikingNeuralNetwork(input_size=784, output_size=10, hidden_sizes=[256], num_steps=16)
+# SpikingNeuralNetwork(input_size=784, output_size=(10,), hidden_sizes=[256], num_steps=16)
 ```
 
-The `input_size` argument is optional and only used to validate. The model's architecture determines the actual input/output sizes.
+The `input_size` argument is optional and only used to validate. The model's architecture (`.fcs`, `.num_steps`) determines the actual sizes.
+
+If you have a state-dict checkpoint instead of a full model object, reconstruct the model first:
+
+```python
+from n2v.snn.model import F2FMLP
+
+model = F2FMLP(input_size=784, hidden_sizes=[256], num_classes=10, num_steps=16)
+ckpt = torch.load("checkpoint.pt")
+model.load_state_dict(ckpt["model_state_dict"])
+model.eval()
+snn = SpikingNeuralNetwork(model)
+```
 
 ---
 
@@ -159,7 +215,7 @@ snn.reach(input_set, method='approx', config=None, **kwargs)
 ```
 
 - `input_set` — a `Star` or `Box`. No other set types are supported.
-- `method` — `'approx'` (default) or `'exact'`. See below.
+- `method` — `'exact'` (default) or `'approx'`. See below.
 - `config` — an `SNNReachConfig` instance. Overrides `method` and all `**kwargs`.
 - `**kwargs` — fields of `SNNReachConfig` passed directly. Cannot be combined with `config=`.
 
@@ -199,7 +255,6 @@ from n2v import SNNReachConfig
 cfg = SNNReachConfig(
     method='approx',          # 'approx' or 'exact'
     parallel_workers=4,       # threads for LP solving (0 = use global config)
-    tight_bounds=False,       # per-neuron LP bounds (slower, tighter)
     singleton_bounds=False,   # equality constraints for singleton timesteps
     split_strategy='choice-influence',  # how to order dimensions in 'exact'
     label=None,               # true class for certification gap computation
@@ -214,7 +269,6 @@ output = snn.reach(input_set, config=cfg)
 |---|---|---|---|
 | `method` | `str` | `'approx'` | `'approx'` (single LP) or `'exact'` (full enumeration) |
 | `parallel_workers` | `int` | `0` | Worker threads for LP solving. `0` defers to the global n2v config |
-| `tight_bounds` | `bool` | `False` | Run per-neuron LP to compute tight firing-time bounds (slower but tighter) |
 | `singleton_bounds` | `bool` | `False` | Add equality constraints where only one firing time is feasible |
 | `split_strategy` | `str` | `'choice-influence'` | Dimension ordering for `'exact'`: `'selected'`, `'influence'`, `'choice'`, `'choice-influence'`, `'random'` |
 | `label` | `int \| None` | `None` | If set, the LP also computes a certification gap `score[label] - max(score[others])` |
@@ -225,14 +279,14 @@ These two calls are equivalent:
 
 ```python
 # Style 1: config object
-cfg = SNNReachConfig(method='exact', parallel_workers=8, tight_bounds=True)
+cfg = SNNReachConfig(method='exact', parallel_workers=8)
 output = snn.reach(input_set, config=cfg)
 
 # Style 2: bare kwargs
-output = snn.reach(input_set, method='exact', parallel_workers=8, tight_bounds=True)
+output = snn.reach(input_set, method='exact', parallel_workers=8)
 ```
 
-Passing both `config=` and extra `**kwargs` raises `ValueError`. When `config=` is given, its `method` field takes effect regardless of the `method` positional argument.
+Passing both `config=` and extra `**kwargs` raises `TypeError`. When `config=` is given, its `method` field takes effect regardless of the `method` positional argument.
 
 ### Parallel workers
 
@@ -340,9 +394,9 @@ print("Verified dominant:", dominant)
 | **Supported input sets** | `Star`, `Zono`, `Box`, `Hexatope`, `Octatope`, `ImageStar`, `ImageZono` | `Star`, `Box` only |
 | **`reach()` return type** | `List[<same type as input>]` | `List[Box]` always |
 | **Number of output sets** | One per input set (can grow via splitting) | Always exactly one `Box` |
-| **Default method** | `'exact'` | `'approx'` |
+| **Default method** | `'exact'` | `'exact'` |
 | **How reachability works** | Set propagation layer by layer | LP relaxation of spike-timing dynamics |
-| **Training** | External (any PyTorch training loop) | `SNNVerifier.train()` |
+| **Training** | External (any PyTorch training loop) | External (any loop); `SNNVerifier.train()` is a convenience wrapper |
 | **Config conflict handling** | Raises if `config.method != method` | Config takes priority; no error |
 
 ### Input/Output Shapes
@@ -384,7 +438,7 @@ This means:
 
 ### Default Method
 
-`NeuralNetwork.reach()` defaults to `method='exact'`. `SpikingNeuralNetwork.reach()` defaults to `method='approx'`. This reflects the cost structure: SNN `'exact'` involves exponential enumeration, while NN `'exact'` is standard Star splitting. **Always start with `'approx'` for SNN verification** and only switch to `'exact'` when you need tight bounds on a small input set.
+Both `NeuralNetwork.reach()` and `SpikingNeuralNetwork.reach()` default to `method='exact'`. For SNN, `'exact'` involves exponential enumeration of latency combinations. **For large input sets, prefer `method='approx'`** and only use `'exact'` when you need tight bounds on a small input set (few symbolic dimensions).
 
 ### Config Conflict Behavior
 
@@ -411,15 +465,25 @@ snn_net.reach(input_set, method='exact')      # also fine, no config
 
 ### Training
 
-`NeuralNetwork` wraps any pre-trained PyTorch model — training is entirely external. `SpikingNeuralNetwork` also wraps a pre-trained model, but training an F2FMLP correctly requires the snntorch-specific training loop in `SNNVerifier`. The two-phase workflow is:
+Both `NeuralNetwork` and `SpikingNeuralNetwork` wrap any pre-trained model — training is entirely external. `SpikingNeuralNetwork` accepts any `F2FMLP` instance regardless of how it was trained. `SNNVerifier.train()` is a convenience wrapper that handles the snntorch-specific training loop and saves the model file for you, but it is not required:
 
-```
-Phase 1 (training):    SNNVerifier.train(train_loader, test_loader)
-                       → saves snn_model.pt
+```python
+# Option A: train with SNNVerifier (batteries-included)
+from n2v.snn import SNNVerifier
+verifier = SNNVerifier(output_dir="results/", hidden_sizes=[256], num_steps=16)
+verifier.train(train_loader, test_loader, epochs=5, ...)
+model = torch.load("results/snn_model.pt")
 
-Phase 2 (verification): model = torch.load("snn_model.pt")
-                        snn = SpikingNeuralNetwork(model)
-                        output = snn.reach(input_set)
+# Option B: train with your own loop, save with torch.save
+from n2v.snn.model import F2FMLP
+model = F2FMLP(input_size=784, hidden_sizes=[256], num_classes=10, num_steps=16)
+# ... your training loop ...
+torch.save(model, "my_model.pt")
+model = torch.load("my_model.pt")
+
+# Either way, wrap in SpikingNeuralNetwork the same way
+snn = SpikingNeuralNetwork(model)
+output = snn.reach(input_set)
 ```
 
 ---
@@ -455,7 +519,7 @@ import torch
 import numpy as np
 from n2v import SpikingNeuralNetwork, Box
 
-model = torch.load("snn_model.pt")
+model = torch.load("snn_model.pt")   # any F2FMLP saved with torch.save(model, ...)
 snn = SpikingNeuralNetwork(model)
 
 # Build a perturbation box around a test image
@@ -475,16 +539,17 @@ certified = all(lb_scores[true_label] >= ub_scores[j] for j in other_labels)
 print("Certified robust:", certified)
 ```
 
-### Tightening bounds with `tight_bounds=True`
+### Tightening bounds with `singleton_bounds=True`
 
 ```python
 from n2v import SNNReachConfig
 
-# Default: faster, looser
+# Default
 output_fast = snn.reach(input_set)
 
-# Tight: slower, tighter
-cfg = SNNReachConfig(method='approx', tight_bounds=True, singleton_bounds=True)
+# With singleton_bounds: add equality constraints for neurons with only one
+# feasible firing time — can improve tightness at a small extra LP cost
+cfg = SNNReachConfig(method='approx', singleton_bounds=True)
 output_tight = snn.reach(input_set, config=cfg)
 ```
 

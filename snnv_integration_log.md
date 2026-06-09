@@ -49,14 +49,15 @@ Split from `external_snnv/snn_comparison.py` into a proper Python subpackage.
 ### New wrapper class: `n2v/nn/spiking_neural_network.py`
 
 **`SNNReachConfig`** (frozen dataclass)
-- Fields: `method` ('approx'|'exact'), `parallel_workers` (0=global config), `tight_bounds`, `singleton_bounds`, `split_strategy`, `label`
+- Fields: `method` ('approx'|'exact'), `parallel_workers` (0=global config), `singleton_bounds`, `split_strategy`, `label`
 - Validated in `__post_init__`
+- Note: `tight_bounds` was initially included but removed (see Phase 5)
 
 **`SpikingNeuralNetwork`**
 - Constructor: `SpikingNeuralNetwork(model, input_size=None)` — mirrors `NeuralNetwork`
 - `input_size` is `Optional[int]` (flat 1D), not `Optional[tuple]` like `NeuralNetwork`
 - `forward(x)`: takes `(B, D)` or `(D,)` tensor, encodes to spike train, returns `(B, num_classes)` scores
-- `reach(input_set, method='approx', config=None, **kwargs)`: returns `List[Box]` (always 1 element)
+- `reach(input_set, method='exact', config=None, **kwargs)`: returns `List[Box]` (always 1 element)
 - `_set_to_bounds()` helper: extracts per-dimension lb/ub from Star (via `get_ranges()`) or Box (via `.lb/.ub`), returns flat float64 arrays
 
 Key design decisions:
@@ -151,6 +152,7 @@ All SNN tests skip gracefully if snntorch is not installed via `pytest.importors
 - `tiny_box`: 4-D Box, all dimensions symbolic
 - `tiny_star`: 4-D Star equivalent to `tiny_box`
 - `partial_box`: 4-D Box with only 2 symbolic dims (for `'exact'` method tests)
+- `partial_star`: 4-D Star with same 2-symbolic-dim bounds as `partial_box` (for Star+exact path tests)
 
 **`tests/unit/snn/test_model.py`**
 - `TestF2FMLPConstruction`: default and custom params, multi-layer, layer sizes, nn.Module instance
@@ -173,16 +175,18 @@ All SNN tests skip gracefully if snntorch is not installed via `pytest.importors
 - `TestSpikingNeuralNetworkConstruction`: valid, eval mode, TypeError for non-module, input_size match/mismatch, inference from model, repr, no `layers` attribute
 - `TestSpikingNeuralNetworkForward`: 2D/1D input shapes, scores non-negative, float32, no gradient
 - `TestSpikingNeuralNetworkReachStructure`: returns list, single Box, correct output shape, lb≤ub, scores≥0
-- `TestSpikingNeuralNetworkReachInputTypes`: Box, Star, unsupported type raises TypeError
+- `TestSpikingNeuralNetworkReachInputTypes`: Box, Star, Star+exact (exercises `get_ranges()` → LP split path), unsupported type raises TypeError
 - `TestSpikingNeuralNetworkReachMethods`: approx, exact, exact tighter than approx, invalid method raises
-- `TestSpikingNeuralNetworkReachConfig`: config object, config.method priority, config+kwargs raises, kwargs style, label kwarg
+- `TestSpikingNeuralNetworkReachConfig`: config object, config.method priority, config+kwargs raises TypeError, kwargs style, label kwarg
+- `TestSpikingNeuralNetworkReachOptions`: `singleton_bounds=True` accepted and sound (lb≤ub, lb≥0)
 - `TestSpikingNeuralNetworkReachDimCheck`: wrong dimension raises ValueError
 
 **`tests/soundness/test_soundness_snn.py`**
 - Core invariant: for 300 random samples from the input set, all true model scores must lie within `reach()` bounds (with tolerance 1e-4)
-- `TestSoundnessBoxInput`: approx/all-symbolic, approx/partial-symbolic, exact/two-symbolic, approx/tight-bounds
-- `TestSoundnessStarInput`: approx/star-from-bounds
+- `TestSoundnessBoxInput`: approx/all-symbolic, approx/partial-symbolic, exact/two-symbolic
+- `TestSoundnessStarInput`: approx/star-from-bounds, exact/star-from-bounds (exercises full `Star.get_ranges()` → `input_bounds` → LP split path)
 - `TestExactTighterThanApprox`: exact lb ≥ approx lb and exact ub ≤ approx ub
+- `TestSoundnessOptions`: `singleton_bounds=True` soundness check
 - `TestSoundnessPointInput`: degenerate lb==ub case; single forward pass score must be within bounds
 
 ---
@@ -207,6 +211,60 @@ All SNN tests skip gracefully if snntorch is not installed via `pytest.importors
 
 ---
 
+## Phase 5 — Bug Fixes, Consistency Pass, and Test Additions
+
+### Consistency fixes vs `NeuralNetwork`
+
+**`output_size` type**: `SpikingNeuralNetwork.output_size` was initially `int`. Changed to `tuple`
+(`(model.fcs[-1].out_features,)`) to match `NeuralNetwork`'s `Optional[tuple]` return type.
+
+**Config+kwargs error type**: `_validate_snn_reach_config` raised `ValueError` when both `config=`
+and kwargs were provided. Changed to `TypeError` to match `NeuralNetwork.reach()`.
+
+**Default `reach()` method**: `SpikingNeuralNetwork.reach()` defaulted to `method='approx'`.
+Changed to `method='exact'` to match `NeuralNetwork.reach()`.
+
+Note: `SNNReachConfig.method` default is still `'approx'` — this is the internal config object
+default, not the user-facing reach() default. A bare `SNNReachConfig()` is conservative by design.
+
+### `tight_bounds` removal
+
+`tight_bounds` was an unfinished feature (not in the paper) with a latent crash bug:
+`_solve_bound_prepared` applies `b_ub_vec = b_ub_vec + 1e-5` but `b_ub_vec` is `None` when
+the LP has no inequality constraints (only triggered on the `tight_bounds=True` code path, which
+builds a different, tighter LP).
+
+Resolution: removed `tight_bounds` entirely from `SNNReachConfig` and hardcoded
+`tight_bounds=False` in both LP calls inside `reach()`. The bug in `_solve_bound_prepared` is
+left as-is (the triggering code path no longer exists in the public API).
+
+### Additional tests added
+
+**`tests/unit/snn/conftest.py`**: Added `partial_star` fixture — a 4-D Star with the same
+2-symbolic-dim bounds as `partial_box`. Used to test the `Star + method='exact'` code path.
+
+**`tests/unit/snn/test_spiking_neural_network.py`**:
+- `test_reach_with_star_exact` (in `TestSpikingNeuralNetworkReachInputTypes`): exercises the
+  `Star.get_ranges()` → `input_bounds` → `build_symbolic_relaxation_lp_split` path end-to-end.
+- `TestSpikingNeuralNetworkReachOptions`: two tests for `singleton_bounds=True` — accepted without
+  error and produces valid (lb ≤ ub, lb ≥ 0) bounds.
+
+**`tests/soundness/test_soundness_snn.py`**:
+- `test_exact_star_from_bounds` (in `TestSoundnessStarInput`): soundness check for the
+  Star+exact path — 300 random samples must all fall within the LP bounds.
+- `TestSoundnessOptions.test_singleton_bounds_sound`: soundness check for `singleton_bounds=True`.
+
+### Code documentation improvements
+
+**`n2v/snn/lp.py`**: Added comment at the `b_ub_vec + 1e-5` line explaining the non-None
+assumption and why it holds (triangle relaxation always produces ub constraints for hidden neurons
+when `tight_bounds=False`).
+
+**`n2v/snn/model.py`**: Added comment at `simulate_with_patterns` line 132 noting the `[0]` batch
+index assumes a single sample.
+
+---
+
 ## Remaining Gaps
 
 | Gap | Status |
@@ -216,4 +274,5 @@ All SNN tests skip gracefully if snntorch is not installed via `pytest.importors
 | `docs/api/index.rst` SNN card | Not done |
 | README.md mention of SNN | Not done |
 | Examples directory for SNN | Not done |
-| Integration test for full `SNNVerifier.train()` → `SpikingNeuralNetwork.reach()` pipeline | Not done (requires dataset + minutes to run; belongs in a slow/benchmark suite) |
+| Integration test for full `SNNVerifier.train()` → `SpikingNeuralNetwork.reach()` pipeline | Not done (requires dataset + several minutes; belongs in a slow/benchmark suite) |
+| Fix `b_ub_vec + 1e-5` crash for zero-hidden-layer networks | Latent bug; not triggered by current API (F2FMLP always has ≥1 hidden layer) |

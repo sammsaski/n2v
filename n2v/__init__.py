@@ -45,11 +45,6 @@ __all__ = [
     # OO reach
     "NeuralNetwork",
     "ReachConfig",
-    "SpikingNeuralNetwork",
-    "SNNReachConfig",
-    # SNN training + verification
-    "SNNVerifier",
-    "F2FMLP",
     # Probabilistic reach (model-agnostic free functions + configs)
     "flow_reach",
     "FlowReachConfig",
@@ -64,3 +59,5 @@ __all__ = [
     "set_lp_solver",
     "get_config",
 ]
+if _SNN_AVAILABLE:
+    __all__ += ["SpikingNeuralNetwork", "SNNReachConfig", "SNNVerifier", "F2FMLP"]

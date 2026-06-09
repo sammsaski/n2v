@@ -22,8 +22,17 @@ import torch
 try:
     from tqdm import tqdm as _tqdm
 except ImportError:
-    def _tqdm(it, **kw):
-        return it
+    class _tqdm:  # no-op stand-in for tqdm when not installed
+        def __init__(self, it=None, **kw):
+            self._it = it
+        def __iter__(self):
+            return iter(self._it)
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            pass
+        def update(self, n=1):
+            pass
 
 from n2v.snn.model import F2FMLP
 from n2v.snn.encoding import latency_from_values, spike_train_from_latencies
@@ -426,7 +435,11 @@ def _solve_bound_prepared(obj: np.ndarray, lp_matrices,
     A_ub_mat, b_ub_vec, A_eq_mat, b_eq_vec = lp_matrices
     c = -obj if maximize else obj
 
-    # HELP EASE BOUNDS
+    # HELP EASE BOUNDS: nudge RHS slightly positive so numerical borderline
+    # feasible points don't get rejected.  This matches line 723-724 in the
+    # original snn_comparison.py.  b_ub_vec is guaranteed non-None here
+    # because tight_bounds=False always produces triangle-relaxation ub
+    # constraints for the hidden neurons (assumes >= 1 hidden layer).
     b_ub_vec = b_ub_vec + 1e-5
 
     res = linprog(c,

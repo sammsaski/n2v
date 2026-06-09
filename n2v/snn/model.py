@@ -129,6 +129,7 @@ class F2FMLP(nn.Module):
                 fired[l] = torch.clamp(fired[l] + spk, 0.0, 1.0)
                 x = spk
                 # Save the spike pattern at this timestep for this layer.
+                # [0]: batch dim — this method assumes a single sample (batch=1).
                 layer_spikes[l].append(spk.detach().cpu().numpy()[0])
             scores = scores + float(self.num_steps - t) * x
 

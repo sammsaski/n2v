@@ -6,8 +6,8 @@ F2F SNN models. Modified from external_snnv/snn_comparison.py:
   - Global flag mutations (e.g. _USE_EQ_CONSTRAINTS) target n2v.snn.lp's namespace
     via module-attribute assignment rather than the 'global' statement, which only
     affects the local module's namespace after the code was split.
-  - train() additionally saves the full model object as snn_model.pt so that
-    SpikingNeuralNetwork can load it with torch.load("snn_model.pt").
+  - train() saves snn_checkpoint.pt (state dict); load via load_checkpoint()
+    or reconstruct F2FMLP manually and call load_state_dict().
 """
 
 from __future__ import annotations
@@ -286,9 +286,8 @@ class SNNVerifier:
               train_limit: int, batch_size: int) -> dict:
         """Train the SNN. Saves checkpoint to output_dir. Returns train_summary.
 
-        Saves two files:
-          - snn_checkpoint.pt: state-dict checkpoint (used by load_checkpoint)
-          - snn_model.pt: full model object (used by SpikingNeuralNetwork)
+        Saves snn_checkpoint.pt (state-dict checkpoint). Use load_checkpoint()
+        to reload, or reconstruct F2FMLP manually and call load_state_dict().
 
         Infers input_size and num_classes from the first batch of training data.
         Runs one evaluation pass on the full test set after each epoch.
@@ -358,8 +357,6 @@ class SNNVerifier:
             "train_summary": summary,
             "config": {"input_size": input_size, "num_classes": num_classes},
         }, ckpt)
-        # Also save the full model object for SpikingNeuralNetwork.load()
-        torch.save(model, self.output_dir / "snn_model.pt")
         self.model = model.eval()
         return summary
 

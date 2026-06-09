@@ -21,6 +21,7 @@ wheels/
 *.egg
 
 # Virtual environments
+.venv/
 venv/
 ENV/
 env/
@@ -53,9 +54,14 @@ docs/audits/
 docs/plans/
 docs/research/
 
-# MNIST data (auto-downloaded by PyTorch for CompareNNV experiments)
+# MNIST data (auto-downloaded by PyTorch)
 examples/CompareNNV/data/
 examples/Tutorial/data/
+examples/SNN/data/
+
+# SNN example artifacts (trained models; reproducible via train_snn.py)
+examples/SNN/models/
+examples/SNN/outputs/
 
 # Claude
 .claude/
