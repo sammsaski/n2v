@@ -6,6 +6,7 @@ Wraps PyTorch models to enable reachability analysis and verification.
 
 from typing import Union, List, Optional
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.fx as fx
@@ -22,13 +23,7 @@ class NeuralNetwork:
 
     Attributes:
         model: PyTorch model
-        layers: List of individual layers, populated lazily on first
-            access. Triggers ``torch.fx.symbolic_trace`` on the model,
-            which can fail for models with data-dependent control flow
-            (e.g. ``if x.dim() == 2:``). Probabilistic verification
-            methods (``flow_matching`` / ``conformal``) never read this
-            attribute, so wrapping an untraceable model is fine as long
-            as you don't call sound methods on it.
+        layers: List of individual layers
         input_size: Expected input size
         output_size: Output size
     """
@@ -46,7 +41,9 @@ class NeuralNetwork:
 
         self.model = model
         self.model.eval()  # Set to evaluation mode
-        self._layers_cache: Optional[List[nn.Module]] = None
+
+        # Extract layers
+        self.layers = self._extract_layers(model)
 
         # Determine input/output sizes
         self.input_size = input_size
@@ -54,19 +51,6 @@ class NeuralNetwork:
 
         if input_size is not None:
             self._validate_input_size(input_size)
-
-    @property
-    def layers(self) -> List[nn.Module]:
-        """Lazily-populated list of layers from ``torch.fx.symbolic_trace``.
-
-        Raises ``TypeError`` on first access if the model has
-        data-dependent control flow (or other torch.fx-untraceable
-        constructs). Probabilistic methods never touch this property —
-        only sound methods need a per-layer inventory.
-        """
-        if self._layers_cache is None:
-            self._layers_cache = self._extract_layers(self.model)
-        return self._layers_cache
 
     def _extract_layers(self, model: nn.Module) -> List[nn.Module]:
         """
@@ -90,7 +74,17 @@ class NeuralNetwork:
             return self._extract_layers_from_graph(model)
 
         try:
-            gm = torch.fx.symbolic_trace(model)
+            # T1-7 (audit workflow critical): use N2VTracer so n2v wrapper
+            # modules (SoftmaxAttention, PatchEmbed, CLSToken, DagAdd, ...)
+            # are treated as fx leaves. Without leaf treatment fx descends
+            # into each wrapper's Python forward, decomposing it into
+            # primitives the dispatcher does not handle and the multi-
+            # input dispatcher's isinstance chain becomes dead code. Leaf
+            # treatment makes each wrapper a single call_module node so
+            # the dispatcher routes it directly.
+            from n2v.nn._tracer import symbolic_trace as _n2v_symbolic_trace
+
+            gm = _n2v_symbolic_trace(model)
             return self._extract_layers_from_graph(gm)
         except Exception as e:
             raise TypeError(
@@ -177,56 +171,44 @@ class NeuralNetwork:
         """
         Perform reachability analysis.
 
-        This is the primary interface for reachability analysis. It dispatches
-        to the appropriate reach implementation based on the chosen ``method``
-        and the input set type.
+        This is the primary interface for reachability analysis. It automatically
+        dispatches to the appropriate reachability method based on the input set type.
 
         Args:
-            input_set: Input specification. Sound methods accept
-                ``Star``/``Zono``/``Box``/``Hexatope``/``Octatope``.
-                Probabilistic methods (``'flow_matching'``) require a ``Box``.
+            input_set: Input specification (Star, Zono, Box, Hexatope, or Octatope)
             method: Reachability method to use:
-                - ``'exact'`` (Star only): exact reachability with splitting.
-                - ``'approx'`` (Star, Box, Zono, Hexatope, Octatope):
-                  over-approximate reachability with relaxation.
-                - ``'flow_matching'`` (Box only): probabilistic reachability
-                  via flow-matching + conformal calibration. Returns a
-                  :class:`ProbabilisticSet`. A model-agnostic free-function
-                  alternative is :func:`n2v.probabilistic.flow_reach` —
-                  use it directly when your model isn't a PyTorch
-                  ``nn.Module`` (any callable ``y = model(x)`` works).
-                - ``'conformal'`` (Box only): probabilistic reachability
-                  via surrogate-based conformal inference. Returns a
-                  :class:`ProbabilisticBox`. A model-agnostic free-function
-                  alternative is :func:`n2v.probabilistic.conformal_reach`.
-            **kwargs: Method-specific arguments. Either bare kwargs (e.g.
-                ``parallel=True``, ``n_workers=8`` for sound; ``epsilon=...``,
-                ``m=...`` for flow_matching) **or** a typed config object
-                (``ReachConfig`` for sound, ``FlowReachConfig`` for
-                flow_matching) via ``config=``. The two styles are
-                mutually exclusive; passing both raises ``TypeError``.
+                For Star:
+                    - 'exact': Exact reachability with splitting
+                    - 'approx': Over-approximate reachability with relaxation
+                For Box/Zono:
+                    - 'approx': Over-approximate reachability (only option)
+                For Hexatope/Octatope:
+                    - 'approx': Over-approximate reachability
+            **kwargs: Additional method-specific arguments:
+                For Star 'exact':
+                    - lp_solver: LP solver to use (default: 'default')
+                    - verbose: 'display' to show progress
+                    - parallel: Enable parallel Star processing
+                    - n_workers: Number of parallel workers
+                For Star 'approx':
+                    - relax_factor: Relaxation factor (0=exact, 1=max, default: 0.5)
+                    - relax_method: Relaxation strategy (default: 'standard')
+                    - lp_solver: LP solver to use
+                    - verbose: 'display' to show progress
+                For Zono/Box:
+                    - verbose: 'display' to show progress
 
         Returns:
-            For sound methods: list of output sets (same type as input).
-            For ``'flow_matching'``: a :class:`ProbabilisticSet`.
+            List of output sets (same type as input_set)
 
         Example:
             >>> from n2v.nn import NeuralNetwork
-            >>> from n2v.sets import Star, Box
+            >>> from n2v.sets import Star
             >>> import torch.nn as nn
-            >>>
-            >>> # Sound exact reach:
             >>> model = nn.Sequential(nn.Linear(2, 5), nn.ReLU(), nn.Linear(5, 1))
             >>> net = NeuralNetwork(model)
             >>> input_star = Star.from_bounds(lb, ub)
             >>> output_stars = net.reach(input_star, method='exact')
-            >>>
-            >>> # Probabilistic flow-matching reach:
-            >>> from n2v.probabilistic import FlowReachConfig
-            >>> prob_set = net.reach(
-            ...     Box(lb, ub), method='flow_matching',
-            ...     config=FlowReachConfig(epsilon=0.001, m=8000, seed=42),
-            ... )
         """
         return reach_pytorch_model(
             self.model,
@@ -236,10 +218,4 @@ class NeuralNetwork:
         )
 
     def __repr__(self) -> str:
-        # Don't trigger the lazy ``layers`` property — that would
-        # ``torch.fx``-trace the model just to render a string. Show '?'
-        # until something else has caused the trace to run.
-        n_layers = (
-            len(self._layers_cache) if self._layers_cache is not None else '?'
-        )
-        return f"NeuralNetwork(layers={n_layers}, input_size={self.input_size})"
+        return f"NeuralNetwork(layers={len(self.layers)}, input_size={self.input_size})"

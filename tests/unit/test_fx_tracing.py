@@ -214,6 +214,92 @@ class TestInlineActivationRegression:
         torch.manual_seed(42)
         self._verify_model_reach(LeakyReLUModel())
 
+    def test_functional_leaky_relu_preserves_extreme_slope(self):
+        """T0-2 regression (audit C6): F.leaky_relu(..., negative_slope=0.5)
+        must not be silently rebuilt as nn.LeakyReLU() with the default slope
+        0.01. The previous FUNCTION_TO_MODULE_CLS path constructed the module
+        with no kwargs, dropping the slope and producing an UNSOUND reach that
+        excluded true outputs near x=-2.
+
+        Counterexample input: Star([-2, -0.5]) through a single F.leaky_relu
+        with slope=0.5. True output range is [-1.0, -0.25]. If the slope is
+        silently set to 0.01, reach gives [-0.02, -0.005] and true outputs
+        like -1.0 fall outside the reported reach -> Star.contains(-1.0) is
+        False.
+        """
+        class SingleLeakyReLU(nn.Module):
+            """Identity Linear then F.leaky_relu with an extreme slope."""
+
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(1, 1, bias=False)
+                with torch.no_grad():
+                    self.fc.weight.copy_(torch.tensor([[1.0]]))
+
+            def forward(self, x):
+                return F.leaky_relu(self.fc(x), negative_slope=0.5)
+
+        model = SingleLeakyReLU()
+        model.eval()
+        # Star spanning [-2, -0.5] in input space.
+        lb = np.array([-2.0])
+        ub = np.array([-0.5])
+        input_star = Star.from_bounds(lb, ub)
+        output_stars = NeuralNetwork(model).reach(input_star, method='approx')
+        assert len(output_stars) == 1
+        out = output_stars[0]
+        out_lb, out_ub = out.get_ranges()
+        # True leaky_relu(x, slope=0.5) over [-2, -0.5] is [-1.0, -0.25].
+        # If slope was silently dropped to 0.01 the reach would be
+        # [-0.02, -0.005] (clearly excludes -1.0).
+        assert out_lb.flatten()[0] <= -1.0 + 1e-6, (
+            f"Reach lower bound {out_lb.flatten()[0]} is above the true "
+            f"minimum -1.0 — slope was silently dropped (unsound)."
+        )
+        assert out_ub.flatten()[0] >= -0.25 - 1e-6, (
+            f"Reach upper bound {out_ub.flatten()[0]} is below the true "
+            f"maximum -0.25."
+        )
+
+    def test_functional_elu_preserves_extreme_alpha(self):
+        """T0-2 regression (audit C6): F.elu(..., alpha=3.0) must not be
+        silently rebuilt as nn.ELU() with the default alpha 1.0. The same
+        FUNCTION_TO_MODULE_CLS path that lost the leaky_relu slope was also
+        losing the ELU alpha, producing an unsound reach.
+
+        With alpha=3 over input [-3, 0], true ELU range is approximately
+        [-2.85, 0]. If alpha is silently set to 1.0 the reach floor becomes
+        ~-0.95 and true outputs near -2.85 fall outside the reported reach.
+        """
+        class SingleELU(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(1, 1, bias=False)
+                with torch.no_grad():
+                    self.fc.weight.copy_(torch.tensor([[1.0]]))
+
+            def forward(self, x):
+                return F.elu(self.fc(x), alpha=3.0)
+
+        model = SingleELU()
+        model.eval()
+        lb = np.array([-3.0])
+        ub = np.array([0.0])
+        input_star = Star.from_bounds(lb, ub)
+        output_stars = NeuralNetwork(model).reach(input_star, method='approx')
+        assert len(output_stars) == 1
+        out_lb, out_ub = output_stars[0].get_ranges()
+        # True ELU(x, alpha=3) at x=-3 is 3*(exp(-3) - 1) ≈ -2.85.
+        # If alpha was dropped to 1.0 the reach floor would be ~-0.95.
+        assert out_lb.flatten()[0] <= -2.85 + 1e-3, (
+            f"Reach lower bound {out_lb.flatten()[0]} is above the true ELU "
+            f"minimum ~-2.85 — alpha was silently dropped (unsound)."
+        )
+        assert out_ub.flatten()[0] >= 0.0 - 1e-6, (
+            f"Reach upper bound {out_ub.flatten()[0]} is below the true ELU "
+            f"maximum 0.0."
+        )
+
     def test_functional_vs_registered_parity(self):
         """Functional F.relu and registered nn.ReLU must produce identical bounds."""
         torch.manual_seed(42)
@@ -252,60 +338,12 @@ class TestUntraceableModelError:
             NeuralNetwork(model).reach(input_star, method='approx')
 
     def test_inline_module_error_message_suggests_fix(self):
-        """Error for inline nn.ReLU()(x) must suggest F.relu(x) as alternative.
-
-        ``NeuralNetwork.__init__`` defers the trace error so probabilistic
-        methods can still run on un-traceable models; the error surfaces
-        when a sound method is actually invoked.
-        """
+        """Error for inline nn.ReLU()(x) must suggest F.relu(x) as alternative."""
         model = InlineReLUModel()
         model.eval()
-        input_star = _make_input_star()
 
         with pytest.raises(TypeError, match="F.relu.*instead of.*nn.ReLU"):
-            NeuralNetwork(model).reach(input_star, method='approx')
-
-    def test_untraceable_model_allows_probabilistic_methods(self):
-        """Un-traceable models can still construct and reach via probabilistic
-        methods (which don't need the layer inventory).
-
-        Regression test for the post-NeurIPS refactor: ``NeuralNetwork()``
-        used to eagerly ``torch.fx``-trace the model in ``__init__``,
-        causing the ``flow_matching`` / ``conformal`` paths to fail for
-        any model with data-dependent control flow (e.g. the ACAS Xu
-        wrapper's ``if x.dim() == 2:`` reshape branch). The fix makes
-        ``layers`` a lazy property — probabilistic methods never read
-        it, so untraceable models work for those paths; the trace only
-        runs (and raises) when sound methods need the layer inventory.
-        """
-        from n2v.sets import Box
-        from n2v.probabilistic import FlowReachConfig
-        import numpy as np
-        model = UntraceableModel()  # 3-D input -> 2-D output, data-dep ctrl flow
-        model.eval()
-
-        # Construction succeeds (no eager trace).
-        net = NeuralNetwork(model)
-        assert net._layers_cache is None, (
-            'Expected layers cache empty until first access')
-
-        # Probabilistic reach proceeds — never reads ``layers``.
-        # (UntraceableModel takes 3-D input.)
-        input_box = Box(np.array([-0.1, -0.1, -0.1]),
-                        np.array([ 0.1,  0.1,  0.1]))
-        prob_set = net.reach(
-            input_box, method='flow_matching',
-            config=FlowReachConfig(
-                epsilon=0.001, m=200, ell=199,
-                n_train=200, flow_epochs=20, flow_config='base',
-                seed=0,
-            ),
-        )
-        assert prob_set is not None
-
-        # And reading the ``layers`` property directly does raise.
-        with pytest.raises(TypeError, match="traceable by torch.fx"):
-            _ = net.layers
+            NeuralNetwork(model)
 
 
 class TestSequentialModelParity:
@@ -339,17 +377,11 @@ class TestSequentialModelParity:
 class TestNeuralNetworkLayers:
     """Test that NeuralNetwork.layers reflects all ops after fx tracing."""
 
-    def test_inline_relu_raises_on_sound_reach(self):
-        """Inline nn.ReLU() trace failure must surface on sound .reach().
-
-        ``NeuralNetwork.__init__`` defers the trace error so probabilistic
-        methods still work; the error surfaces when a sound method
-        actually needs the layer inventory.
-        """
+    def test_inline_relu_raises_in_init(self):
+        """NeuralNetwork.__init__ must raise TypeError for inline nn.ReLU()."""
         model = InlineReLUModel()
-        input_star = _make_input_star()
         with pytest.raises(TypeError, match="F.relu"):
-            NeuralNetwork(model).reach(input_star, method='approx')
+            NeuralNetwork(model)
 
     def test_functional_relu_layer_count(self):
         """NeuralNetwork.layers must include F.relu as a layer."""

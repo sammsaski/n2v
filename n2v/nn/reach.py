@@ -9,9 +9,7 @@ and ONNX GraphModules.
 import logging
 import operator
 import time
-import warnings
-from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import torch
@@ -26,8 +24,7 @@ from n2v.nn.layer_ops.dispatcher import reach_layer
 from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
 from n2v.utils.model_preprocessing import fuse_batchnorm, has_batchnorm
 from n2v.utils.bounds_precomputation import compute_intermediate_bounds
-from n2v.probabilistic.conformal_reach import ConformalReachConfig, conformal_reach
-from n2v.probabilistic.flow.reach import FlowReachConfig, flow_reach
+from n2v.probabilistic import verify
 from onnx2torch.node_converters.reshape import OnnxReshape
 from onnx2torch.node_converters.concat import OnnxConcat
 from onnx2torch.node_converters.slice import OnnxSlice, OnnxSliceV9
@@ -35,166 +32,47 @@ from onnx2torch.node_converters.split import OnnxSplit, OnnxSplit13
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Configuration dataclasses used by :func:`reach_pytorch_model` to bundle
-# per-method kwargs (validated via :func:`_validate_reach_config`).
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class ReachConfig:
-    """Configuration for sound reachability via :meth:`NeuralNetwork.reach`.
-
-    Used with sound methods ``'exact'`` (Star-only) and ``'approx'``
-    (Star, Box, Zono, Hexatope, Octatope). Probabilistic methods use
-    their own config classes: ``'flow_matching'`` -> ``FlowReachConfig``
-    and ``'conformal'`` -> ``ConformalReachConfig``.
-
-    Attributes:
-        method: ``'exact'`` for exact star reachability with splitting
-            (sound, complete on piecewise-linear nets) or ``'approx'``
-            for over-approximate relaxation reachability (sound, sound-
-            but-incomplete). Default ``'exact'``.
-        lp_solver: LP solver identifier passed to the underlying reach
-            kernels. ``'default'`` defers to the kernel's choice.
-        verbose: ``'display'`` to print progress, ``None`` to stay quiet.
-        parallel: Enable parallel Star processing (only relevant for
-            ``method='exact'`` on Star sets).
-        n_workers: Number of parallel workers when ``parallel=True``.
-            Must be >= 1.
-        relax_factor: Relaxation factor in ``[0, 1]`` for ``method='approx'``;
-            ``0`` is exact (no relaxation), ``1`` is maximal relaxation.
-            Default ``0.5``. Ignored for ``method='exact'`` (a warning is
-            emitted if set to a non-default with ``method='exact'``).
-        relax_method: Relaxation strategy for ``method='approx'``. Default
-            ``'standard'``. Ignored for ``method='exact'``.
-
-    Example:
-        >>> # Pass directly to .reach():
-        >>> output_stars = net.reach(input_star, config=ReachConfig(
-        ...     method='exact', parallel=True, n_workers=8,
-        ... ))
-        >>> # Or equivalently via bare kwargs (validator builds the config):
-        >>> output_stars = net.reach(input_star, method='exact',
-        ...                          parallel=True, n_workers=8)
-    """
-
-    method: Literal['exact', 'approx'] = 'exact'
-    lp_solver: str = 'default'
-    verbose: Optional[str] = None
-    parallel: bool = False
-    n_workers: int = 1
-    relax_factor: float = 0.5
-    relax_method: str = 'standard'
-
-    def __post_init__(self):
-        if self.method not in ('exact', 'approx'):
-            raise ValueError(
-                f"ReachConfig.method must be 'exact' or 'approx', "
-                f"got {self.method!r}"
-            )
-        if self.method == 'exact' and (
-            self.relax_factor != 0.5 or self.relax_method != 'standard'
-        ):
-            warnings.warn(
-                "ReachConfig.relax_factor / relax_method are ignored for "
-                "method='exact'",
-                stacklevel=2,
-            )
-        if self.n_workers < 1:
-            raise ValueError(
-                f"ReachConfig.n_workers must be >= 1, got {self.n_workers}"
-            )
-        if not 0.0 <= self.relax_factor <= 1.0:
-            raise ValueError(
-                f"ReachConfig.relax_factor must be in [0, 1], "
-                f"got {self.relax_factor}"
-            )
-
-
-def _validate_reach_config(method, config, **kwargs):
-    """Reconcile ``config=`` and bare kwargs for ``.reach()`` dispatch.
-
-    The dispatch surface allows two styles equivalently:
-
-      * ``net.reach(box, method='exact', parallel=True, n_workers=8)``
-      * ``net.reach(box, config=ReachConfig(method='exact', parallel=True,
-                                            n_workers=8))``
-
-    This helper produces a validated config from either form; the two
-    forms are mutually exclusive (passing both raises ``TypeError``).
-
-    Args:
-        method: The ``method=`` argument to ``.reach()``.
-        config: An optional dataclass instance — ``ReachConfig`` for
-            sound methods (``'exact'``, ``'approx'``); ``FlowReachConfig``
-            for ``'flow_matching'``.
-        **kwargs: Method-specific keyword arguments. Empty when the
-            caller uses ``config=``.
-
-    Returns:
-        A validated config instance of the type appropriate for ``method``.
-
-    Raises:
-        TypeError: If both ``config=`` and ``kwargs`` are passed.
-        TypeError: If ``config``'s type doesn't match ``method``.
-        TypeError: If ``config.method`` disagrees with the ``method`` arg.
-        TypeError: If kwargs contain unknown keys for the chosen config.
-        ValueError: If ``method`` is not a known reach method.
-    """
-    if config is not None and kwargs:
-        raise TypeError(
-            "pass either config= or method-specific kwargs, not both "
-            f"(got config={type(config).__name__} and kwargs={list(kwargs)})"
-        )
-
-    if method in ('exact', 'approx'):
-        expected_cls = ReachConfig
-    elif method == 'flow_matching':
-        expected_cls = FlowReachConfig
-    elif method == 'conformal':
-        expected_cls = ConformalReachConfig
-    else:
-        raise ValueError(
-            f"unknown reach method: {method!r}. "
-            f"Known: 'exact', 'approx', 'flow_matching', 'conformal'."
-        )
-
-    if config is None:
-        # Build from kwargs. Unknown keys raise ``TypeError`` via the
-        # dataclass constructor — desirable: typo'd kwargs fail loudly.
-        if 'method' in expected_cls.__dataclass_fields__:
-            kwargs.setdefault('method', method)
-            if kwargs['method'] != method:
-                raise TypeError(
-                    f"method in kwargs ({kwargs['method']!r}) disagrees "
-                    f"with method= argument ({method!r})"
-                )
-        return expected_cls(**kwargs)
-
-    if not isinstance(config, expected_cls):
-        raise TypeError(
-            f"method={method!r} expects {expected_cls.__name__}, "
-            f"got {type(config).__name__}"
-        )
-
-    if hasattr(config, 'method') and config.method != method:
-        raise TypeError(
-            f"config.method ({config.method!r}) disagrees with "
-            f"method= argument ({method!r})"
-        )
-
-    return config
-
 # Maps torch functional ops to their nn.Module equivalents.
 #   Used by _function_node_to_module to convert call_function
 #   fx nodes into modules for the reachability dispatcher.
 FUNCTION_TO_MODULE_CLS: dict[type, type[nn.Module]] = {
     F.relu: nn.ReLU,
     torch.relu: nn.ReLU,
+    F.relu6: nn.ReLU6,
+    # NOTE (audit T0-2 / C6 / PR-1 audit C1): do NOT add ``F.elu``,
+    # ``F.leaky_relu``, or ``F.gelu`` here. ``_function_node_to_module``
+    # consults this dict FIRST. The dict value is constructed via ``cls()``
+    # with no kwargs, so a custom ``negative_slope`` / ``alpha`` /
+    # ``approximate`` on the call_function node would be silently dropped,
+    # producing an unsound (under-approximating) reach that excludes the
+    # true output (counterexamples: ``F.leaky_relu(x, negative_slope=0.5)``
+    # returns reach ``[-0.02, -0.005]`` while the true output is
+    # ``[-1.0, -0.25]``; ``F.gelu(x, approximate='tanh')`` routes through
+    # the erf-form floor -0.169972 while the tanh form dips to -0.170041
+    # near x = -0.7517, producing an above-floor lower bound). The
+    # dedicated parameter-extraction branches in ``_function_node_to_module``
+    # below correctly read the kwargs and must remain the only path for
+    # these three functions.
+    F.silu: nn.SiLU,
+    F.hardswish: nn.Hardswish,
     torch.sigmoid: nn.Sigmoid,
+    F.sigmoid: nn.Sigmoid,
     torch.tanh: nn.Tanh,
+    F.tanh: nn.Tanh,
+}
+
+
+def _scaled_dot_product_attention_module():
+    """Lazy-construct SoftmaxAttention to avoid an import cycle at module load."""
+    from n2v.nn.layers.softmax_attention import SoftmaxAttention
+    return SoftmaxAttention()
+
+
+# Functional ops that need a parameterless wrapper module produced lazily.
+# (Separate from FUNCTION_TO_MODULE_CLS because the value here is a factory,
+# not a class, to avoid eager imports of n2v.nn.layers at the top of reach.py.)
+FUNCTION_TO_MODULE_FACTORY: dict = {
+    F.scaled_dot_product_attention: _scaled_dot_product_attention_module,
 }
 
 
@@ -253,55 +131,6 @@ def reach_pytorch_model(
     if method == 'hybrid':
         return _reach_hybrid(model, input_set, **kwargs)
 
-    if method == 'flow_matching':
-        # Flow-matching probabilistic reach: trains a flow on outputs
-        # sampled from the input box, calibrates a conformal threshold,
-        # and returns a ProbabilisticSet. ``flow_reach`` accepts both
-        # ``nn.Module`` and numpy-callable inputs; we pass the module
-        # directly so its forward pass stays device-aware (preserves
-        # GPU acceleration where applicable).
-        if not isinstance(input_set, Box):
-            raise TypeError(
-                f"method='flow_matching' requires Box input, "
-                f"got {type(input_set).__name__}"
-            )
-        config = kwargs.pop('config', None)
-        config = _validate_reach_config(method, config, **kwargs)
-        return flow_reach(model, input_set, config)
-
-    if method == 'conformal':
-        # Surrogate-based conformal reach. ``conformal_reach`` accepts
-        # both ``nn.Module`` and numpy-callable inputs; we pass the
-        # module directly so its internal device-aware wrapping kicks in.
-        if not isinstance(input_set, Box):
-            raise TypeError(
-                f"method='conformal' requires Box input, "
-                f"got {type(input_set).__name__}"
-            )
-        config = kwargs.pop('config', None)
-        config = _validate_reach_config(method, config, **kwargs)
-        return conformal_reach(model, input_set, config)
-
-    # Sound dispatch ('exact' / 'approx'): if the caller passed
-    # ``config=ReachConfig(...)`` (the documented form), validate it and
-    # unpack its fields back into ``kwargs`` so the downstream
-    # ``_handle_graphmodule`` -> ``reach_layer`` chain consumes them as
-    # before. Without this branch the ``config=`` form silently no-op'd
-    # on sound methods while the documented public API claimed it worked.
-    if 'config' in kwargs:
-        config = kwargs.pop('config')
-        # Pass remaining kwargs so ``_validate_reach_config`` enforces
-        # the documented "config XOR kwargs" rule.
-        config = _validate_reach_config(method, config, **kwargs)
-        kwargs = {
-            'lp_solver': config.lp_solver,
-            'verbose': config.verbose,
-            'parallel': config.parallel,
-            'n_workers': config.n_workers,
-            'relax_factor': config.relax_factor,
-            'relax_method': config.relax_method,
-        }
-
     # Auto-fuse BatchNorm layers if present
     if has_batchnorm(model):
         model = fuse_batchnorm(model)
@@ -334,7 +163,10 @@ def reach_pytorch_model(
     # Trace non-GraphModule models with torch.fx
     if not isinstance(model, fx.GraphModule):
         try:
-            model = torch.fx.symbolic_trace(model)
+            # T1-7: use N2VTracer so wrappers stay as leaves -- see
+            # n2v/nn/_tracer.py for rationale.
+            from n2v.nn._tracer import symbolic_trace as _n2v_symbolic_trace
+            model = _n2v_symbolic_trace(model)
         except Exception as e:
             raise TypeError(
                 f"n2v requires models to be traceable by torch.fx. "
@@ -366,6 +198,9 @@ def _function_node_to_module(
     if fn in FUNCTION_TO_MODULE_CLS:
         return FUNCTION_TO_MODULE_CLS[fn]()
 
+    if fn in FUNCTION_TO_MODULE_FACTORY:
+        return FUNCTION_TO_MODULE_FACTORY[fn]()
+
     # Parameterized functions
     if fn is F.leaky_relu:
         slope = node.kwargs.get('negative_slope', 0.01)
@@ -373,6 +208,32 @@ def _function_node_to_module(
                 and not isinstance(node.args[1], fx.Node)):
             slope = node.args[1]
         return nn.LeakyReLU(negative_slope=slope)
+
+    if fn is F.elu:
+        alpha = node.kwargs.get('alpha', 1.0)
+        if (len(node.args) > 1
+                and not isinstance(node.args[1], fx.Node)):
+            alpha = node.args[1]
+        return nn.ELU(alpha=alpha)
+
+    if fn is F.gelu:
+        # PR-1 audit C1: F.gelu(x, approximate='tanh') silently dropped the
+        # kwarg when routed through FUNCTION_TO_MODULE_CLS. The tanh-form
+        # floor is BELOW the erf-form floor, so the wrong dispatcher branch
+        # produced an unsound reach near the dip (above-floor lower bound).
+        # Read the kwarg explicitly here so nn.GELU(approximate=...) is
+        # constructed correctly and the dispatcher routes to gelu_tanh_box
+        # when needed.
+        approximate = node.kwargs.get('approximate', 'none')
+        if (len(node.args) > 1
+                and not isinstance(node.args[1], fx.Node)):
+            approximate = node.args[1]
+        if approximate not in ('none', 'tanh'):
+            raise NotImplementedError(
+                f"F.gelu: unsupported approximate='{approximate}' "
+                f"(expected 'none' or 'tanh')."
+            )
+        return nn.GELU(approximate=approximate)
 
     if fn is torch.flatten:
         start_dim = node.kwargs.get('start_dim', 1)
@@ -507,6 +368,16 @@ def _handle_graphmodule(
                     node_values[node.name] = current_sets
                     continue
 
+            # Multi-input wrapper modules (DagAdd, DagConcat, Concat2D, SFF,
+            # SoftmaxAttention) need set lists for every input port.
+            multi_result = _handle_multi_input_op(
+                module, node, node_values, set_type
+            )
+            if multi_result is not None:
+                node_values[node.name] = multi_result
+                current_sets = multi_result
+                continue
+
             # Standard PyTorch layer - use dispatcher
             if node.args and len(node.args) > 0:
                 first_arg = node.args[0]
@@ -520,10 +391,124 @@ def _handle_graphmodule(
                     output_sets = reach_layer(module, input_sets_op, method, **layer_kwargs)
                     node_values[node.name] = output_sets
                     current_sets = output_sets
+                else:
+                    # T0-1 (audit C1): fail loud rather than silently drop the
+                    # layer. Previously this branch had no ``else``, so when an
+                    # upstream node was skipped (e.g. an unhandled call_function
+                    # or call_method primitive that left no entry in
+                    # ``node_values``), every downstream call_module was silently
+                    # dropped and ``reach()`` returned the unchanged input box.
+                    # That silently inverted the verifier's SAT/UNSAT verdict.
+                    raise NotImplementedError(
+                        f"call_module '{node.target}' ({module_type}): input "
+                        f"'{getattr(first_arg, 'name', first_arg)!s}' has no "
+                        f"computed reach set. An upstream node (likely a "
+                        f"call_function or call_method primitive) was skipped "
+                        f"without raising. The reach graph is incomplete; add "
+                        f"a handler for the upstream primitive."
+                    )
 
         elif node.op == 'call_function':
+            # T1-6 (ViT enable): handle elementwise binary primitives that
+            # appear in transformer residuals + positional-embedding adds.
+            # ``operator.add`` covers ``x + sublayer(x)`` (set + set) and
+            # ``x + self.pos_embed`` (set + constant). The set-arithmetic
+            # helper ``_add_sets`` already handles set + set.
+            if node.target in (operator.add, torch.add):
+                arg0, arg1 = node.args[0], node.args[1]
+
+                def _resolve_set_or_const(arg):
+                    if isinstance(arg, fx.Node):
+                        if arg.op == 'get_attr':
+                            return ('const',
+                                    _get_parameter(graph_module, arg)
+                                    .detach().cpu().numpy())
+                        if arg.name in node_values:
+                            return ('sets', node_values[arg.name])
+                    if isinstance(arg, (int, float)):
+                        return ('const', np.array([float(arg)]))
+                    if isinstance(arg, torch.Tensor):
+                        return ('const', arg.detach().cpu().numpy())
+                    raise NotImplementedError(
+                        f"call_function {node.target}: cannot resolve arg "
+                        f"{arg!r} (type {type(arg).__name__})."
+                    )
+
+                kind_a, val_a = _resolve_set_or_const(arg0)
+                kind_b, val_b = _resolve_set_or_const(arg1)
+
+                if kind_a == 'sets' and kind_b == 'sets':
+                    # PR-1 audit N12: previously passed op_name='+', which
+                    # ``_add_sets`` checked against ``'add' in op_name`` and
+                    # silently fell through to the SUBTRACTION branch ->
+                    # ``y = a(x) - b(x)`` was verified instead of
+                    # ``y = a(x) + b(x)`` for every residual / two-stream
+                    # add. Pass the canonical name; ``_add_sets`` now
+                    # raises on unrecognised op_names so future drift is
+                    # loud.
+                    result = _add_sets(val_a, val_b, 'add')
+                else:
+                    # set + constant: translate the set's centre by the
+                    # constant; generators unchanged.
+                    if kind_a == 'sets':
+                        sets_arg, const_arg = val_a, val_b
+                    else:
+                        sets_arg, const_arg = val_b, val_a
+                    const_flat = np.asarray(const_arg, dtype=np.float64).reshape(-1, 1)
+                    result = []
+                    for s in sets_arg:
+                        if isinstance(s, ImageStar):
+                            # FIX: ImageStar.V is (H, W, C, n_var+1) — 4D.
+                            # The centre column is V[..., 0] (last axis,
+                            # index 0); the prior new_V[:, 0:1] sliced the
+                            # *W* axis and crashed via numpy broadcast
+                            # against const_flat shape (flat_dim, 1).
+                            new_V = s.V.copy()
+                            const_hwc = np.asarray(
+                                const_arg, dtype=np.float64,
+                            ).reshape(s.height, s.width, s.num_channels)
+                            new_V[..., 0] = new_V[..., 0] + const_hwc
+                            result.append(ImageStar(
+                                new_V, s.C, s.d, s.predicate_lb, s.predicate_ub,
+                                s.height, s.width, s.num_channels,
+                            ))
+                        elif isinstance(s, Star):
+                            new_V = s.V.copy()
+                            new_V[:, 0:1] = new_V[:, 0:1] + const_flat
+                            result.append(Star(
+                                new_V, s.C, s.d, s.predicate_lb, s.predicate_ub,
+                            ))
+                        elif isinstance(s, ImageZono):
+                            new_c = s.c + const_flat
+                            result.append(ImageZono(
+                                new_c, s.V, s.height, s.width, s.num_channels,
+                            ))
+                        elif isinstance(s, Zono):
+                            result.append(Zono(s.c + const_flat, s.V))
+                        elif isinstance(s, Box):
+                            result.append(Box(s.lb + const_flat, s.ub + const_flat))
+                        elif isinstance(s, (Hexatope, Octatope)):
+                            # Set + constant: box-lift, translate the IBP
+                            # envelope, re-wrap. Sound but loose; exact
+                            # Hex/Oct centre translation would require
+                            # poking at the internal basis representation.
+                            # ``estimate_ranges`` is the zero-arg IBP path
+                            # (get_bounds requires a solver kwarg).
+                            lb_s, ub_s = s.estimate_ranges()
+                            lb_s = np.asarray(lb_s).reshape(-1, 1) + const_flat
+                            ub_s = np.asarray(ub_s).reshape(-1, 1) + const_flat
+                            result.append(type(s).from_bounds(lb_s, ub_s))
+                        else:
+                            raise NotImplementedError(
+                                f"call_function operator.add: set + constant "
+                                f"not implemented for {type(s).__name__}."
+                            )
+
+                node_values[node.name] = result
+                current_sets = result
+
             # Handle operator.getitem for multi-output ops (e.g., Split)
-            if node.target is operator.getitem:
+            elif node.target is operator.getitem:
                 args = node.args
                 if len(args) >= 2:
                     src_node = args[0]
@@ -535,6 +520,167 @@ def _handle_graphmodule(
                                 and isinstance(src_val[0], list)):
                             node_values[node.name] = src_val[index]
                             current_sets = src_val[index]
+                        else:
+                            # T1-6 (ViT enable): tensor-slice getitem.
+                            # The audit's central case is Pooler's
+                            # ``x[:, 0]`` which extracts the CLS token from
+                            # a flat (L*D,) Zono/Star. Implementation:
+                            # interpret the tuple of slices in the
+                            # ``(token, feature)`` layout the upstream
+                            # PatchEmbed produces and pick out the indexed
+                            # rows of c / V.
+                            result = []
+                            if not isinstance(index, tuple):
+                                raise NotImplementedError(
+                                    f"operator.getitem '{node.name}': "
+                                    f"non-tuple index {index!r} not yet "
+                                    f"supported (see PR12_FIX_LIST T1-6)."
+                                )
+                            # PR-1 audit N1: the batch axis at index[0]
+                            # MUST be ``slice(None)`` (i.e. ``:``). The
+                            # previous code dropped index[0] unconditionally
+                            # so ``x[1, 0]`` was silently treated as
+                            # ``x[:, 0]`` -- the reach selected the wrong
+                            # token of an arbitrary batch element, verifying
+                            # a different function. Reject any non-trivial
+                            # batch index loudly.
+                            if not (isinstance(index[0], slice)
+                                    and index[0] == slice(None, None, None)):
+                                raise NotImplementedError(
+                                    f"operator.getitem '{node.name}': batch "
+                                    f"axis index {index[0]!r} is not "
+                                    f"``slice(None)`` (i.e. ``:``). n2v "
+                                    f"only supports batch-1 inputs; a "
+                                    f"non-trivial batch index would verify "
+                                    f"the wrong batch element. Rewrite the "
+                                    f"model so the batch axis is sliced "
+                                    f"with ``:`` only (audit N1)."
+                                )
+                            # Drop the batch axis (slice(None)) at index[0].
+                            # Remaining indices select tokens / features.
+                            inner_idx = index[1:]
+                            for s in src_val:
+                                # We assume the flat layout produced by
+                                # PatchEmbed is token-major: row i selects
+                                # token h, feature c with i = token*D + c.
+                                # For x[:, 0] (single token): take the
+                                # first D rows.
+                                if len(inner_idx) == 1 and isinstance(
+                                        inner_idx[0], int):
+                                    token_idx = inner_idx[0]
+                                    # Need D to know the feature count;
+                                    # infer from the set's total dim and
+                                    # the upstream layer's seq length.
+                                    # We pull D from a graph-level hint if
+                                    # available; otherwise raise.
+                                    # Pull L from the GraphModule (set at
+                                    # tracing time) or from a kwargs hint.
+                                    L = getattr(
+                                        graph_module, '_n2v_n_tokens', None,
+                                    ) or kwargs.get('n_tokens')
+                                    if L is None:
+                                        # Last resort: infer from model
+                                        # introspection -- the root module
+                                        # of an n2v-traced model often
+                                        # exposes an ``n_tokens`` attr on
+                                        # its wrapper (e.g. our MinimalViT).
+                                        root = getattr(
+                                            graph_module, 'root', None,
+                                        )
+                                        if root is not None:
+                                            L = getattr(root, 'n_tokens', None)
+                                    if L is None or s.dim % L != 0:
+                                        raise NotImplementedError(
+                                            f"operator.getitem '{node.name}': "
+                                            f"cannot infer token count to "
+                                            f"slice flat reach set of dim "
+                                            f"{s.dim}; pass ``n_tokens=L`` "
+                                            f"as a kwarg to reach() or set "
+                                            f"``model.n_tokens``."
+                                        )
+                                    D = s.dim // L
+                                    # FIX: normalise negative token_idx
+                                    # (e.g. ``x[:, -1]`` selects the last
+                                    # token). Without this, token_idx=-1
+                                    # gives row_start=-D, row_end=0 and the
+                                    # slice ``s.V[-D:0]`` is EMPTY, silently
+                                    # producing a zero-dim reach output.
+                                    if token_idx < 0:
+                                        token_idx = token_idx + L
+                                    if not (0 <= token_idx < L):
+                                        raise NotImplementedError(
+                                            f"operator.getitem '{node.name}': "
+                                            f"token_idx={inner_idx[0]} is out "
+                                            f"of range for L={L}."
+                                        )
+                                    row_start = token_idx * D
+                                    row_end = row_start + D
+                                    if isinstance(s, ImageStar):
+                                        # PR-1 audit I6: ImageStar.V is 4D
+                                        # ``(H, W, C, nVar+1)``. The prior
+                                        # ``s.V[row_start:row_end]`` sliced the
+                                        # H axis and produced a 4D matrix that
+                                        # Star.__init__ rejected with
+                                        # ``ValueError: too many values to
+                                        # unpack`` -- a confusing raise on
+                                        # legitimate inputs (e.g. Pooler's
+                                        # ``x[:, 0]`` after PatchEmbed).
+                                        # Fix: flatten via ``to_star()`` first
+                                        # (HWC-row-major == token-major; see
+                                        # ``patch_embed_reach._patch_embed_
+                                        # image_star``), then row-slice the
+                                        # 2D Star.
+                                        s_flat = s.to_star()
+                                        new_V = s_flat.V[row_start:row_end]
+                                        result.append(Star(
+                                            new_V, s_flat.C, s_flat.d,
+                                            s_flat.predicate_lb,
+                                            s_flat.predicate_ub,
+                                        ))
+                                    elif isinstance(s, Star):
+                                        new_V = s.V[row_start:row_end]
+                                        result.append(Star(
+                                            new_V, s.C, s.d,
+                                            s.predicate_lb, s.predicate_ub,
+                                        ))
+                                    elif isinstance(s, (ImageZono, Zono)):
+                                        new_c = s.c[row_start:row_end]
+                                        new_V = s.V[row_start:row_end]
+                                        result.append(Zono(new_c, new_V))
+                                    elif isinstance(s, Box):
+                                        result.append(Box(
+                                            s.lb[row_start:row_end],
+                                            s.ub[row_start:row_end],
+                                        ))
+                                    elif isinstance(s, (Hexatope, Octatope)):
+                                        # Box-lifted slice via the zero-arg
+                                        # IBP path ``estimate_ranges`` (the
+                                        # exact get_bounds requires a
+                                        # solver kwarg). Sound but loose;
+                                        # an exact row-slice would need
+                                        # surgery on the internal basis.
+                                        lb_s, ub_s = s.estimate_ranges()
+                                        lb_s = np.asarray(lb_s).reshape(-1, 1)
+                                        ub_s = np.asarray(ub_s).reshape(-1, 1)
+                                        sl_lb = lb_s[row_start:row_end]
+                                        sl_ub = ub_s[row_start:row_end]
+                                        result.append(
+                                            type(s).from_bounds(sl_lb, sl_ub),
+                                        )
+                                    else:
+                                        raise NotImplementedError(
+                                            f"operator.getitem on "
+                                            f"{type(s).__name__} not yet "
+                                            f"supported."
+                                        )
+                                else:
+                                    raise NotImplementedError(
+                                        f"operator.getitem '{node.name}': "
+                                        f"slice {inner_idx!r} not yet "
+                                        f"supported (see T1-6)."
+                                    )
+                            node_values[node.name] = result
+                            current_sets = result
             else:
                 # Try to convert function to module equivalent
                 equiv_module = _function_node_to_module(node)
@@ -559,10 +705,18 @@ def _handle_graphmodule(
                     node_values[node.name] = output_sets
                     current_sets = output_sets
 
-                elif verbose:
-                    logger.debug(
-                        f'  Skipping call_function: '
-                        f'{node.target}'
+                else:
+                    # T0-1 (audit C1 downstream): primitive call_function
+                    # nodes without a module equivalent (operator.add /
+                    # operator.mul / torch.cat / torch.matmul / F.softmax /
+                    # torch.split / torch.chunk) are wired in Commit 10
+                    # (T1-6). Until then, fail loud so the missing handler
+                    # is named in the traceback rather than silently
+                    # dropping the layer.
+                    raise NotImplementedError(
+                        f"call_function '{node.target}' is not handled by "
+                        f"_handle_graphmodule. Add a primitive handler "
+                        f"(see PR12_FIX_LIST T1-6, Commit 10)."
                     )
 
         elif node.op == 'call_method':
@@ -612,8 +766,19 @@ def _handle_graphmodule(
                 node_values[node.name] = result_sets
                 current_sets = result_sets
 
-            elif verbose:
-                logger.debug(f'  Skipping call_method: {method_name}')
+            else:
+                # T0-1 (audit C1 downstream): unhandled call_method
+                # (transpose / permute / unsqueeze / squeeze / chunk /
+                # other tensor methods) is wired in Commit 10 (T1-6).
+                # Until then, fail loud rather than log-and-continue, so
+                # downstream call_module nodes don't read stale
+                # ``current_sets`` and silently verify a different
+                # function than the model computes.
+                raise NotImplementedError(
+                    f"call_method '{method_name}' is not handled by "
+                    f"_handle_graphmodule. Add a handler (see "
+                    f"PR12_FIX_LIST T1-6, Commit 10)."
+                )
 
         elif node.op == 'output':
             # Output node - extract final result
@@ -623,6 +788,235 @@ def _handle_graphmodule(
                     current_sets = node_values[output_node.name]
 
     return current_sets
+
+
+def _handle_multi_input_op(
+    module: nn.Module,
+    node: fx.Node,
+    node_values: Dict[str, List],
+    set_type: Type,
+) -> Optional[List]:
+    """Dispatch reachability for layers that consume multiple input ports.
+
+    Walks ``node.args`` (and ``node.kwargs``) for every ``fx.Node`` reference,
+    looks up its previously-computed reachable sets, and forwards them to the
+    appropriate multi-input reach helper. Returns the output set list, or
+    ``None`` if the layer is not a recognised multi-input op (in which case
+    the caller falls through to the single-input dispatcher).
+
+    Supported layers (and the helper they call):
+      * ``n2v.nn.layers.DagAdd``                   → dag_add_reach.dag_add_box
+      * ``n2v.nn.layers.DagConcat``                → dag_concat_reach.dag_concat_box
+      * ``n2v.nn.layers.Concat2D``                 → concat2d_reach.concat2d_box
+      * ``n2v.nn.layers.SelectiveFeatureFusion``   → SFF_reach.selective_feature_fusion_box
+      * ``n2v.nn.layers.SoftmaxAttention``         → softmax_attention_reach.softmax_attention_{box,star_approx}
+    """
+    # Local imports keep top-of-file import cost low and break a potential cycle.
+    from n2v.nn.layers.dag_add import DagAdd
+    from n2v.nn.layers.dag_concat import DagConcat
+    from n2v.nn.layers.concat2d import Concat2D
+    from n2v.nn.layers.selective_feature_fusion import SelectiveFeatureFusion
+    from n2v.nn.layers.softmax_attention import SoftmaxAttention
+    from n2v.nn.layer_ops import (
+        dag_add_reach,
+        dag_concat_reach,
+        concat2d_reach,
+        selective_feature_fusion_reach,
+        softmax_attention_reach,
+    )
+
+    # Gather one set-stream per fx.Node argument.
+    #
+    # PR-1 audit C2: the previous code walked ``node.args + node.kwargs``
+    # in insertion order and blindly bound ``streams[0..2]`` as Q/K/V for
+    # SoftmaxAttention. A user model calling
+    # ``self.attn(query=q, value=v, key=k)`` would trace into
+    # ``node.kwargs = {'query': q, 'value': v, 'key': k}`` (Py3.7+ preserves
+    # kwargs order) and the dispatcher would silently compute
+    # ``softmax(q @ v^T / sqrt(d)) @ k`` instead of
+    # ``softmax(q @ k^T / sqrt(d)) @ v`` — wrong function, unsound reach
+    # whenever K-bounds ≠ V-bounds.
+    #
+    # Fix: bind via ``inspect.signature(layer.forward).bind(*args, **kwargs)``
+    # for SoftmaxAttention so streams[0..2] correspond to the declared
+    # ``query``/``key``/``value`` parameters regardless of how the caller
+    # passed them. Other multi-input layers fall back to the old positional
+    # order (DagAdd/DagConcat are commutative under their semantics or
+    # explicitly positional).
+    import inspect as _inspect
+    streams: List[List] = []
+    declared_param_order: Optional[List[str]] = None
+    try:
+        from n2v.nn.layers.softmax_attention import SoftmaxAttention as _SA
+    except Exception:  # pragma: no cover -- defensive only
+        _SA = None
+    if _SA is not None and isinstance(module, _SA):
+        # Signature-aware bind for SoftmaxAttention.
+        sig = _inspect.signature(module.forward)
+        try:
+            bound = sig.bind(*node.args, **node.kwargs)
+            bound.apply_defaults()
+        except TypeError:
+            bound = None
+        if bound is not None:
+            declared_param_order = list(sig.parameters.keys())
+            for pname in declared_param_order:
+                if pname not in bound.arguments:
+                    continue
+                a = bound.arguments[pname]
+                if isinstance(a, fx.Node) and a.name in node_values:
+                    streams.append(node_values[a.name])
+        else:
+            # Fallback: insertion order.
+            for arg in node.args:
+                if isinstance(arg, fx.Node) and arg.name in node_values:
+                    streams.append(node_values[arg.name])
+            for _, kwarg in node.kwargs.items():
+                if isinstance(kwarg, fx.Node) and kwarg.name in node_values:
+                    streams.append(node_values[kwarg.name])
+    else:
+        for arg in node.args:
+            if isinstance(arg, fx.Node) and arg.name in node_values:
+                streams.append(node_values[arg.name])
+        for _, kwarg in node.kwargs.items():
+            if isinstance(kwarg, fx.Node) and kwarg.name in node_values:
+                streams.append(node_values[kwarg.name])
+
+    if len(streams) < 2:
+        # Not a multi-input call; let the single-input dispatcher handle it.
+        return None
+
+    primary, extras = streams[0], streams[1:]
+
+    if isinstance(module, DagAdd):
+        if set_type is Box:
+            return dag_add_reach.dag_add_box(primary, extras)
+        return None  # Box only per nnVLA catalog.
+
+    if isinstance(module, DagConcat):
+        if set_type is Box:
+            return dag_concat_reach.dag_concat_box(primary, extras)
+        return None
+
+    if isinstance(module, Concat2D):
+        if set_type is Box:
+            return concat2d_reach.concat2d_box(primary, extras)
+        return None
+
+    if isinstance(module, SelectiveFeatureFusion):
+        if set_type is Box:
+            return selective_feature_fusion_reach.selective_feature_fusion_box(
+                primary, extras
+            )
+        return None
+
+    if isinstance(module, SoftmaxAttention):
+        if len(streams) < 3:
+            return None  # Need Q, K, V.
+        q_stream, k_stream, v_stream = streams[0], streams[1], streams[2]
+        # d_v / l_q inference: prefer the wrapper's d_head (set explicitly
+        # by the user for verifiable models); otherwise inspect the Q
+        # stream's per-set shape if it's an ImageStar; otherwise fail with
+        # a clear error rather than silently using d_v=1.
+        d_v = getattr(module, "d_head", None)
+        first_q = q_stream[0]
+        first_v = v_stream[0]
+        v_dim = first_v.dim if hasattr(first_v, "dim") else first_v.lb.size
+        if d_v is None and isinstance(first_q, ImageStar):
+            d_v = first_q.num_channels
+        if d_v is None:
+            raise ValueError(
+                "SoftmaxAttention requires d_head to be set on the wrapper "
+                "for reachability analysis (e.g. SoftmaxAttention(d_head=64)). "
+                "It cannot be inferred from a flat Star/Box input."
+            )
+        d_v = int(d_v)
+        l_q = max(1, v_dim // d_v)
+        if set_type is Box:
+            return softmax_attention_reach.softmax_attention_box(
+                q_stream, k_stream, v_stream, l_q=l_q, d_v=d_v
+            )
+        if set_type is Star or set_type is ImageStar:
+            return softmax_attention_reach.softmax_attention_star_approx(
+                q_stream, k_stream, v_stream, l_q=l_q, d_v=d_v
+            )
+        if set_type is Zono or set_type is ImageZono:
+            # T1-7 (ViT enable): Zono path is box-lifted -- same
+            # over-approximation as the Star path's box lift today,
+            # but routed via the Zono machinery. Reduce each stream to
+            # its IBP box, run softmax_attention_box, return as Zono.
+            #
+            # PR-1 audit I4: previously this branch unconditionally
+            # returned ``Zono.from_bounds(...)`` even when ``set_type is
+            # ImageZono``, silently degrading the carried (H, W, C)
+            # layout to a plain Zono. Masked inside MinimalViT (Linear
+            # / LayerNorm accept Zono), but as soon as a downstream op
+            # expects ImageZono shape it would misroute. Mirror the
+            # Hex/Oct gating: reconstruct ImageZono from bounds when
+            # set_type is ImageZono, preserving (H, W, C) from the V
+            # stream (which carries the post-attention layout).
+            def _to_box_list_with_bounds(set_list):
+                box_list = []
+                for s in set_list:
+                    if hasattr(s, 'get_bounds'):
+                        lb, ub = s.get_bounds()
+                    else:
+                        lb, ub = s.get_ranges()
+                    box_list.append(Box(
+                        np.asarray(lb).reshape(-1, 1),
+                        np.asarray(ub).reshape(-1, 1),
+                    ))
+                return box_list
+
+            q_b = _to_box_list_with_bounds(q_stream)
+            k_b = _to_box_list_with_bounds(k_stream)
+            v_b = _to_box_list_with_bounds(v_stream)
+            box_out = softmax_attention_reach.softmax_attention_box(
+                q_b, k_b, v_b, l_q=l_q, d_v=d_v,
+            )
+            # Gate the output type by the ACTUAL V-stream type, not the
+            # graph-level ``set_type``: an upstream Linear/LayerNorm may
+            # have demoted ImageZono to plain Zono before reaching the
+            # attention block, and the downstream graph then expects a
+            # plain Zono too. Only re-lift to ImageZono when the V
+            # stream actually carries (H, W, C).
+            first_v = v_stream[0]
+            if isinstance(first_v, ImageZono):
+                H = first_v.height
+                W = first_v.width
+                C = first_v.num_channels
+                return [
+                    ImageZono.from_bounds(
+                        b.lb, b.ub,
+                        height=H, width=W, num_channels=C,
+                    )
+                    for b in box_out
+                ]
+            return [Zono.from_bounds(b.lb, b.ub) for b in box_out]
+        if set_type is Hexatope or set_type is Octatope:
+            # Same box-lift pattern as the Zono path; sound but loose.
+            # Hex/Oct use estimate_ranges (zero-arg IBP); get_bounds wants
+            # a solver kwarg.
+            def _to_box_list_hex_oct(set_list):
+                box_list = []
+                for s in set_list:
+                    lb, ub = s.estimate_ranges()
+                    box_list.append(Box(
+                        np.asarray(lb).reshape(-1, 1),
+                        np.asarray(ub).reshape(-1, 1),
+                    ))
+                return box_list
+
+            q_b = _to_box_list_hex_oct(q_stream)
+            k_b = _to_box_list_hex_oct(k_stream)
+            v_b = _to_box_list_hex_oct(v_stream)
+            box_out = softmax_attention_reach.softmax_attention_box(
+                q_b, k_b, v_b, l_q=l_q, d_v=d_v,
+            )
+            return [set_type.from_bounds(b.lb, b.ub) for b in box_out]
+        return None
+
+    return None
 
 
 def _get_parameter(graph_module: fx.GraphModule, node: Any) -> torch.Tensor:
@@ -801,13 +1195,7 @@ def _reshape_box(box: 'Box', spatial_shape: Tuple[int, ...]) -> 'Box':
     return box
 
 
-def _handle_onnx_binary_op(
-    module: Any,
-    node: Any,
-    node_values: Dict[str, List],
-    graph_module: fx.GraphModule,
-    set_type: Type,
-) -> Optional[List]:
+def _handle_onnx_binary_op(module: Any, node: Any, node_values: Dict[str, List], graph_module: fx.GraphModule, set_type: Type) -> Optional[List]:
     """Handle ONNX binary math operations (Add, Sub, etc.)."""
     input_nodes = node.args
     if len(input_nodes) != 2:
@@ -829,8 +1217,8 @@ def _handle_onnx_binary_op(
             return _mul_sets(sets_a, sets_b)
         elif op_name == '_onnx_div':
             raise NotImplementedError(
-                "Element-wise division of two computed sets is not supported. "
-                "Only Div by constant is implemented."
+                f"Element-wise division of two computed sets is not supported. "
+                f"Only Div by constant is implemented."
             )
 
         return _add_sets(sets_a, sets_b, op_name)
@@ -931,13 +1319,7 @@ def _handle_onnx_binary_op(
         )
 
 
-def _handle_onnx_matmul(
-    module: Any,
-    node: Any,
-    node_values: Dict[str, List],
-    graph_module: fx.GraphModule,
-    set_type: Type,
-) -> Optional[List]:
+def _handle_onnx_matmul(module: Any, node: Any, node_values: Dict[str, List], graph_module: fx.GraphModule, set_type: Type) -> Optional[List]:
     """Handle ONNX MatMul operations."""
     input_nodes = node.args
     if len(input_nodes) != 2:
@@ -1058,6 +1440,23 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
             f"{len(sets_a)} vs {len(sets_b)}"
         )
 
+    # PR-1 audit N12: tighten op_name interpretation. The old
+    # ``'add' in op_name`` matched 'add', 'Add', 'OnnxAdd' etc., but
+    # ANY non-matching string ('+', 'Subtract', 'plus') fell silently
+    # to subtraction. Only the canonical 'add' / 'sub' names are
+    # allowed; everything else raises so a future caller drift is loud.
+    if op_name in ('add', 'Add'):
+        is_add = True
+    elif op_name in ('sub', 'Sub'):
+        is_add = False
+    else:
+        raise NotImplementedError(
+            f"_add_sets: unrecognised op_name {op_name!r}; expected "
+            f"'add' / 'Add' / 'sub' / 'Sub'. Silently treating an "
+            f"unknown name as one or the other has caused silent "
+            f"unsoundness (audit N12). Update the caller."
+        )
+
     output_sets = []
 
     for sa, sb in zip(sets_a, sets_b):
@@ -1066,7 +1465,7 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
 
         if isinstance(sa, ImageStar) and isinstance(sb, ImageStar):
             # ImageStar: element-wise V addition (shared predicates)
-            if op_name == 'add' or 'add' in op_name:
+            if is_add:
                 V_out = sa.V + sb.V
             else:
                 V_out = sa.V - sb.V
@@ -1079,7 +1478,7 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
 
         elif isinstance(sa, Star) and isinstance(sb, Star):
             # Star: element-wise V addition (shared predicates)
-            if op_name == 'add' or 'add' in op_name:
+            if is_add:
                 V_out = sa.V + sb.V
             else:
                 V_out = sa.V - sb.V
@@ -1089,7 +1488,7 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
 
         elif isinstance(sa, ImageZono) and isinstance(sb, ImageZono):
             # ImageZono: Minkowski sum via generator concatenation
-            if op_name == 'add' or 'add' in op_name:
+            if is_add:
                 c_out = sa.c + sb.c
                 V_out = np.hstack([sa.V, sb.V])
             else:
@@ -1101,7 +1500,7 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
 
         elif isinstance(sa, Zono) and isinstance(sb, Zono):
             # Zono: Minkowski sum via generator concatenation
-            if op_name == 'add' or 'add' in op_name:
+            if is_add:
                 c_out = sa.c + sb.c
                 V_out = np.hstack([sa.V, sb.V])
             else:
@@ -1113,7 +1512,7 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
 
         elif isinstance(sa, Box) and isinstance(sb, Box):
             # Box: interval arithmetic
-            if op_name == 'add' or 'add' in op_name:
+            if is_add:
                 lb_out = sa.lb + sb.lb
                 ub_out = sa.ub + sb.ub
             else:
@@ -1753,12 +2152,7 @@ def _slice_set(s: Any, slices_by_axis: Dict[int, slice]) -> Any:
         )
 
 
-def _handle_onnx_slice(
-    module: Any,
-    node: Any,
-    node_values: Dict[str, List],
-    graph_module: fx.GraphModule,
-) -> Optional[List]:
+def _handle_onnx_slice(module: Any, node: Any, node_values: Dict[str, List], graph_module: fx.GraphModule) -> Optional[List]:
     """
     Handle ONNX Slice operations.
 
@@ -1948,12 +2342,7 @@ def _split_set(s: Any, split_sizes: List[int], axis: int) -> List:
     return chunks
 
 
-def _handle_onnx_split(
-    module: Any,
-    node: Any,
-    node_values: Dict[str, List],
-    graph_module: fx.GraphModule,
-) -> Optional[List[List]]:
+def _handle_onnx_split(module: Any, node: Any, node_values: Dict[str, List], graph_module: fx.GraphModule) -> Optional[List[List]]:
     """
     Handle ONNX Split operations.
 
@@ -2083,13 +2472,10 @@ def _reach_probabilistic(model: nn.Module, input_set: Any, **kwargs: Any) -> Lis
             output = model(x_tensor)
             return output.numpy()
 
-    # Run probabilistic verification. ``method='probabilistic'`` is the
-    # legacy alias; ``conformal_reach`` is the renamed primary entry. The
-    # set-to-Box conversion above (and image-shape handling) are
-    # specific to this dispatch path so we keep it as a thin wrapper.
-    result = conformal_reach(
-        model_fn,
-        box,
+    # Run probabilistic verification
+    result = verify(
+        model=model_fn,
+        input_set=box,
         m=kwargs.get('m', 8000),
         ell=kwargs.get('ell', None),
         epsilon=kwargs.get('epsilon', 0.001),
@@ -2098,7 +2484,7 @@ def _reach_probabilistic(model: nn.Module, input_set: Any, **kwargs: Any) -> Lis
         pca_components=kwargs.get('pca_components', None),
         batch_size=kwargs.get('batch_size', 100),
         seed=kwargs.get('seed', None),
-        verbose=kwargs.get('verbose', False),
+        verbose=kwargs.get('verbose', False)
     )
 
     return [result]
@@ -2119,7 +2505,9 @@ def _reach_hybrid(model: nn.Module, input_set: Any, **kwargs: Any) -> List:
     # Trace the model if needed
     if not isinstance(model, fx.GraphModule):
         try:
-            model = torch.fx.symbolic_trace(model)
+            # T1-7: see n2v/nn/_tracer.py.
+            from n2v.nn._tracer import symbolic_trace as _n2v_symbolic_trace
+            model = _n2v_symbolic_trace(model)
         except Exception as e:
             raise TypeError(
                 f"n2v requires models to be traceable by torch.fx. "
