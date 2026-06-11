@@ -13,7 +13,6 @@ from n2v.nn.layer_ops import (
     add_with_frozen_skip_reach,
     concat_with_frozen_skip_reach,
     dag_add_reach,
-    dag_concat_reach,
     concat2d_reach,
     selective_feature_fusion_reach,
 )
@@ -127,10 +126,11 @@ def test_dag_add_two_streams(small_box):
     np.testing.assert_allclose(out[0].lb.flatten(), small_box.lb.flatten() + np.array([1, 1, 1]))
 
 
-def test_dag_concat_two_streams(small_box):
-    other = Box(np.array([[10.0]]), np.array([[11.0]]))
-    out = dag_concat_reach.dag_concat_box([small_box], [[other]])
-    assert out[0].dim == 4
+# NOTE: DagConcat was removed from this PR. Its Box reach modelled
+# concatenation along the OUTERMOST flat axis while the wrapper concats
+# along ``self.dim`` (default -1, innermost) -- unsound for rank>=3
+# streams (math-audit 6h, executed escape 4.75). It will return in a
+# follow-up PR with layout-aware math.
 
 
 def test_concat2d_two_streams(small_box):

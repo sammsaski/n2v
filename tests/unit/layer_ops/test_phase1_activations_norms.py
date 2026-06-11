@@ -21,7 +21,6 @@ from n2v.nn.layer_ops import (
     silu_reach,
     hardswish_reach,
     layernorm_reach,
-    groupnorm_reach,
     rmsnorm_reach,
     grn_reach,
 )
@@ -163,14 +162,11 @@ def test_rmsnorm_box():
     assert out[0].dim == 4
 
 
-def test_groupnorm_box():
-    layer = nn.GroupNorm(num_groups=2, num_channels=4)
-    layer.eval()
-    lb = np.array([[-1.0], [-0.5], [0.0], [0.5]])
-    ub = np.array([[0.0], [0.5], [1.0], [1.5]])
-    out = groupnorm_reach.groupnorm_box(layer, [Box(lb, ub)])
-    assert len(out) == 1
-    assert out[0].dim == 4
+# NOTE: GroupNorm reach was removed from this PR. Its Box path reshaped
+# the flat vector as CHW while the repo's post-conv convention is HWC,
+# mixing wrong elements into each group reduction (math-audit Finding 2,
+# executed escape 1.0). It will return in a follow-up PR with explicit
+# layout handling.
 
 
 def test_grn_box():
@@ -184,7 +180,7 @@ def test_grn_box():
 
 # ---------------------------------------------------------------------------
 # T0-4 (audit C2/C3/C4 + C-high + C7): the multi-token Star paths for
-# RMSNorm/LayerNorm/GroupNorm, elu_reach for negative alpha, and
+# RMSNorm/LayerNorm, elu_reach for negative alpha, and
 # linear_attention_box for mixed-sign V must FAIL LOUD until Commit 7 /
 # Commit 8 land. These tests pin the raises so future PRs cannot regress
 # back into silently-wrong reach.
@@ -211,16 +207,6 @@ def test_layernorm_star_raises_on_multi_token():
     star = Star.from_bounds(lb, ub)
     with pytest.raises(NotImplementedError, match="multi-token"):
         layernorm_reach.layernorm_star_approx(layer, [star])
-
-
-def test_groupnorm_star_raises_on_multi_group():
-    layer = nn.GroupNorm(num_groups=2, num_channels=4)
-    layer.eval()
-    lb = np.array([[-1.0], [-0.5], [0.0], [0.5]])
-    ub = np.array([[0.0], [0.5], [1.0], [1.5]])
-    star = Star.from_bounds(lb, ub)
-    with pytest.raises(NotImplementedError, match="multi-group"):
-        groupnorm_reach.groupnorm_star_approx(layer, [star])
 
 
 # ---------------------------------------------------------------------------
@@ -257,17 +243,6 @@ def test_layernorm_star_single_token_succeeds_audit_N9():
     assert out[0].dim == 2
 
 
-def test_groupnorm_star_single_group_succeeds_audit_N9():
-    """GroupNorm Star path must SUCCEED with num_groups=1 (single
-    group, where the multi-group restriction does not apply)."""
-    layer = nn.GroupNorm(num_groups=1, num_channels=4)
-    layer.eval()
-    lb = np.array([[-1.0], [-0.5], [0.0], [0.5]])
-    ub = np.array([[0.0], [0.5], [1.0], [1.5]])
-    star = Star.from_bounds(lb, ub)
-    out = groupnorm_reach.groupnorm_star_approx(layer, [star])
-    assert len(out) == 1
-    assert out[0].dim == 4
 
 
 def test_elu_raises_on_negative_alpha():

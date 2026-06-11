@@ -43,7 +43,6 @@ from . import silu_reach
 from . import hardswish_reach
 from . import layernorm_reach
 from . import rmsnorm_reach
-from . import groupnorm_reach
 from . import grn_reach
 
 # Wrapper modules detected via isinstance (introduced in Phase 1.5)
@@ -56,7 +55,6 @@ from . import drop_path_reach
 from . import add_with_frozen_skip_reach
 from . import concat_with_frozen_skip_reach
 from . import dag_add_reach
-from . import dag_concat_reach
 from . import concat2d_reach
 from . import selective_feature_fusion_reach
 from . import mix_ffn_reach
@@ -66,7 +64,6 @@ from n2v.nn.layers.drop_path import DropPath as _DropPath
 from n2v.nn.layers.add_with_frozen_skip import AddWithFrozenSkip as _AddWithFrozenSkip
 from n2v.nn.layers.concat_with_frozen_skip import ConcatWithFrozenSkip as _ConcatWithFrozenSkip
 from n2v.nn.layers.dag_add import DagAdd as _DagAdd
-from n2v.nn.layers.dag_concat import DagConcat as _DagConcat
 from n2v.nn.layers.concat2d import Concat2D as _Concat2D
 from n2v.nn.layers.selective_feature_fusion import SelectiveFeatureFusion as _SFF
 from n2v.nn.layers.mix_ffn import MixFFN as _MixFFN
@@ -352,8 +349,6 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
         return rmsnorm_reach.rmsnorm_star_approx(layer, input_sets)
     elif isinstance(layer, nn.LayerNorm):
         return layernorm_reach.layernorm_star_approx(layer, input_sets)
-    elif isinstance(layer, nn.GroupNorm):
-        return groupnorm_reach.groupnorm_star_approx(layer, input_sets)
     elif isinstance(layer, _GRN):
         return grn_reach.grn_star_approx(layer, input_sets)
 
@@ -682,8 +677,6 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
         return rmsnorm_reach.rmsnorm_box(layer, input_sets)
     elif isinstance(layer, nn.LayerNorm):
         return layernorm_reach.layernorm_box(layer, input_sets)
-    elif isinstance(layer, nn.GroupNorm):
-        return groupnorm_reach.groupnorm_box(layer, input_sets)
     elif isinstance(layer, _GRN):
         return grn_reach.grn_box(layer, input_sets)
 
@@ -696,11 +689,11 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
         return add_with_frozen_skip_reach.add_with_frozen_skip_box(layer, input_sets)
     elif isinstance(layer, _ConcatWithFrozenSkip):
         return concat_with_frozen_skip_reach.concat_with_frozen_skip_box(layer, input_sets)
-    elif isinstance(layer, (_DagAdd, _DagConcat, _Concat2D, _SFF)):
+    elif isinstance(layer, (_DagAdd, _Concat2D, _SFF)):
         # Multi-input ops: dispatcher's single-input path can't satisfy
         # them. The graph-level traversal in n2v.nn.reach handles their
         # multi-port inputs by calling the per-op helpers in
-        # dag_add_reach / dag_concat_reach / concat2d_reach /
+        # dag_add_reach / concat2d_reach /
         # selective_feature_fusion_reach with the second-port stream in
         # ``extras``. Raising here keeps single-input dispatch sound.
         raise NotImplementedError(

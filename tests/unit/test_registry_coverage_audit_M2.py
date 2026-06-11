@@ -17,7 +17,7 @@ a ``{wrapper: {set_type: bool}}`` coverage matrix. It then:
 2. Reports partial-coverage cells (wrapper has Box but not Star, etc.)
    as a WARNING in the test output. We don't fail on partial coverage
    because some wrappers are deliberately Box-only per nnVLA catalog
-   (DagAdd, DagConcat, Concat2D, SelectiveFeatureFusion -- explicitly
+   (DagAdd, Concat2D, SelectiveFeatureFusion -- explicitly
    marked in dispatcher source).
 3. Emits a printable coverage table for human review (also written to
    ``coverage_matrix.txt`` next to the test so CI can attach it).
@@ -44,7 +44,7 @@ _SET_TYPES = ("star", "zono", "box", "hexatope", "octatope")
 # dispatcher.py docstrings; tracked here so the partial-coverage
 # warning differentiates "intended Box-only" from "missing".
 _BOX_ONLY = {
-    "DagAdd", "DagConcat", "Concat2D", "SelectiveFeatureFusion",
+    "DagAdd", "Concat2D", "SelectiveFeatureFusion",
 }
 
 # Wrappers that intentionally do not need a dispatcher branch because

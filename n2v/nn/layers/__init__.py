@@ -37,7 +37,6 @@ from n2v.nn.layers.positional_encoding import PositionalEncoding
 from n2v.nn.layers.relative_attention_bias_t5 import RelativeAttentionBiasT5
 from n2v.nn.layers.relative_position_bias_table import RelativePositionBiasTable
 from n2v.nn.layers.dag_add import DagAdd
-from n2v.nn.layers.dag_concat import DagConcat
 from n2v.nn.layers.concat2d import Concat2D
 from n2v.nn.layers.add_with_frozen_skip import AddWithFrozenSkip
 from n2v.nn.layers.concat_with_frozen_skip import ConcatWithFrozenSkip
@@ -69,7 +68,6 @@ __all__ = [
     "RelativeAttentionBiasT5",
     "RelativePositionBiasTable",
     "DagAdd",
-    "DagConcat",
     "Concat2D",
     "AddWithFrozenSkip",
     "ConcatWithFrozenSkip",
