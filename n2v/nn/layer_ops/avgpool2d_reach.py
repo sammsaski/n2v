@@ -75,7 +75,6 @@ def _avgpool2d_imagestar_4d(layer: nn.AvgPool2d, input_star: ImageStar) -> Image
     # V is 4D: (H, W, C, nVar+1)
     V = pad_star.V
     h_in, w_in, c_in, n_cols = V.shape
-    n_cols - 1
 
     # Get kernel size and stride (can be int, tuple, or list from onnx2torch)
     kernel_size = layer.kernel_size

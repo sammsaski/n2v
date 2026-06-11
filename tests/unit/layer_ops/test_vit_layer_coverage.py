@@ -893,6 +893,65 @@ def test_fx_f_gelu_approximate_none_default_still_works():
     assert lb <= _GELU_F_MIN + 1e-9
 
 
+# ------------------ SoftmaxAttention l_q from Q stream (audit T1-5) ----------
+
+
+def test_fx_softmax_attention_cross_shaped_l_q_from_q_stream_audit_T1_5():
+    """Audit T1-5: ``l_q`` (the number of output query rows) must derive
+    from the Q stream's flat dim, not V's. For self-attention the two
+    coincide, masking the bug; for a cross-shaped call (L_q != L_kv) the
+    previous code tiled L_kv output rows, producing a wrong-SHAPED reach
+    set (values were still convex-hull-of-V sound, but the row count was
+    wrong and downstream layers would verify a different layout).
+
+    Model: 2 tokens of d_head=2; Q = first token only (L_q=1), K = V =
+    both tokens (L_kv=2). Expected reach output: 1 row of the column-wise
+    hull of V's two tokens -> flat dim 2 (pre-fix: dim 4).
+    """
+    from n2v.nn import NeuralNetwork
+    from n2v.nn.layers import SoftmaxAttention
+
+    class CrossShapedAttn(nn.Module):
+        n_tokens = 2
+
+        def __init__(self):
+            super().__init__()
+            self.attn = SoftmaxAttention(d_head=2)
+
+        def forward(self, x):
+            x = x.view(1, 2, 2)
+            q = x[:, 0]            # one token: (1, 2)
+            q = q.view(1, 1, 2)    # back to (B, L_q=1, d)
+            return self.attn(q, x, x)
+
+    model = CrossShapedAttn().eval()
+    # Token 0 in [0, 0.1]^2, token 1 in [0.5, 0.6] x [0.8, 0.9].
+    box = _flat_box(
+        np.array([0.0, 0.0, 0.5, 0.8]),
+        np.array([0.1, 0.1, 0.6, 0.9]),
+    )
+    out = NeuralNetwork(model).reach(box, method="approx", n_tokens=2)
+    assert len(out) == 1
+    lb_o, ub_o = _bounds_of(out[0])
+    assert lb_o.size == 2, (
+        f"T1-5: expected L_q*d_v = 1*2 = 2 output dims, got {lb_o.size} "
+        f"(l_q derived from the wrong stream)."
+    )
+    # Convex-hull-of-V bounds: column-wise min/max over the two tokens.
+    np.testing.assert_allclose(lb_o, [0.0, 0.0], atol=1e-9)
+    np.testing.assert_allclose(ub_o, [0.6, 0.9], atol=1e-9)
+
+    # MC containment: random samples through the true forward.
+    rng = np.random.default_rng(0)
+    with torch.no_grad():
+        for _ in range(24):
+            x = rng.uniform(
+                [0.0, 0.0, 0.5, 0.8], [0.1, 0.1, 0.6, 0.9],
+            ).astype(np.float32)
+            y = model(torch.from_numpy(x).reshape(1, 4)).numpy().flatten()
+            assert np.all(lb_o - 1e-6 <= y) and np.all(y <= ub_o + 1e-6)
+
+
 # ------------------ SoftmaxAttention Q/K/V kwargs binding (audit C2) ----------
 
 

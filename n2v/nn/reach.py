@@ -26,8 +26,15 @@ from n2v.nn.layer_ops.dispatcher import reach_layer
 from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
 from n2v.utils.model_preprocessing import fuse_batchnorm, has_batchnorm
 from n2v.utils.bounds_precomputation import compute_intermediate_bounds
-from n2v.probabilistic.conformal_reach import ConformalReachConfig, conformal_reach
-from n2v.probabilistic.flow.reach import FlowReachConfig, flow_reach
+# NOTE: flow_matching / conformal reach are imported LAZILY inside the
+# functions that need them, so this module itself does not couple
+# deterministic verification to the probabilistic extras' dependencies
+# (torchdiffeq via n2v.probabilistic.flow). The package root
+# ``n2v/__init__.py`` currently still re-exports the probabilistic API
+# eagerly (pre-existing on main, from the flow-matching merge), so
+# ``import n2v`` continues to require those extras until the root is
+# made lazy upstream -- this file just avoids re-introducing the
+# coupling from the reach side.
 from onnx2torch.node_converters.reshape import OnnxReshape
 from onnx2torch.node_converters.concat import OnnxConcat
 from onnx2torch.node_converters.slice import OnnxSlice, OnnxSliceV9
@@ -79,8 +86,10 @@ def _validate_reach_config(method, config, **kwargs):
     if method in ('exact', 'approx'):
         expected_cls = ReachConfig
     elif method == 'flow_matching':
+        from n2v.probabilistic.flow.reach import FlowReachConfig
         expected_cls = FlowReachConfig
     elif method == 'conformal':
+        from n2v.probabilistic.conformal_reach import ConformalReachConfig
         expected_cls = ConformalReachConfig
     else:
         raise ValueError(
@@ -211,11 +220,13 @@ def reach_pytorch_model(
         return _reach_hybrid(model, input_set, **kwargs)
 
     if method == 'flow_matching':
+        from n2v.probabilistic.flow.reach import flow_reach
         config = kwargs.pop('config', None)
         config = _validate_reach_config(method, config, **kwargs)
         return flow_reach(model, input_set, config)
 
     if method == 'conformal':
+        from n2v.probabilistic.conformal_reach import conformal_reach
         if not isinstance(input_set, Box):
             raise TypeError(
                 f"method='conformal' requires Box input, got {type(input_set).__name__}"
@@ -1041,7 +1052,20 @@ def _handle_multi_input_op(
                 "It cannot be inferred from a flat Star/Box input."
             )
         d_v = int(d_v)
-        l_q = max(1, v_dim // d_v)
+        # T1-5 (audit): l_q is the number of QUERY rows -- derive it from
+        # the Q stream's flat dim, not V's. For self-attention the two
+        # coincide, but for a cross-shaped call (L_q != L_kv) using V's
+        # dim tiled the wrong number of output rows, producing a
+        # wrong-shaped reach set. d_v stays tied to V (it reshapes V into
+        # (L_kv, d_v) rows inside the helper).
+        q_dim = first_q.dim if hasattr(first_q, "dim") else first_q.lb.size
+        if q_dim % d_v != 0 or v_dim % d_v != 0:
+            raise ValueError(
+                f"SoftmaxAttention reach: stream dims (q={q_dim}, "
+                f"v={v_dim}) are not divisible by d_head={d_v}; the "
+                f"(L, d_head) token layout cannot be recovered."
+            )
+        l_q = max(1, q_dim // d_v)
         if set_type is Box:
             return softmax_attention_reach.softmax_attention_box(
                 q_stream, k_stream, v_stream, l_q=l_q, d_v=d_v
@@ -2550,6 +2574,10 @@ def _reach_probabilistic(model: nn.Module, input_set: Any, **kwargs: Any) -> Lis
 
     This is a model-agnostic approach that works with any PyTorch model.
     """
+    # Lazy import: keeps deterministic verification free of the
+    # probabilistic extras' dependencies (see module-top NOTE).
+    from n2v.probabilistic.conformal_reach import conformal_reach
+
     # Convert input_set to Box if needed
     if isinstance(input_set, Box):
         box = input_set

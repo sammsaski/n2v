@@ -311,10 +311,6 @@ def conv2d_hexatope(layer: nn.Conv2d, input_hexatopes: List[Hexatope]) -> List[H
         # Assume the hexatope represents a flattened image
         # This is a simplification - in practice, image dimensions should be known
 
-        # Use interval over-approximation: apply conv to bounds
-        lb.reshape(-1, 1)
-        ub.reshape(-1, 1)
-
         # Convert bounds to ImageStar temporarily to apply convolution
         # This is an over-approximation
         try:
