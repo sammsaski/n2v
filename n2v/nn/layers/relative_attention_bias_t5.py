@@ -44,10 +44,43 @@ class RelativeAttentionBiasT5(nn.Module):
         ret += torch.where(is_small, n, val_if_large)
         return ret
 
-    def forward(self, q_len: int, k_len: int) -> torch.Tensor:
+    def bias(self, q_len: int, k_len: int) -> torch.Tensor:
+        """The ``(1, n_heads, q_len, k_len)`` additive bias tensor."""
         context_position = torch.arange(q_len, dtype=torch.long, device=self.relative_attention_bias.weight.device)[:, None]
         memory_position = torch.arange(k_len, dtype=torch.long, device=self.relative_attention_bias.weight.device)[None, :]
         relative_position = memory_position - context_position
         rp_bucket = self._relative_position_bucket(relative_position)
         values = self.relative_attention_bias(rp_bucket)
         return values.permute(2, 0, 1).unsqueeze(0)
+
+    def forward(self, attn_logits=None, q_len: int = None, k_len: int = None) -> torch.Tensor:
+        """Add the T5 relative bias to attention logits.
+
+        Copilot review: the previous ``forward(q_len, k_len)`` took only
+        integers, so the fx graph node carried no tensor argument the
+        reach engine could map to an input set -- the module could not
+        participate in end-to-end reachability. Passing the logits
+        tensor makes it traceable (lengths are derived from the last
+        two dims) and turns the reach into an exact constant
+        translation. The legacy integer call ``forward(q_len=q,
+        k_len=k)`` (or positionally with ints) still returns the bare
+        bias for direct use.
+        """
+        if attn_logits is None:
+            if q_len is None or k_len is None:
+                raise TypeError(
+                    "RelativeAttentionBiasT5.forward: pass attention "
+                    "logits, or q_len and k_len."
+                )
+            return self.bias(q_len, k_len)
+        if isinstance(attn_logits, int):
+            # Legacy positional call forward(q_len, k_len).
+            if q_len is None:
+                raise TypeError(
+                    "RelativeAttentionBiasT5.forward: legacy integer "
+                    "call requires both q_len and k_len."
+                )
+            return self.bias(attn_logits, q_len)
+        q = attn_logits.shape[-2]
+        k = attn_logits.shape[-1]
+        return attn_logits + self.bias(q, k)

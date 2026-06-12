@@ -34,8 +34,16 @@ def _grn_interval(lb: np.ndarray, ub: np.ndarray, dim: int, eps: float):
     ub = ub.reshape(-1).astype(np.float64)
     n_total = lb.size
     if dim <= 0 or n_total % dim != 0:
-        # Fall back to elementwise residual-pass-through if shape is unknown.
-        return lb.reshape(-1, 1), ub.reshape(-1, 1)
+        # Copilot review / math-audit Finding 3: the previous silent
+        # identity fallback was UNSOUND -- grn_box adds the input back,
+        # so the result was ~2*x bounds, neither identity nor a valid
+        # GRN bound (it only crashed loud downstream by accident).
+        # Fail loudly on shape mismatch like the other norm helpers.
+        raise ValueError(
+            f"GRN reach: flat input size {n_total} is not divisible by "
+            f"dim={dim}; cannot recover the (H*W, C) layout. A silent "
+            f"fallback here produced unsound bounds."
+        )
     hw = n_total // dim
     # per-channel max |x|
     abs_max = np.maximum(np.abs(lb), np.abs(ub))

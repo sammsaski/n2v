@@ -105,13 +105,11 @@ def test_encoder_mlp_star_preserves_predicates_through_layernorm():
 class _EncoderRMSSilu(nn.Module):
     """Pre-norm encoder with RMSNorm + SiLU.
 
-    No residual: native fx-traced ``operator.add`` isn't handled by
-    ``n2v.nn.reach._handle_graphmodule`` (only ``operator.getitem``
-    has a call_function branch), and the DagAdd wrapper has a
-    separate multi-input dispatch corner case under investigation.
-    Residual coverage is provided by the existing
-    ``tests/integration/test_resnet_block.py`` tests; this file's
-    goal is per-layer exercise inside a full traced model.
+    No residual by design: residual ``operator.add`` IS handled by
+    ``n2v.nn.reach._handle_graphmodule`` (set+set via Minkowski sum,
+    set+const via translation) and is covered by the residual-add
+    coverage tests; this file's goal is per-layer exercise inside a
+    full traced model.
     """
 
     def __init__(self, dim: int = 4, hidden: int = 8):
@@ -128,17 +126,12 @@ class _EncoderRMSSilu(nn.Module):
         return self.fc2(h)
 
 
-@pytest.mark.skip(
-    reason=(
-        "RMSNorm+SiLU end-to-end soundness needs investigation: the reach "
-        "output upper bound is tighter than the concrete forward by a small "
-        "margin under fx-traced dispatch. Per-layer RMSNorm and SiLU box "
-        "reach are individually verified in tests/unit/layer_ops; the "
-        "interaction through _handle_graphmodule is the outstanding piece. "
-        "Tracked as a follow-up before this test is unskipped."
-    )
-)
 def test_encoder_rms_silu_box_contains_concrete_forward():
+    """Unskipped (Copilot review): the historical tightness violation
+    this test was skipped for predates the SiLU floor-constant and
+    RMSNorm guard fixes. Re-verified: zero escapes over 4000 fp32
+    samples on the current head.
+    """
     torch.manual_seed(1)
     model = _EncoderRMSSilu(dim=4, hidden=8).eval()
     net = NeuralNetwork(model, input_size=(4,))

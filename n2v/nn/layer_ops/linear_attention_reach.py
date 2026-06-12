@@ -38,16 +38,33 @@ def linear_attention_box(
     l_q: int = 1,
     d_v: int = 1,
 ) -> List[Box]:
-    """Sound box reach for ``phi(q) @ (phi(k).T @ v)``.
+    """Sound box reach for ``phi(q) @ (phi(k).T @ v)`` with ``d_v == 1``.
 
     Q/K/V are passed as separate set lists; each entry shaped per-
     token (L * d_head). When K/V aren't given (legacy single-input
     call), we raise to avoid the previous unsound shortcut.
+
+    Copilot review / math audit: for ``d_v > 1`` this implementation
+    does NOT match the stated formula -- the elementwise
+    ``phi_k * v`` summed over tokens computes only the DIAGONAL of
+    ``phi(k).T @ v``, and the final step multiplies elementwise instead
+    of contracting over the feature axis, so all cross-feature terms
+    are missing (a different, simpler function). The ``d_v == 1`` case
+    has no cross terms and IS sound (pinned by the T1-9 regression
+    test); anything wider raises until the full ``(d_head, d_v)``
+    interval matmul lands.
     """
     if k_box is None or v_box is None:
         raise NotImplementedError(
             "LinearAttention reach requires Q/K/V streams. The previous "
             "single-input shortcut was unsound — pass k_box and v_box."
+        )
+    if d_v > 1:
+        raise NotImplementedError(
+            f"LinearAttention reach: d_v={d_v} > 1 is not supported -- "
+            f"the current bound omits the cross-feature terms of "
+            f"phi(k).T @ v and would verify a different function. "
+            f"Only d_v == 1 is sound today."
         )
     out: List[Box] = []
     for q, k, v in zip(q_box, k_box, v_box):

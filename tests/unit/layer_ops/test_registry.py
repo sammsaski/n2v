@@ -28,10 +28,18 @@ class _Dummy(nn.Module):
 
 @pytest.fixture
 def cleared_registry():
-    """Ensure each test sees an empty registry, then restore the state."""
+    """Ensure each test sees an empty registry, then RESTORE the prior
+    state (Copilot review: clearing twice permanently wiped any
+    handlers registered at import time for the rest of the session).
+    """
+    from n2v.nn.layer_ops import registry as _registry_mod
+    snapshot = list(_registry_mod._REGISTRY)
     clear_registry()
-    yield
-    clear_registry()
+    try:
+        yield
+    finally:
+        clear_registry()
+        _registry_mod._REGISTRY.extend(snapshot)
 
 
 def test_register_and_lookup_box(cleared_registry):

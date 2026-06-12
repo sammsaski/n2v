@@ -1,4 +1,10 @@
-"""Tied-weight linear (decoder weight = embedding weight, transposed)."""
+"""Tied-weight linear (decoder shares the embedding weight matrix).
+
+Note: no transpose is involved -- ``F.linear(x, W)`` computes
+``x @ W.T``, so a token-embedding weight of shape ``(vocab, dim)`` is
+already in the standard ``(out_features, in_features)`` orientation
+for unembedding.
+"""
 
 import torch
 import torch.nn as nn

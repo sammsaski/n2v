@@ -90,9 +90,11 @@ def test_segment_embedding_round_trip_through_dispatcher():
         ),
         (
             Zono,
-            lambda: Zono(
-                np.zeros((flat, 1)),
-                np.eye(flat).astype(np.float64).reshape(flat, flat, 1),
+            # Copilot review: use the canonical constructor -- the
+            # previous 3-D generator array was out-of-contract for
+            # Zono's 2-D (n, m) generator matrix.
+            lambda: Zono.from_bounds(
+                np.zeros((flat, 1)), np.ones((flat, 1)),
             ),
             "approx",
         ),

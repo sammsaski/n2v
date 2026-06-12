@@ -35,18 +35,28 @@ def _explicit_linear(layer: nn.ConvTranspose2d, input_shape: tuple) -> nn.Linear
     """
     c_in, h_in, w_in = input_shape
     n_in = c_in * h_in * w_in
+    # Copilot review: probe the layer in ITS OWN dtype and device --
+    # the previous unconditional CPU/float32 probes (a) silently
+    # truncated fp64 parameters, diverging the reach from the model's
+    # true forward at tight tolerances, and (b) raised device-mismatch
+    # errors for non-CPU layers. The dense operator is moved to CPU
+    # only at the end (the numpy-based reach consumes it there).
+    p = layer.weight
     with torch.no_grad():
-        zero_in = torch.zeros(1, c_in, h_in, w_in)
-        bias_response = layer(zero_in).reshape(-1).float()
-        eye = torch.eye(n_in).reshape(n_in, c_in, h_in, w_in)
+        zero_in = torch.zeros(
+            1, c_in, h_in, w_in, dtype=p.dtype, device=p.device)
+        bias_response = layer(zero_in).reshape(-1)
+        eye = torch.eye(
+            n_in, dtype=p.dtype, device=p.device,
+        ).reshape(n_in, c_in, h_in, w_in)
         out = layer(eye)  # (n_in, c_out, h_out, w_out) with bias added in.
         out_flat = out.reshape(n_in, -1).T  # (n_out, n_in)
         # Strip the bias contribution from each column to get pure W^T.
         weight_only = out_flat - bias_response.unsqueeze(1)
         n_out = weight_only.shape[0]
-        dense = nn.Linear(n_in, n_out, bias=True)
-        dense.weight.copy_(weight_only.float())
-        dense.bias.copy_(bias_response)
+        dense = nn.Linear(n_in, n_out, bias=True, dtype=p.dtype)
+        dense.weight.copy_(weight_only.detach().cpu())
+        dense.bias.copy_(bias_response.detach().cpu())
     return dense
 
 
