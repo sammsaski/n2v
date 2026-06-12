@@ -1,9 +1,12 @@
 """Sinusoidal positional encoding reachability.
 
-Adds a fixed per-position sinusoidal tensor to a sequence; pure
-constant-bias affine map, routed through :mod:`linear_reach`.
+Adds a fixed per-position sinusoidal tensor to a sequence; a pure
+constant translation, applied directly to each set representation via
+:mod:`_translate` -- O(n), no dense identity matrix (Copilot review:
+the previous eye-Linear surrogate was O(n^2) and OOMed at
+transformer-flattened sizes).
 
-Coverage matches nnVLA: Box, Star, Zono.
+Coverage matches nnVLA: Box, Star, Zono (+ Hex/Oct).
 """
 
 from __future__ import annotations
@@ -11,11 +14,9 @@ from __future__ import annotations
 from typing import List
 
 import numpy as np
-import torch
-import torch.nn as nn
 
 from n2v.sets import Box, Hexatope, Octatope, Star, Zono
-from n2v.nn.layer_ops import linear_reach
+from n2v.nn.layer_ops._translate import translate_set
 
 
 def _pe_vec(layer, dim: int) -> np.ndarray:
@@ -36,50 +37,25 @@ def _pe_vec(layer, dim: int) -> np.ndarray:
     return pe[:dim]
 
 
-def _make_translation(bias: np.ndarray) -> nn.Linear:
-    n = bias.size
-    dummy = nn.Linear(n, n, bias=True)
-    with torch.no_grad():
-        dummy.weight.copy_(torch.eye(n).float())
-        dummy.bias.copy_(torch.from_numpy(bias).float())
-    return dummy
+def _apply(layer, input_sets: List) -> List:
+    return [translate_set(s, _pe_vec(layer, s.dim)) for s in input_sets]
 
 
 def positional_encoding_star(layer, input_stars: List[Star]) -> List[Star]:
-    out: List[Star] = []
-    for s in input_stars:
-        bias = _pe_vec(layer, s.dim)
-        out.extend(linear_reach.linear_star(_make_translation(bias), [s]))
-    return out
+    return _apply(layer, input_stars)
 
 
 def positional_encoding_box(layer, input_boxes: List[Box]) -> List[Box]:
-    out: List[Box] = []
-    for b in input_boxes:
-        bias = _pe_vec(layer, b.dim)
-        out.extend(linear_reach.linear_box(_make_translation(bias), [b]))
-    return out
+    return _apply(layer, input_boxes)
 
 
 def positional_encoding_zono(layer, input_zonos: List[Zono]) -> List[Zono]:
-    out: List[Zono] = []
-    for z in input_zonos:
-        bias = _pe_vec(layer, z.dim)
-        out.extend(linear_reach.linear_zono(_make_translation(bias), [z]))
-    return out
+    return _apply(layer, input_zonos)
 
 
 def positional_encoding_hexatope(layer, input_sets: List[Hexatope]) -> List[Hexatope]:
-    out: List[Hexatope] = []
-    for s in input_sets:
-        bias = _pe_vec(layer, s.dim)
-        out.extend(linear_reach.linear_hexatope(_make_translation(bias), [s]))
-    return out
+    return _apply(layer, input_sets)
 
 
 def positional_encoding_octatope(layer, input_sets: List[Octatope]) -> List[Octatope]:
-    out: List[Octatope] = []
-    for s in input_sets:
-        bias = _pe_vec(layer, s.dim)
-        out.extend(linear_reach.linear_octatope(_make_translation(bias), [s]))
-    return out
+    return _apply(layer, input_sets)

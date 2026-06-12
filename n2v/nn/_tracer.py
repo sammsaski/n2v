@@ -26,7 +26,7 @@ for end-to-end ViT verification (the ViT integration test in
 
 from __future__ import annotations
 
-from typing import Any, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.fx as fx
@@ -61,7 +61,7 @@ def _n2v_leaf_module_types() -> Tuple[Type[nn.Module], ...]:
         "ParallelResidual",
     }
 
-    leaf_types: list[Type[nn.Module]] = []
+    leaf_types: List[Type[nn.Module]] = []
     # Public wrappers from n2v.nn.layers.__all__.
     for name in getattr(_layers, "__all__", []):
         if name in _EXCLUDED:
@@ -79,7 +79,7 @@ class N2VTracer(fx.Tracer):
     class to keep tracing fast.
     """
 
-    _leaf_types_cache: Tuple[Type[nn.Module], ...] | None = None
+    _leaf_types_cache: Optional[Tuple[Type[nn.Module], ...]] = None
 
     @classmethod
     def _leaf_types(cls) -> Tuple[Type[nn.Module], ...]:
@@ -96,7 +96,7 @@ class N2VTracer(fx.Tracer):
         return isinstance(m, self._leaf_types())
 
 
-def symbolic_trace(root: nn.Module, concrete_args: dict[str, Any] | None = None) -> fx.GraphModule:
+def symbolic_trace(root: nn.Module, concrete_args: Optional[Dict[str, Any]] = None) -> fx.GraphModule:
     """fx.symbolic_trace replacement that uses :class:`N2VTracer`.
 
     Mirrors the signature of ``torch.fx.symbolic_trace``. Returns a

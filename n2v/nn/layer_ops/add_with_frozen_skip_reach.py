@@ -1,7 +1,9 @@
 """AddWithFrozenSkip reachability: ``y = x + s`` for a constant skip ``s``.
 
-Adding a constant to a set is the same as an affine map with weight=I,
-bias=skip, so this routes through :mod:`linear_reach`.
+Adding a constant to a set only moves its centre, so this routes
+through :mod:`_translate` -- O(n), no dense identity matrix (Copilot
+review: the previous eye-Linear surrogate was O(n^2) and OOMed at
+transformer-flattened sizes).
 """
 
 from __future__ import annotations
@@ -9,27 +11,16 @@ from __future__ import annotations
 from typing import List
 
 import numpy as np
-import torch
-import torch.nn as nn
 
 from n2v.sets import Box, Hexatope, Octatope, Star, Zono
-from n2v.nn.layer_ops import linear_reach
+from n2v.nn.layer_ops._translate import translate_set
 
 
 def _skip_vec(layer) -> np.ndarray:
     return layer.skip.detach().cpu().numpy().astype(np.float64).reshape(-1)
 
 
-def _make_translation(skip: np.ndarray) -> nn.Linear:
-    n = skip.size
-    dummy = nn.Linear(n, n, bias=True)
-    with torch.no_grad():
-        dummy.weight.copy_(torch.eye(n).float())
-        dummy.bias.copy_(torch.from_numpy(skip).float())
-    return dummy
-
-
-def _surrogate_for(layer, input_dim: int) -> nn.Linear:
+def _tiled_skip(layer, input_dim: int) -> np.ndarray:
     """Tile the per-feature skip across ``L = input_dim / skip_dim`` tokens.
 
     ``AddWithFrozenSkip.forward`` broadcasts the skip across the last
@@ -45,39 +36,39 @@ def _surrogate_for(layer, input_dim: int) -> nn.Linear:
             f"the skip across the last axis."
         )
     L = input_dim // skip.size
-    return _make_translation(np.tile(skip, L))
+    return np.tile(skip, L)
 
 
 def add_with_frozen_skip_star(layer, input_stars: List[Star]) -> List[Star]:
     out: List[Star] = []
     for s in input_stars:
-        out.extend(linear_reach.linear_star(_surrogate_for(layer, s.dim), [s]))
+        out.append(translate_set(s, _tiled_skip(layer, s.dim)))
     return out
 
 
 def add_with_frozen_skip_zono(layer, input_zonos: List[Zono]) -> List[Zono]:
     out: List[Zono] = []
     for z in input_zonos:
-        out.extend(linear_reach.linear_zono(_surrogate_for(layer, z.dim), [z]))
+        out.append(translate_set(z, _tiled_skip(layer, z.dim)))
     return out
 
 
 def add_with_frozen_skip_box(layer, input_boxes: List[Box]) -> List[Box]:
     out: List[Box] = []
     for b in input_boxes:
-        out.extend(linear_reach.linear_box(_surrogate_for(layer, b.dim), [b]))
+        out.append(translate_set(b, _tiled_skip(layer, b.dim)))
     return out
 
 
 def add_with_frozen_skip_hexatope(layer, input_sets: List[Hexatope]) -> List[Hexatope]:
     out: List[Hexatope] = []
     for s in input_sets:
-        out.extend(linear_reach.linear_hexatope(_surrogate_for(layer, s.dim), [s]))
+        out.append(translate_set(s, _tiled_skip(layer, s.dim)))
     return out
 
 
 def add_with_frozen_skip_octatope(layer, input_sets: List[Octatope]) -> List[Octatope]:
     out: List[Octatope] = []
     for s in input_sets:
-        out.extend(linear_reach.linear_octatope(_surrogate_for(layer, s.dim), [s]))
+        out.append(translate_set(s, _tiled_skip(layer, s.dim)))
     return out

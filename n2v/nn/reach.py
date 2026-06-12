@@ -123,7 +123,7 @@ def _validate_reach_config(method, config, **kwargs):
 # Maps torch functional ops to their nn.Module equivalents.
 #   Used by _function_node_to_module to convert call_function
 #   fx nodes into modules for the reachability dispatcher.
-FUNCTION_TO_MODULE_CLS: dict[type, type[nn.Module]] = {
+FUNCTION_TO_MODULE_CLS: Dict[type, Type[nn.Module]] = {
     F.relu: nn.ReLU,
     torch.relu: nn.ReLU,
     F.relu6: nn.ReLU6,

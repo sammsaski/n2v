@@ -20,7 +20,8 @@ a ``{wrapper: {set_type: bool}}`` coverage matrix. It then:
    (DagAdd, Concat2D, SelectiveFeatureFusion -- explicitly
    marked in dispatcher source).
 3. Emits a printable coverage table for human review (also written to
-   ``coverage_matrix.txt`` next to the test so CI can attach it).
+   ``coverage_matrix.txt`` under pytest's tmp_path so CI can attach it
+   without touching the source tree).
 
 The coverage check is intentionally cheap: source-level grep, no
 imports of every wrapper, no instantiation. Runs in <100ms.
@@ -169,7 +170,7 @@ def _format_matrix(matrix: dict[str, dict[str, bool]]) -> str:
 
 
 def test_every_leaf_wrapper_has_at_least_one_dispatcher_branch_audit_M2(
-    capsys,
+    capsys, tmp_path,
 ):
     """PR-1 audit M2 / completeness critic missed-category #2.
 
@@ -185,14 +186,13 @@ def test_every_leaf_wrapper_has_at_least_one_dispatcher_branch_audit_M2(
     """
     matrix, alias_map = _coverage_matrix()
     table = _format_matrix(matrix)
-    # Save the matrix as a CI artefact next to this test for human
-    # review and CI upload. Written best-effort -- a sandboxed CI may
-    # refuse the write; the assertion still drives the gate.
-    try:
-        out_path = pathlib.Path(__file__).parent / "coverage_matrix.txt"
-        out_path.write_text(table + "\n", encoding="utf-8")
-    except OSError:
-        pass
+    # Save the matrix as a CI artefact in the pytest temp dir (Copilot
+    # review: writing into the source tree leaves untracked files and
+    # breaks hermetic/read-only test environments). CI can collect it
+    # from the printed path below.
+    out_path = tmp_path / "coverage_matrix.txt"
+    out_path.write_text(table + "\n", encoding="utf-8")
+    print(f"\ncoverage matrix written to: {out_path}")
 
     missing_completely: list[str] = []
     partial: list[tuple[str, list[str]]] = []

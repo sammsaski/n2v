@@ -2,9 +2,12 @@
 
 Adds a learned per-segment embedding to the current activation. The
 segment IDs are constants from the reachability perspective, so the
-operation is an affine translation routed through :mod:`linear_reach`.
+operation is a pure constant translation, applied directly to each set
+representation via :mod:`_translate` -- O(n), no dense identity matrix
+(Copilot review: the previous eye-Linear surrogate was O(n^2) and
+OOMed at transformer-flattened sizes).
 
-Coverage matches nnVLA: Box, Star, Zono.
+Coverage matches nnVLA: Box, Star, Zono (+ Hex/Oct).
 """
 
 from __future__ import annotations
@@ -13,10 +16,9 @@ from typing import List, Optional
 
 import numpy as np
 import torch
-import torch.nn as nn
 
 from n2v.sets import Box, Hexatope, Octatope, Star, Zono
-from n2v.nn.layer_ops import linear_reach
+from n2v.nn.layer_ops._translate import translate_set
 
 
 def _emb_translation(layer, dim: int, segment_ids: Optional[torch.Tensor]) -> np.ndarray:
@@ -46,54 +48,32 @@ def _emb_translation(layer, dim: int, segment_ids: Optional[torch.Tensor]) -> np
     return embedded.reshape(-1)
 
 
-def _make_translation(bias: np.ndarray) -> nn.Linear:
-    n = bias.size
-    dummy = nn.Linear(n, n, bias=True)
-    with torch.no_grad():
-        dummy.weight.copy_(torch.eye(n).float())
-        dummy.bias.copy_(torch.from_numpy(bias).float())
-    return dummy
+def _apply(layer, input_sets: List, segment_ids: Optional[torch.Tensor]) -> List:
+    return [
+        translate_set(s, _emb_translation(layer, s.dim, segment_ids))
+        for s in input_sets
+    ]
 
 
 def segment_embedding_star(layer, input_stars: List[Star], segment_ids: Optional[torch.Tensor] = None) -> List[Star]:
-    out: List[Star] = []
-    for s in input_stars:
-        bias = _emb_translation(layer, s.dim, segment_ids)
-        out.extend(linear_reach.linear_star(_make_translation(bias), [s]))
-    return out
+    return _apply(layer, input_stars, segment_ids)
 
 
 def segment_embedding_box(layer, input_boxes: List[Box], segment_ids: Optional[torch.Tensor] = None) -> List[Box]:
-    out: List[Box] = []
-    for b in input_boxes:
-        bias = _emb_translation(layer, b.dim, segment_ids)
-        out.extend(linear_reach.linear_box(_make_translation(bias), [b]))
-    return out
+    return _apply(layer, input_boxes, segment_ids)
 
 
 def segment_embedding_zono(layer, input_zonos: List[Zono], segment_ids: Optional[torch.Tensor] = None) -> List[Zono]:
-    out: List[Zono] = []
-    for z in input_zonos:
-        bias = _emb_translation(layer, z.dim, segment_ids)
-        out.extend(linear_reach.linear_zono(_make_translation(bias), [z]))
-    return out
+    return _apply(layer, input_zonos, segment_ids)
 
 
 def segment_embedding_hexatope(
     layer, input_sets: List[Hexatope], segment_ids: Optional[torch.Tensor] = None
 ) -> List[Hexatope]:
-    out: List[Hexatope] = []
-    for s in input_sets:
-        bias = _emb_translation(layer, s.dim, segment_ids)
-        out.extend(linear_reach.linear_hexatope(_make_translation(bias), [s]))
-    return out
+    return _apply(layer, input_sets, segment_ids)
 
 
 def segment_embedding_octatope(
     layer, input_sets: List[Octatope], segment_ids: Optional[torch.Tensor] = None
 ) -> List[Octatope]:
-    out: List[Octatope] = []
-    for s in input_sets:
-        bias = _emb_translation(layer, s.dim, segment_ids)
-        out.extend(linear_reach.linear_octatope(_make_translation(bias), [s]))
-    return out
+    return _apply(layer, input_sets, segment_ids)

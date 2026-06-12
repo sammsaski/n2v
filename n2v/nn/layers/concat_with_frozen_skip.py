@@ -29,16 +29,29 @@ class ConcatWithFrozenSkip(nn.Module):
         # broadcast a feature-shaped skip up to x's full rank.
         while skip.ndim < x.ndim:
             skip = skip.unsqueeze(0)
-        # Now skip and x have the same rank. Expand every leading dim that
-        # disagrees with x along that axis (the concat axis itself is
-        # explicitly allowed to differ -- it's the concat axis).
+        # Now skip and x have the same rank. Expand only SINGLETON dims
+        # to match x; any non-concat dim that is neither 1 nor equal to
+        # x's size is not broadcastable -- fail fast with a clear message
+        # instead of letting ``expand`` raise a cryptic runtime error
+        # (Copilot review).
         concat_axis = self.dim if self.dim >= 0 else self.dim + x.ndim
         expand_shape = list(skip.shape)
         for i in range(x.ndim):
             if i == concat_axis:
                 continue
-            if expand_shape[i] != x.shape[i]:
+            if expand_shape[i] == x.shape[i]:
+                continue
+            if expand_shape[i] == 1:
                 expand_shape[i] = x.shape[i]
+            else:
+                raise ValueError(
+                    f"ConcatWithFrozenSkip: skip shape "
+                    f"{tuple(self.skip.shape)} is not broadcastable to "
+                    f"input shape {tuple(x.shape)} along dim {i} "
+                    f"(size {expand_shape[i]} vs {x.shape[i]}; only "
+                    f"singleton dims are expanded). Every dim except "
+                    f"the concat dim ({self.dim}) must match or be 1."
+                )
         if tuple(expand_shape) != tuple(skip.shape):
             skip = skip.expand(*expand_shape)
         return torch.cat([x, skip], dim=self.dim)
