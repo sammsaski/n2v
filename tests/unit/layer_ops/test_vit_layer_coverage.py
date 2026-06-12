@@ -1437,3 +1437,46 @@ def test_softmax_attention_multi_input_all_set_types(set_kind):
             n_samples=24,
             input_shape=(1, 2),
         )
+
+
+def test_linear_star_image_star_l_gt_1_flattens_and_rewraps_dive_review():
+    """Deep-dive review: an L > 1 ImageStar through ``linear_star``
+    previously crashed (``_block_apply`` assumed 2D V). It now flattens
+    via ``to_star`` (HWC == per-pixel block order), applies the
+    blockwise map, and re-wraps with the new channel count when the
+    block count equals the pixel count.
+    """
+    from n2v.nn.layer_ops import linear_reach
+
+    torch.manual_seed(0)
+    layer = nn.Linear(3, 2, bias=True).eval()  # per-pixel: C=3 -> 2
+    ims = ImageStar.from_bounds(
+        np.zeros((2, 2, 3)), np.ones((2, 2, 3)),
+        height=2, width=2, num_channels=3,
+    )
+    out = linear_reach.linear_star(layer, [ims], expected_n_tokens=4)[0]
+    assert isinstance(out, ImageStar)
+    assert (out.height, out.width, out.num_channels) == (2, 2, 2)
+    # MC containment: per-pixel forward must lie inside the reach.
+    flat = out.to_star()
+    rng = np.random.default_rng(0)
+    with torch.no_grad():
+        for _ in range(16):
+            x = rng.uniform(0, 1, (2, 2, 3)).astype(np.float32)
+            # forward applies Linear over the channel axis per pixel
+            y = layer(torch.from_numpy(x)).numpy().reshape(-1, 1)
+            assert flat.contains(y), "per-pixel forward escaped reach"
+
+
+def test_add_with_frozen_skip_token_axis_skip_raises_dive_review():
+    """Deep-dive review: an (L, 1)-shaped skip broadcasts across the
+    feature axis in the concrete forward; the flat tiling modelled the
+    wrong function (executed escape +1.27). The reach must refuse it.
+    """
+    from n2v.nn.layers import AddWithFrozenSkip
+    from n2v.nn.layer_ops import add_with_frozen_skip_reach
+
+    layer = AddWithFrozenSkip(skip=torch.randn(3, 1))
+    box = _flat_box(np.zeros(12), np.ones(12))
+    with pytest.raises(NotImplementedError, match="feature axis"):
+        add_with_frozen_skip_reach.add_with_frozen_skip_box(layer, [box])

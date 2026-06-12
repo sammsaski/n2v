@@ -17,7 +17,23 @@ from n2v.nn.layer_ops._translate import translate_set
 
 
 def _skip_vec(layer) -> np.ndarray:
-    return layer.skip.detach().cpu().numpy().astype(np.float64).reshape(-1)
+    skip = layer.skip.detach().cpu().numpy().astype(np.float64)
+    # Deep-dive review: an ``(L, 1)``-shaped skip broadcasts across the
+    # FEATURE axis in the concrete forward (``t[token, feat] =
+    # s[token, 0]``), which is ``np.repeat`` per token -- NOT the
+    # last-axis ``np.tile`` this helper applies. Flattening it silently
+    # verified a different function (executed escape +1.27). Until the
+    # reach models token-axis broadcasting, refuse the ambiguous shape.
+    if skip.ndim > 1 and skip.shape[-1] == 1 and skip.size > 1:
+        raise NotImplementedError(
+            f"AddWithFrozenSkip reach: skip of shape "
+            f"{tuple(skip.shape)} broadcasts across the feature axis "
+            f"in the concrete forward (per-token scalar), which the "
+            f"flat last-axis tiling here does not model. Use a "
+            f"feature-shaped skip ((D,) or (1, D)) or extend the reach "
+            f"with token-axis broadcast support."
+        )
+    return skip.reshape(-1)
 
 
 def _tiled_skip(layer, input_dim: int) -> np.ndarray:

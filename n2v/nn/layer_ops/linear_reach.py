@@ -129,13 +129,32 @@ def linear_star(
             else:
                 output_stars.append(star.affine_map(W))
             continue
+        # ImageStar carries a 4D basis (H, W, C, nVar+1); ``_block_apply``
+        # expects the 2D flat form. Flatten via ``to_star`` (HWC row-major
+        # == pixel-major x channel, which is exactly the per-pixel block
+        # structure the L > 1 path applies W over) and re-wrap with the
+        # new channel count afterwards. Without this, an L > 1 ImageStar
+        # crashed with a confusing reshape ValueError (deep-dive review).
+        from n2v.sets.image_star import ImageStar as _ImageStar
+        rewrap = None
+        if isinstance(star, _ImageStar):
+            # Re-wrapping as an image is only meaningful when the block
+            # count equals the pixel count (per-pixel Linear over the
+            # channel axis); otherwise return the flat Star.
+            if L == star.height * star.width:
+                rewrap = (star.height, star.width)
+            star = star.to_star()
         new_V = _block_apply(star.V, W, L)
         bt = _tile_bias(b, L)
         if bt is not None:
             new_V[:, 0] = new_V[:, 0] + bt
-        output_stars.append(
-            Star(new_V, star.C, star.d,
-                 star.predicate_lb, star.predicate_ub))
+        out = Star(new_V, star.C, star.d,
+                   star.predicate_lb, star.predicate_ub)
+        if rewrap is not None:
+            # Per-pixel Linear over an image: channel count becomes
+            # out_features; spatial shape is preserved.
+            out = out.to_image_star(rewrap[0], rewrap[1], W.shape[0])
+        output_stars.append(out)
 
     return output_stars
 
