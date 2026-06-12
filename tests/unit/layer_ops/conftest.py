@@ -214,6 +214,13 @@ def assert_reach_contains_forward(
         out_lb, out_ub = out_set.estimate_ranges()
     out_lb = np.asarray(out_lb).flatten()
     out_ub = np.asarray(out_ub).flatten()
+    if output_flat_dim is not None:
+        # Copilot review: the bounds (and the tol derived from them)
+        # must be sliced to the same prefix as the concrete sample,
+        # otherwise the elementwise comparisons below broadcast against
+        # mismatched lengths.
+        out_lb = out_lb[:output_flat_dim]
+        out_ub = out_ub[:output_flat_dim]
 
     rng = np.random.default_rng(seed)
     layer.eval()

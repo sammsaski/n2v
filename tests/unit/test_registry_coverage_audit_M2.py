@@ -30,7 +30,6 @@ imports of every wrapper, no instantiation. Runs in <100ms.
 from __future__ import annotations
 
 import ast
-import inspect
 import pathlib
 import re
 

@@ -24,11 +24,18 @@ def _as_linear(layer) -> nn.Linear:
     weight = layer.weight
     bias = getattr(layer, "bias", None)
     out_features, in_features = weight.shape
-    dummy = nn.Linear(in_features, out_features, bias=bias is not None)
+    # Copilot review: build the synthetic Linear in the tied weight's own
+    # dtype and copy the tensors verbatim. The previous ``.float()`` cast
+    # silently truncated fp64 weights to fp32, so the reach could differ
+    # from the actual model parameters at tight tolerances.
+    dummy = nn.Linear(
+        in_features, out_features, bias=bias is not None,
+        dtype=weight.dtype,
+    )
     with torch.no_grad():
-        dummy.weight.copy_(weight.detach().float())
+        dummy.weight.copy_(weight.detach().cpu())
         if bias is not None:
-            dummy.bias.copy_(bias.detach().float())
+            dummy.bias.copy_(bias.detach().cpu())
     return dummy
 
 
