@@ -478,8 +478,8 @@ def _handle_graphmodule(
                     node_values[node.name] = current_sets
                     continue
 
-            # Multi-input wrapper modules (DagAdd, Concat2D, SFF,
-            # SoftmaxAttention) need set lists for every input port.
+            # Multi-input wrapper modules (SoftmaxAttention) need set
+            # lists for every input port (Q, K, V).
             multi_result = _handle_multi_input_op(
                 module, node, node_values, set_type
             )
@@ -974,9 +974,7 @@ def _handle_multi_input_op(
     # Fix: bind via ``inspect.signature(layer.forward).bind(*args, **kwargs)``
     # for SoftmaxAttention so streams[0..2] correspond to the declared
     # ``query``/``key``/``value`` parameters regardless of how the caller
-    # passed them. Other multi-input layers fall back to the old positional
-    # order (DagAdd is commutative under its semantics or
-    # explicitly positional).
+    # passed them.
     import inspect as _inspect
     streams: List[List] = []
     declared_param_order: Optional[List[str]] = None
@@ -1370,7 +1368,23 @@ def _handle_onnx_binary_op(module: Any, node: Any, node_values: Dict[str, List],
                 f"Only Div by constant is implemented."
             )
 
-        return _add_sets(sets_a, sets_b, op_name)
+        # Copilot review: ``_add_sets`` requires the canonical op name
+        # {'add','sub'} (the N12 fix keeps it strict so an unrecognised
+        # name can never be silently treated as the wrong operation).
+        # ONNX function names vary across onnx2torch versions
+        # (``add`` / ``Add`` / ``OnnxAdd`` / ``_onnx_add`` ...), so
+        # normalise HERE rather than loosening ``_add_sets``.
+        low = op_name.lower()
+        if 'add' in low:
+            canonical = 'add'
+        elif 'sub' in low:
+            canonical = 'sub'
+        else:
+            raise NotImplementedError(
+                f"ONNX binary op '{op_name}' on two computed sets is not "
+                f"supported (expected an Add/Sub variant)."
+            )
+        return _add_sets(sets_a, sets_b, canonical)
 
     # Case 2: Second input is a parameter (bias/constant)
     if second_input.op != 'get_attr':

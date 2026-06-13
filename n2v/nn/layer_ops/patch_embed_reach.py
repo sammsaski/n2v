@@ -280,9 +280,5 @@ def patch_embed_box(
     return out
 
 
-def _hex_oct_lb_ub(s):
-    """Fast IBP (lb, ub) for Hex/Oct -- their zero-arg ``estimate_ranges``."""
-    lb, ub = s.estimate_ranges()
-    return np.asarray(lb).reshape(-1, 1), np.asarray(ub).reshape(-1, 1)
 
 

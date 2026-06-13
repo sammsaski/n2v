@@ -6,7 +6,7 @@ constant translation, applied directly to each set representation via
 the previous eye-Linear surrogate was O(n^2) and OOMed at
 transformer-flattened sizes).
 
-Coverage matches nnVLA: Box, Star, Zono (+ Hex/Oct).
+Coverage: Box, Star, Zono.
 """
 
 from __future__ import annotations
