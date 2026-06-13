@@ -15,8 +15,6 @@ from __future__ import annotations
 
 from typing import List
 
-import numpy as np
-
 from n2v.sets import Box, Star, Zono
 from n2v.sets.image_star import ImageStar
 

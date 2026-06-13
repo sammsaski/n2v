@@ -23,7 +23,6 @@ import torch.nn as nn
 
 from n2v.sets import Box, Star
 from n2v.sets.image_star import ImageStar
-from n2v.nn.layer_ops._image_shape import apply_box_lift_star
 from n2v.nn.layer_ops._layernorm_star import predicate_preserving_norm_star
 from n2v.nn.layer_ops._norm_utils import (
     affine_after_norm,
