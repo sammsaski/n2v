@@ -203,6 +203,11 @@ def reach_pytorch_model(
 
     if method == 'flow_matching':
         from n2v.probabilistic.flow.reach import flow_reach
+        if not isinstance(input_set, Box):
+            raise TypeError(
+                f"method='flow_matching' requires Box input, got "
+                f"{type(input_set).__name__}"
+            )
         config = kwargs.pop('config', None)
         config = _validate_reach_config(method, config, **kwargs)
         return flow_reach(model, input_set, config)
