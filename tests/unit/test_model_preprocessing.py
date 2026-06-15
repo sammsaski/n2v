@@ -1,13 +1,19 @@
 """
-Tests for model preprocessing utilities (BatchNorm fusion).
+Tests for model preprocessing utilities (BatchNorm fusion, softmax stripping).
 """
 
 import copy
 import pytest
 import torch
 import torch.nn as nn
+import torch.fx
 
-from n2v.utils.model_preprocessing import fuse_batchnorm, has_batchnorm
+from n2v.utils.model_preprocessing import (
+    fuse_batchnorm,
+    has_batchnorm,
+    has_softmax,
+    strip_final_softmax,
+)
 
 
 def _set_bn_nontrivial_stats(bn):
@@ -281,3 +287,172 @@ class TestHasBatchNorm:
             nn.ReLU(),
         )
         assert has_batchnorm(model) is True
+
+
+class _SoftmaxNet(nn.Module):
+    """Small MLP ending in nn.Softmax, used to exercise the fx GraphModule path."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(4, 8)
+        self.fc2 = nn.Linear(8, 3)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x):
+        return self.softmax(self.fc2(torch.relu(self.fc1(x))))
+
+
+class TestStripFinalSoftmax:
+    """Tests for strip_final_softmax (Sequential and fx GraphModule paths)."""
+
+    def test_sequential_removes_softmax(self):
+        """Trailing nn.Softmax is dropped from an nn.Sequential model."""
+        torch.manual_seed(0)
+
+        model = nn.Sequential(
+            nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3), nn.Softmax(dim=-1)
+        )
+        model.eval()
+
+        stripped = strip_final_softmax(model)
+
+        assert not has_softmax(stripped), "Stripped model still contains Softmax"
+        assert len(stripped) == 3, "Trailing Softmax should be removed from Sequential"
+
+    def test_sequential_outputs_logits(self):
+        """Stripped Sequential outputs pre-softmax logits (re-applying softmax
+        reproduces the original probabilities)."""
+        torch.manual_seed(0)
+
+        model = nn.Sequential(
+            nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3), nn.Softmax(dim=-1)
+        )
+        model.eval()
+        x = torch.randn(5, 4)
+
+        stripped = strip_final_softmax(model)
+        logits = stripped(x)
+
+        assert torch.allclose(torch.softmax(logits, dim=-1), model(x), atol=1e-6)
+
+    def test_sequential_preserves_argmax_and_argmin(self):
+        """Dropping softmax leaves the predicted class unchanged for both the
+        argmax and argmin conventions, since softmax is order-preserving."""
+        torch.manual_seed(0)
+
+        model = nn.Sequential(
+            nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3), nn.Softmax(dim=-1)
+        )
+        model.eval()
+        x = torch.randn(16, 4)
+
+        stripped = strip_final_softmax(model)
+
+        assert torch.equal(stripped(x).argmax(dim=-1), model(x).argmax(dim=-1))
+        assert torch.equal(stripped(x).argmin(dim=-1), model(x).argmin(dim=-1))
+
+    def test_graph_module_removes_softmax(self):
+        """Trailing Softmax is dropped from a torch.fx.GraphModule via graph
+        surgery (the orphaned submodule is replaced with Identity)."""
+        torch.manual_seed(0)
+
+        gm = torch.fx.symbolic_trace(_SoftmaxNet())
+        gm.eval()
+        assert isinstance(gm, torch.fx.GraphModule)
+        assert has_softmax(gm)
+
+        stripped = strip_final_softmax(gm)
+
+        assert not has_softmax(stripped), "Stripped GraphModule still contains Softmax"
+
+    def test_graph_module_outputs_logits(self):
+        """Stripped GraphModule outputs pre-softmax logits and preserves the
+        predicted class."""
+        torch.manual_seed(0)
+
+        gm = torch.fx.symbolic_trace(_SoftmaxNet())
+        gm.eval()
+        x = torch.randn(5, 4)
+
+        stripped = strip_final_softmax(gm)
+
+        assert torch.allclose(torch.softmax(stripped(x), dim=-1), gm(x), atol=1e-6)
+        assert torch.equal(stripped(x).argmin(dim=-1), gm(x).argmin(dim=-1))
+
+
+class TestStripFinalSoftmaxEdgeCases:
+    """Edge case tests for strip_final_softmax."""
+
+    def test_no_softmax_is_noop(self):
+        """A model without a trailing softmax is returned unchanged in value
+        as a new object."""
+        torch.manual_seed(0)
+
+        model = nn.Sequential(nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3))
+        model.eval()
+        x = torch.randn(5, 4)
+
+        stripped = strip_final_softmax(model)
+
+        assert not has_softmax(stripped)
+        assert stripped is not model, "strip_final_softmax should return a new object"
+        assert torch.allclose(stripped(x), model(x), atol=1e-6)
+
+    def test_original_model_unchanged(self):
+        """The original model still contains its softmax after stripping."""
+        torch.manual_seed(0)
+
+        model = nn.Sequential(
+            nn.Linear(4, 8), nn.ReLU(), nn.Linear(8, 3), nn.Softmax(dim=-1)
+        )
+        model.eval()
+
+        _ = strip_final_softmax(model)
+
+        assert has_softmax(model), "Original model should be left untouched"
+
+    def test_idempotent(self):
+        """Stripping an already-stripped model is a no-op."""
+        torch.manual_seed(0)
+
+        gm = torch.fx.symbolic_trace(_SoftmaxNet())
+        gm.eval()
+        x = torch.randn(5, 4)
+
+        once = strip_final_softmax(gm)
+        twice = strip_final_softmax(once)
+
+        assert not has_softmax(twice)
+        assert torch.allclose(twice(x), once(x), atol=1e-6)
+
+    def test_non_trailing_softmax_kept(self):
+        """A softmax that is not the final layer is not removed."""
+        torch.manual_seed(0)
+
+        model = nn.Sequential(
+            nn.Linear(4, 8), nn.Softmax(dim=-1), nn.Linear(8, 3)
+        )
+        model.eval()
+
+        stripped = strip_final_softmax(model)
+
+        assert has_softmax(stripped), "Non-trailing Softmax should be kept"
+
+
+class TestHasSoftmax:
+    """Tests for the has_softmax helper."""
+
+    def test_model_with_softmax(self):
+        model = nn.Sequential(nn.Linear(10, 10), nn.Softmax(dim=-1))
+        assert has_softmax(model) is True
+
+    def test_model_without_softmax(self):
+        model = nn.Sequential(nn.Linear(10, 10), nn.ReLU())
+        assert has_softmax(model) is False
+
+    def test_nested_softmax(self):
+        model = nn.Sequential(
+            nn.Sequential(nn.Linear(10, 8), nn.Softmax(dim=-1)),
+            nn.ReLU(),
+        )
+        assert has_softmax(model) is True

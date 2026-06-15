@@ -1635,3 +1635,68 @@ class TestStar:
         assert not star.contains(point_out)
 
 
+class TestStarIsEmptySet:
+    """Tests for Star.is_empty_set on zero-generator point Stars."""
+
+    def _point_star(self, point):
+        """Build a zero-generator point Star centered at ``point``."""
+        V = np.array(point, dtype=float).reshape(-1, 1)
+        return Star(V, np.empty((0, 0)), np.empty((0, 1)),
+                    np.empty((0, 1)), np.empty((0, 1)))
+
+    def test_point_no_constraints_not_empty(self):
+        """An unconstrained point Star is a single point, hence non-empty."""
+        pt = self._point_star([2.0, 5.0])
+        assert pt.nVar == 0
+        assert not pt.is_empty_set()
+
+    def test_point_excluded_by_halfspace_is_empty(self):
+        """Intersecting a point with a half-space it violates gives the empty
+        set (the constraint row reduces to ``0 <= -1``)."""
+        pt = self._point_star([2.0, 5.0])
+        # x0 <= 1, but the point has x0 = 2  ->  empty
+        s = pt.intersect_half_space(np.array([[1.0, 0.0]]), np.array([[1.0]]))
+        assert s.C.shape == (1, 0)
+        assert s.is_empty_set()
+
+    def test_point_inside_halfspace_not_empty(self):
+        """Intersecting a point with a half-space it satisfies keeps the point.
+
+        Regression for the is_empty_set point-Star bug: previously the
+        constraint vector ``d`` was dropped for a zero-column ``C``, so this
+        (correctly non-empty) set was wrongly reported as empty.
+        """
+        pt = self._point_star([2.0, 5.0])
+        # x0 <= 3, and the point has x0 = 2  ->  non-empty
+        s = pt.intersect_half_space(np.array([[1.0, 0.0]]), np.array([[3.0]]))
+        assert not s.is_empty_set()
+
+    def test_point_on_halfspace_boundary_not_empty(self):
+        """A point exactly on the boundary (``0 <= 0``) is feasible."""
+        pt = self._point_star([2.0, 5.0])
+        # x0 <= 2, and the point has x0 = 2  ->  non-empty
+        s = pt.intersect_half_space(np.array([[1.0, 0.0]]), np.array([[2.0]]))
+        assert not s.is_empty_set()
+
+    def test_point_multiple_rows_one_violated_is_empty(self):
+        """With several half-space rows, a single violated row empties the set."""
+        pt = self._point_star([2.0, 5.0])
+        # x0 <= 3 (ok), x1 <= 1 (violated, x1 = 5)  ->  empty
+        H = np.array([[1.0, 0.0], [0.0, 1.0]])
+        g = np.array([[3.0], [1.0]])
+        s = pt.intersect_half_space(H, g)
+        assert s.is_empty_set()
+
+    def test_point_constructed_directly(self):
+        """Point Star built directly with a zero-column C: empty iff some
+        ``d_i < -1e-9``."""
+        V = np.array([[2.0], [5.0]])
+        empty = Star(V, np.empty((1, 0)), np.array([[-1.0]]),
+                     np.empty((0, 1)), np.empty((0, 1)))
+        assert empty.is_empty_set()
+
+        nonempty = Star(V, np.empty((1, 0)), np.array([[1.0]]),
+                        np.empty((0, 1)), np.empty((0, 1)))
+        assert not nonempty.is_empty_set()
+
+
