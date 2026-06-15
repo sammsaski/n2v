@@ -247,6 +247,72 @@ def write_result(results_file, result_str, counterexample=None):
             f.write("\n")
 
 
+def _resolve_relational_onnx(base, rel):
+    """Resolve a tuple ONNX path against the benchmark version dir. The
+    instances.csv path may not match packaging (monotonic lists
+    onnx/original/X while its files are flat under onnx/), so fall back
+    to a basename search under base/onnx."""
+    import glob
+    for cand in (os.path.join(base, rel), os.path.join(base, rel) + ".gz"):
+        if os.path.exists(cand):
+            return cand
+    bn = os.path.basename(rel)
+    hits = (glob.glob(os.path.join(base, "onnx", "**", bn), recursive=True)
+            + glob.glob(os.path.join(base, "onnx", "**", bn + ".gz"),
+                        recursive=True))
+    if hits:
+        return hits[0]
+    raise FileNotFoundError(f"relational ONNX not found: {rel}")
+
+
+def verify_relational_instance(onnx_arg, vnnlib_arg, category):
+    """Verify a two-network relational instance via self-composition
+    (falsify -> sound joint reach)."""
+    from n2v.nn.relational import solve_relational
+
+    t0 = time.time()
+    pairs = ast.literal_eval(onnx_arg.strip())   # [('f', path), ('g', path)]
+    # ONNX tuple paths are relative to the benchmark version dir, which is
+    # two levels up from the vnnlib (<bench>/<ver>/vnnlib/<file>).
+    base = os.path.dirname(os.path.dirname(os.path.abspath(vnnlib_arg)))
+    models = []
+    tmps = []
+    for _role, rel in pairs[:2]:
+        p = _resolve_relational_onnx(base, rel)
+        dp, tmp = _maybe_decompress(p)
+        if tmp:
+            tmps.append(dp)
+        models.append(load_onnx(dp))
+
+    vnnlib_path, vnnlib_tmp = _maybe_decompress(vnnlib_arg)
+    try:
+        spec = load_vnnlib(vnnlib_path)
+        if spec.get("format") != "relational":
+            return {"result": RESULT_UNKNOWN, "counterexample": None}
+
+        n2v.set_parallel(False)
+        n2v.set_lp_solver("linprog")
+        cfg = get_config(category, str(pairs), vnnlib_arg)
+        n_rand = cfg.get("n_rand", 200)
+        verdict, cex = solve_relational(
+            models[0], models[1], spec, method="approx", n_rand=n_rand,
+            seed=42)
+        if verdict == "sat":
+            x, y = cex
+            return {"result": RESULT_SAT, "time": time.time() - t0,
+                    "counterexample": format_counterexample(x, y)}
+        if verdict == "unsat":
+            return {"result": RESULT_UNSAT, "time": time.time() - t0,
+                    "counterexample": None}
+        return {"result": RESULT_UNKNOWN, "counterexample": None}
+    finally:
+        if vnnlib_tmp and os.path.exists(vnnlib_path):
+            os.remove(vnnlib_path)
+        for t in tmps:
+            if os.path.exists(t):
+                os.remove(t)
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -261,16 +327,29 @@ def main():
     results_file = sys.argv[4]
     timeout = float(sys.argv[5])
 
-    # Two-network relational instances: ONNX is a python list literal.
+    # Two-network relational instances: ONNX is a python list literal of
+    # (role, path) tuples over a coupled joint input space. Tolerate a
+    # stray surrounding quote in case the CSV cell reaches us unparsed.
+    onnx_arg = onnx_arg.strip()
+    if onnx_arg.startswith('"') and onnx_arg.endswith('"'):
+        onnx_arg = onnx_arg[1:-1]
     if onnx_arg.strip().startswith("["):
+        signal.signal(signal.SIGALRM, _on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, max(1.0, timeout))
         try:
-            ast.literal_eval(onnx_arg)
-        except Exception:  # noqa: BLE001
-            pass
-        write_result(results_file, RESULT_UNKNOWN)
-        print(RESULT_UNKNOWN)
-        print("# multi-network (relational) instance not yet supported",
-              file=sys.stderr)
+            result = verify_relational_instance(onnx_arg, vnnlib_arg, category)
+        except _Timeout:
+            result = {"result": RESULT_TIMEOUT, "counterexample": None}
+        except Exception as e:  # noqa: BLE001
+            logger.error("relational verification error: %s", e)
+            result = {"result": RESULT_UNKNOWN, "counterexample": None}
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        write_result(results_file, result["result"],
+                     result.get("counterexample"))
+        print(result["result"])
+        if result["result"] == RESULT_SAT and result.get("counterexample"):
+            print(result["counterexample"])
         return 0
 
     onnx_path, onnx_tmp = _maybe_decompress(onnx_arg)

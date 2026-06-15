@@ -32,9 +32,14 @@ indicate per-benchmark tuning, not a hard limitation.
 ## Summary
 
 - **Specs: 34/34 parse** (VNNLIB 1.0, 2.0, relational, nonlinear).
-- **Models: 31/34 load.**
-- **Sound reach: ~27 benchmarks clear**, the rest blocked on a handful
-  of unsupported ops, the missing relational engine, or model-load gaps.
+- **Models: 33/34 load** (only smart_turn fails — quantized transformer,
+  I-38). vggnet16 downloaded + loads (opset shim); vit loads (shape-fold
+  shim).
+- **Sound reach: ~29 benchmarks clear** (incl. both relational). The
+  remaining are either perf/tuning (collins, traffic_signs, ml4acopf
+  300_ieee f64) or **fundamental frontiers that load+forward but whose
+  sound reach needs new machinery** (vggnet16 scale, vit attention,
+  cctsdb discrete control flow).
 
 ## Tier 1 — fully working (spec ✓, load ✓, sound reach ✓) — 27
 
@@ -68,37 +73,58 @@ indicate per-benchmark tuning, not a hard limitation.
 | traffic_signs_recognition_2023 | Sign+Softmax; full-eps *sound verification* is perf-bound (>900 s) |
 | yolo_2023 | |
 
+## Tier 1b — relational (two-network) — supported — 2
+
+| Benchmark | Verdict path | Note |
+|---|---|---|
+| isomorphic_acasxu_2026 | sound joint reach | UNSAT (instance specs use a contradictory `and` — upstream and/or bug — so the unsafe region is empty) |
+| monotonic_acasxu_2026 | falsify (SAT) / sound joint reach | SAT with a genuine coupled counterexample |
+
+Relational engine: self-composition over the coupled joint input with a
+prefix-aligned predicate join (`n2v/nn/relational.py`), wired into the
+runner. Sound (joint reach encloses the true `[f(x_f); g(x_g)]`). Note:
+the product relaxation relaxes f and g independently, so it cannot prove
+properties that need a *tight* cross-network difference (e.g. exact
+equivalence) — those stay UNKNOWN unless falsified. A precision limit,
+not a soundness one.
+
 ## Tier 2 — partial: first instance works, some models do not — 2
 
 | Benchmark | Blocker on the bad models |
 |---|---|
-| ml4acopf_2024 | `14/118_ieee` (linear and full) work; **`300_ieee` mis-converts in onnx2torch** (I-37) → invalid, a third_party bug independent of op support |
+| ml4acopf_2024 | `14/118_ieee` (linear and full) work. **`300_ieee` is float32-ill-conditioned** (squares large values; ort-f32 itself is ~1.6e-2 from the true f64 answer — *not* a conversion bug, I-37). n2v's **sound reach is float64 and accurate** (matches f64 to 2e-11); only the falsification lane should validate counterexamples in f64. |
 | collins_aerospace_benchmark | first instance runs but **perf-bound** (>150 s); Pow is supported |
 
-## Tier 3 — blocked — 5
+## Tier 3 — load OK, reach is a fundamental frontier (not an op gap) — 4
 
 | Benchmark | Load | Reach | Blocker |
 |---|---|---|---|
-| smart_turn_multimodal_2026 | ✗ | — | `DequantizeLinear` has no onnx2torch converter (I-38) |
-| vggnet16_2022 | ✗ | — | model file not committed; fetched by `setup.sh` (data, not code) |
-| cctsdb_yolo_2023 | ✓ | ✗ | rank-1 data-axis `Slice` + YOLO control-flow ops (`ArgMax`, `ScatterND`, `Clip`, `Max`, `Min`, `Where`, `Range`, …) |
-| vit_2023 | ✓ | ✗ | `OnnxShape` and transformer ops — **out of scope by decision** |
-| isomorphic_acasxu_2026 | ✓ | N/A | relational (two-network) — parses, **no relational engine** |
-| monotonic_acasxu_2026 | ✓ | N/A | relational — no engine (probe also mis-resolved its tuple model path) |
+| smart_turn_multimodal_2026 | ✗ | — | **extended-track, future work** — fully QDQ-quantized transformer (199 DequantizeLinear + 119 activation-path QuantizeLinear + Erf/Sqrt/Exp); needs converters + quantize round-relaxation + nonlinear ops + transformer-scale perf. Not currently supported (I-38). |
+| vggnet16_2022 | ✓ | scale | model downloaded (setup.sh) + **loads** (opset-8→13 upgrade shim; forward matches ort to 9.5e-7). All ops supported (Conv/Relu/MaxPool/Gemm/Flatten/Dropout). Full sound reach is **scalability-bound** — 224×224×3 = 150k-dim input + millions of ReLU neurons; needs the perf phase (IBP-bound ReLU, sparse input sets), not an op gap. |
+| cctsdb_yolo_2023 | ✓ | frontier | **loads + forwards** (so falsification can find SAT). Sound reach blocked by the YOLO detection head's **discrete / data-dependent ops** (`ArgMax`, `ScatterND`, `Where`, `Equal`) — beyond sound set-based reach — plus piecewise-linear `Clip`/`Max`/`Min`/`Expand`. Frontier, not an op gap. |
+| vit_2023 | ✓ | frontier | **loads** now (shape-fold shim folds away `Shape`/`ConstantOfShape`; forward matches ort 9.5e-7); affine ops supported. Sound reach **infeasible with star sets** — attention has 6 `set@set` (bilinear) MatMuls; a McCormick relaxation explodes to ~80k+ predicates. Transformer-verification frontier, not an op gap. |
 
 ## Remaining work to "everything end-to-end"
 
-1. **Unsupported ops** — the cctsdb_yolo control-flow cluster
-   (`ArgMax/ScatterND/Clip/Max/Min/Where/Range/Expand/…`); `Shape` (vit,
-   out of scope); `Erf/Sqrt/Exp` (smart_turn, which is load-blocked by
-   DequantizeLinear regardless). `Pow`, `Sin`, `Cos` were added
-   2026-06-13 and cleared nn4sys and ml4acopf-full.
-2. **Relational engine** — joint reachability over the two-network
-   specs; unblocks both acasxu-relational benchmarks.
-3. **third_party fixes** — I-38 (DequantizeLinear → smart_turn), I-37
-   (onnx2torch mis-conversion → ml4acopf 300_ieee).
-4. **Perf / data** — tuning (collins, traffic_signs full-eps) and the
-   vggnet16 download.
+Every benchmark that *can* load now loads (33/34; only smart_turn is
+load-blocked). The remaining gaps split into:
+
+1. **Perf / tuning** — fit the supported-but-slow benchmarks into the
+   competition budget: collins_aerospace, traffic_signs (full-eps sound
+   verification), and the f64 falsification validation for ml4acopf
+   300_ieee. The natural next phase.
+2. **Fundamental reach frontiers** (load + forward, but sound reach needs
+   machinery the star engine doesn't have):
+   - **vggnet16** — scale (150k-dim input × millions of ReLU neurons);
+     needs IBP-bound ReLU + sparse/zonotope input sets.
+   - **vit** — bilinear self-attention (`set@set` MatMul); needs a
+     dedicated attention relaxation.
+   - **cctsdb_yolo** — discrete detection-head control flow
+     (`ArgMax`/`ScatterND`/`Where`/`Equal`).
+3. **Extended track** — smart_turn (quantized transformer, I-38).
+
+Note: I-37 (ml4acopf 300_ieee) is **not** a conversion bug — float32
+ill-conditioning; the float64 sound reach handles it correctly.
 
 ## Soundness note
 
