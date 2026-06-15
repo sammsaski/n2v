@@ -6,6 +6,12 @@ Fusing BatchNorm into preceding Conv2d/Linear layers eliminates BatchNorm
 from the computation graph, which avoids the need for a dedicated BatchNorm
 reachability implementation.
 
+Also provides final-softmax stripping. Star reachability has no Softmax rule,
+so a classifier that ends in softmax cannot be verified as-is. Because softmax
+is strictly order-preserving, dropping it leaves argmax/argmin (the predicted
+class) unchanged, and linear output specifications must be expressed over the
+pre-softmax logits anyway, so verification runs on the logits.
+
 Fusion formula (Conv2d + BatchNorm2d):
     scale = gamma / sqrt(running_var + eps)
     W_fused = scale.reshape(-1, 1, 1, 1) * W_conv
@@ -33,6 +39,22 @@ def has_batchnorm(model: nn.Module) -> bool:
     """
     for module in model.modules():
         if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+            return True
+    return False
+
+
+def has_softmax(model: nn.Module) -> bool:
+    """
+    Check whether a model contains any Softmax layers.
+
+    Args:
+        model: PyTorch model to inspect.
+
+    Returns:
+        True if any module is an instance of nn.Softmax; False otherwise.
+    """
+    for module in model.modules():
+        if isinstance(module, nn.Softmax):
             return True
     return False
 
@@ -373,3 +395,59 @@ def fuse_batchnorm(model: nn.Module) -> nn.Module:
     fused_model.eval()
 
     return fused_model
+
+
+def _strip_graph_module_softmax(gm: 'torch.fx.GraphModule') -> None:
+    """Remove a trailing Softmax node from an fx GraphModule, in place.
+
+    Rewires the graph's output to consume the softmax's input, erases the
+    softmax node, then re-lints and recompiles. No-op if the output is not
+    produced by a Softmax module.
+    """
+    graph = gm.graph
+    out_node = next(n for n in graph.nodes if n.op == 'output')
+    last = out_node.args[0]
+    if (getattr(last, 'op', None) == 'call_module'
+            and isinstance(gm.get_submodule(last.target), nn.Softmax)):
+        out_node.args = (last.args[0],)  # return the softmax's input instead
+        graph.erase_node(last)
+        # Replace the now-orphaned Softmax submodule with Identity so it no
+        # longer shows up in model.modules().
+        _set_module_by_name(gm, last.target, nn.Identity())
+        graph.lint()
+        gm.recompile()
+
+
+def strip_final_softmax(model: nn.Module) -> nn.Module:
+    """
+    Remove a trailing Softmax layer from a model.
+
+    Creates a deep copy and drops the final softmax so the model can be passed
+    to Star reachability (which has no Softmax rule). Softmax is strictly
+    order-preserving, so this leaves argmax/argmin unchanged; linear output
+    specifications are expressed over the pre-softmax logits, which is what the
+    stripped model now outputs. The original model is not modified.
+
+    Handles both torch.fx.GraphModule (e.g. onnx2torch output, via graph
+    surgery) and nn.Sequential models that end in nn.Softmax. If no trailing
+    softmax is found, the (copied) model is returned unchanged.
+
+    Args:
+        model: PyTorch model to preprocess.
+
+    Returns:
+        A new model in eval mode with the trailing softmax removed.
+    """
+    import torch.fx
+
+    stripped = copy.deepcopy(model)
+    stripped.eval()
+
+    if isinstance(stripped, torch.fx.GraphModule):
+        _strip_graph_module_softmax(stripped)
+    elif isinstance(stripped, nn.Sequential) and len(stripped) > 0 \
+            and isinstance(stripped[-1], nn.Softmax):
+        stripped = nn.Sequential(*list(stripped)[:-1])
+
+    stripped.eval()
+    return stripped

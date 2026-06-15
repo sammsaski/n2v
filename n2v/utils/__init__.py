@@ -9,7 +9,7 @@ from n2v.utils.lpsolver import solve_lp, solve_lp_batch
 from n2v.utils.model_loader import load_onnx, load_pytorch
 from n2v.utils.load_vnnlib import load_vnnlib
 from n2v.utils.falsify import falsify
-from n2v.utils.model_preprocessing import fuse_batchnorm
+from n2v.utils.model_preprocessing import fuse_batchnorm, strip_final_softmax
 
 # NOTE: ``verify_specification`` (and ``spec_summary``) are intentionally
 # NOT re-exported here. ``verify_specification.py`` imports from
@@ -27,4 +27,5 @@ __all__ = [
     "load_vnnlib",
     "falsify",
     "fuse_batchnorm",
+    "strip_final_softmax",
 ]
