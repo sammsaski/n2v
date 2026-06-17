@@ -128,13 +128,13 @@ def _sign_single_star_approx(I: Star, lp_solver: str = 'default') -> Optional[St
     For each neuron with LP bounds [l, u]:
       - l >= 0: output = +1 (constant)
       - u <= 0: output = -1 (constant)
-      - l < 0 < u: introduce new predicate var y_i in [-1, 1]
-        with 4 constraints forming a parallelogram:
-          y_i >= -1 (box lower)
-          y_i <= +1 (box upper)
-          y_i >= slope*(x_i - l) - 1 (secant lower from (l,-1) to (u,+1))
-          y_i <= slope*(x_i - u) + 1 (secant upper, parallel to lower)
-        where slope = 2/(u-l)
+      - l < 0 < u: introduce a FREE predicate var y_i in [-1, 1].
+        Sign is a STEP (discontinuous at 0), so no affine constraint
+        relating y_i to x_i is sound across the crossing — a secant
+        coupling would exclude the true output -1 for x in (l,0) (or +1
+        for x in (0,u)), shrinking the reach set (unsound). The only
+        sound single-Star relaxation is the box y_i in [-1, 1] with no
+        coupling to x. (A tighter result needs the exact 2-way split.)
     """
     N = I.dim
     n = I.nVar
@@ -178,19 +178,13 @@ def _sign_single_star_approx(I: Star, lp_solver: str = 'default') -> Optional[St
     C0 = np.hstack([I.C, np.zeros((I.C.shape[0], m))])
     d0 = I.d
 
-    # Original V rows for constraint construction
-    V_orig = I.V[varying_map, 1:n+1]  # (m, n)
-    c_orig = I.V[varying_map, 0]       # (m,)
-    l = lbs[varying_map]
-    u = ubs[varying_map]
-
     C_rows = []
     d_rows = []
 
     for i in range(m):
-        slope = 2.0 / (u[i] - l[i])
-
-        # 1. y_i >= -1 -> -y_i <= 1
+        # Sound box relaxation only: y_i in [-1, 1], no coupling to x_i
+        # (Sign is a step; any secant relating y_i to x_i is unsound).
+        # 1. y_i >= -1  ->  -y_i <= 1
         row1 = np.zeros(n + m)
         row1[n + i] = -1
         C_rows.append(row1)
@@ -201,23 +195,6 @@ def _sign_single_star_approx(I: Star, lp_solver: str = 'default') -> Optional[St
         row2[n + i] = 1
         C_rows.append(row2)
         d_rows.append(1.0)
-
-        # 3. Secant lower: y_i >= slope*(x_i - l) - 1
-        #    slope*x_i - y_i <= slope*l + 1
-        #    slope*(V_orig[i]@alpha + c_orig[i]) - y_i <= slope*l + 1
-        row3 = np.zeros(n + m)
-        row3[:n] = slope * V_orig[i]
-        row3[n + i] = -1
-        C_rows.append(row3)
-        d_rows.append(slope * (l[i] - c_orig[i]) + 1.0)
-
-        # 4. Secant upper: y_i <= slope*(x_i - u) + 1
-        #    -slope*x_i + y_i <= -slope*u + 1
-        row4 = np.zeros(n + m)
-        row4[:n] = -slope * V_orig[i]
-        row4[n + i] = 1
-        C_rows.append(row4)
-        d_rows.append(slope * (c_orig[i] - u[i]) + 1.0)
 
     C_new = np.array(C_rows)
     d_new = np.array(d_rows).reshape(-1, 1)
