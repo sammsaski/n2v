@@ -173,8 +173,9 @@ def main(config=None):
         unfair_pct = model_data['UnfairPercent'].values
         n_eps = len(epsilons)
 
-        # Use discrete x positions
-        x = np.arange(n_eps)
+        # Position points at their true epsilon values (proportional x-axis),
+        # so horizontal gaps reflect the real perturbation-size differences.
+        x = np.asarray(epsilons, dtype=float)
 
         # Stacked area layers (bottom to top: fair, then unfair)
         y1 = fair_pct         # Bottom layer: Fair
@@ -199,14 +200,15 @@ def main(config=None):
         display_title = model_display_names.get(model_name, model_name)
         ax.set_title(display_title, fontweight='bold', fontsize=14)
 
-        # Set x-axis with epsilon labels
+        # Tick at each true epsilon value
         ax.set_xticks(x)
         eps_labels = [f'{e:.2f}' for e in epsilons]
         ax.set_xticklabels(eps_labels)
 
-        # Axis limits
+        # Axis limits: small proportional padding so end points aren't on the spines
         ax.set_ylim(0, 100)
-        ax.set_xlim(-0.3, n_eps - 0.7)
+        pad = (x.max() - x.min()) * 0.03 if x.max() > x.min() else 0.01
+        ax.set_xlim(x.min() - pad, x.max() + pad)
 
         # Professional grid styling
         ax.grid(True, linestyle='--', alpha=0.3)
