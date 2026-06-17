@@ -27,7 +27,129 @@ from n2v.sets.halfspace import HalfSpace
 
 def load_vnnlib(property_file: str) -> Dict:
     """
-    Load and parse a VNN-LIB property file.
+    Load and parse a VNN-LIB property file (auto-detects 1.0 vs 2.0).
+
+    VNN-COMP 2026 migrated to the VNNLIB 2.0 format (``(declare-network ...)``
+    with tensor-indexed variables ``X[0,0,0,0]``). This dispatcher detects
+    the format from the file contents and routes accordingly:
+
+      - **1.0** (legacy ``(declare-const X_0 Real)`` / ``X_0`` syntax) ->
+        :func:`_load_vnnlib_v1` (unchanged).
+      - **2.0** (``vnnlib-version`` / ``declare-network``) ->
+        :func:`n2v.utils.vnnlib2.load_vnnlib_v2`.
+
+    Both produce the same structure. As a guard against the historical
+    failure mode where an unrecognized spec parsed to an *empty* property
+    (silently "verifying nothing"), this function raises if the result has
+    no input bounds or no output property.
+
+    Args:
+        property_file: Path to the VNN-LIB file describing property to verify
+
+    Returns:
+        property: Dictionary with following fields:
+            - 'lb': input lower bound vector (numpy array or list of arrays)
+            - 'ub': input upper bound vector (numpy array or list of arrays)
+            - 'prop': collection of HalfSpaces describing output specification to verify
+    """
+    with open(property_file, 'r') as f:
+        text = f.read()
+
+    if 'vnnlib-version' in text or 'declare-network' in text:
+        from n2v.utils.vnnlib2 import load_vnnlib_v2
+        result = load_vnnlib_v2(property_file, text)
+    else:
+        result = _load_vnnlib_v1(property_file)
+
+    if result.get('format') == 'nonlinear':
+        # Spec outside the linear fragment: the resolved assertion ASTs
+        # are the authoritative representation ('prop' is None; the box
+        # is best-effort). Validated in the nonlinear loader.
+        return result
+    _assert_nonempty(result, property_file)
+    if result.get('format') == 'relational':
+        # Multi-network spec: joint box + coupling + joint output prop.
+        # The pairs contract (independent input regions) does not apply;
+        # bound validation happened in the relational lowering (a dim may
+        # be unbounded in the box if constrained via coupling).
+        return result
+    _build_pairs(result)
+    _validate_pairs(result, property_file)
+    return result
+
+
+def _build_pairs(result: Dict) -> None:
+    """Normalize every parse to ``result['pairs']``: a list of
+    ``{'lb', 'ub', 'prop'}`` dicts, one per input region.
+
+    Semantics: a counterexample exists iff for SOME pair, an input in
+    [lb, ub] produces an output satisfying that pair's prop. For specs
+    where regions and output constraints are independent, every pair
+    shares the same prop; for combined input/output specs (``paired``),
+    region i carries its own prop entry i.
+    """
+    if result.get('pairs'):
+        return  # parser produced pairs directly
+    lb, ub, prop = result['lb'], result['ub'], result['prop']
+    if isinstance(lb, list):
+        if result.get('paired'):
+            pairs = [{'lb': l, 'ub': u, 'prop': [p]}
+                     for l, u, p in zip(lb, ub, prop)]
+        else:
+            pairs = [{'lb': l, 'ub': u, 'prop': prop} for l, u in zip(lb, ub)]
+    else:
+        pairs = [{'lb': lb, 'ub': ub, 'prop': prop}]
+    result['pairs'] = pairs
+
+
+def _validate_pairs(result: Dict, property_file: str) -> None:
+    """Reject impossible or unbounded regions loudly.
+
+    The historical failure mode was a mis-parse producing lb > ub (or
+    fabricated bounds) that either crashed far downstream or silently
+    altered the verified property.
+    """
+    for i, pair in enumerate(result['pairs']):
+        lb = np.asarray(pair['lb'], dtype=np.float64).flatten()
+        ub = np.asarray(pair['ub'], dtype=np.float64).flatten()
+        if not (np.isfinite(lb).all() and np.isfinite(ub).all()):
+            raise ValueError(
+                f"Parsed VNN-LIB spec leaves input dimensions unbounded "
+                f"in region {i}: {property_file}"
+            )
+        if (lb > ub).any():
+            bad = int(np.argmax(lb > ub))
+            raise ValueError(
+                f"Parsed VNN-LIB spec has lb > ub in region {i} "
+                f"(dim {bad}: {lb[bad]} > {ub[bad]}): {property_file}"
+            )
+        if not pair['prop']:
+            raise ValueError(
+                f"Parsed VNN-LIB spec has no output property for region "
+                f"{i}: {property_file}"
+            )
+
+
+def _assert_nonempty(result: Dict, property_file: str) -> None:
+    """Raise if a parsed spec has no input bounds or no output property.
+
+    Guards against silently 'verifying nothing' when a spec format is not
+    recognized by the parser.
+    """
+    lb = result.get('lb')
+    prop = result.get('prop')
+    empty_lb = lb is None or (isinstance(lb, list) and len(lb) == 0)
+    empty_prop = prop is None or (isinstance(prop, list) and len(prop) == 0)
+    if empty_lb or empty_prop:
+        raise ValueError(
+            f"Parsed VNN-LIB spec is empty (lb or prop missing): "
+            f"{property_file}. The spec format may be unsupported."
+        )
+
+
+def _load_vnnlib_v1(property_file: str) -> Dict:
+    """
+    Load and parse a legacy (1.0) VNN-LIB property file.
 
     Args:
         property_file: Path to the VNN-LIB file describing property to verify
@@ -74,8 +196,11 @@ def load_vnnlib(property_file: str) -> Dict:
             if "declare-const" in tline and "X_" in tline:
                 dim += 1
             elif "declare-const" in tline and "Y_" in tline:
-                lb_template = np.zeros(dim, dtype=np.float32)
-                ub_template = np.zeros(dim, dtype=np.float32)
+                # Unconstrained until asserted; the pairs validity guard
+                # rejects any dimension left unbounded (previously these
+                # defaulted to 0, silently fabricating bounds).
+                lb_template = np.full(dim, -np.inf, dtype=np.float64)
+                ub_template = np.full(dim, np.inf, dtype=np.float64)
                 dim = 0
                 phase = "DeclareOutput"
                 continue  # Redo this line in correct phase
@@ -107,6 +232,8 @@ def load_vnnlib(property_file: str) -> Dict:
                     property_dict['lb'] = lb_array
                     property_dict['ub'] = ub_array
                     property_dict['prop'] = prop_array
+                    # Region i is paired with prop entry i (per-disjunct).
+                    property_dict['paired'] = True
                     # Done processing - this format has everything in one assertion
                 else:  # Option 2: multiple input regions, separate output assertion
                     lb_array, ub_array = _process_multiple_inputs(tline, lb_input, ub_input)
@@ -141,13 +268,6 @@ def load_vnnlib(property_file: str) -> Dict:
                     if isinstance(last_ast.get('Hg'), list) and len(last_ast['Hg']) > 1:
                         # Previous ast was an "or"
                         property_dict['prop'].append(ast)
-                    elif "quadrotor2d_state" in property_file:
-                        # Quick fix for lsnc_relu
-                        last_ast['Hg'] = HalfSpace(
-                            np.vstack([last_ast['Hg'].G, ast['Hg'].G]),
-                            np.vstack([last_ast['Hg'].g, ast['Hg'].g])
-                        )
-                        property_dict['prop'][-1] = last_ast
                     else:
                         # Concatenate with previous assertion (AND)
                         last_ast['Hg'] = HalfSpace(
@@ -172,16 +292,24 @@ def load_vnnlib(property_file: str) -> Dict:
 # ============================================================================
 
 def _merge_lines(lines: List[str], start_idx: int) -> Tuple[str, int]:
-    """Combine multiple lines into a single one if they belong to a single statement."""
-    tline = lines[start_idx].strip()
+    """Combine multiple lines into a single one if they belong to a single statement.
+
+    Linear time: accumulates parts and tracks the paren balance
+    incrementally (the previous version re-concatenated and re-counted the
+    whole string per line — quadratic on multi-MB single-assert specs).
+    """
+    first = lines[start_idx].strip()
+    parts = [first]
+    balance = first.count('(') - first.count(')')
     lines_consumed = 1
 
-    while tline.count('(') != tline.count(')') and (start_idx + lines_consumed) < len(lines):
+    while balance != 0 and (start_idx + lines_consumed) < len(lines):
         next_line = lines[start_idx + lines_consumed].strip()
-        tline = tline + " " + next_line
+        parts.append(next_line)
+        balance += next_line.count('(') - next_line.count(')')
         lines_consumed += 1
 
-    return tline, lines_consumed
+    return " ".join(parts), lines_consumed
 
 
 # ============================================================================
@@ -213,7 +341,7 @@ def _process_assertion(tline: str, dim: int) -> Dict:
             tline = tline[length+1:]
 
             if ast['Hg'] is None:
-                ast['Hg'] = HalfSpace(ast['H'].reshape(1, -1), np.array([[ast['g']]], dtype=np.float32))
+                ast['Hg'] = HalfSpace(ast['H'].reshape(1, -1), np.array([[ast['g']]], dtype=np.float64))
             else:
                 # Concatenate (similar to AND statement)
                 ast['Hg'] = HalfSpace(
@@ -254,7 +382,7 @@ def _process_constraint(tline: str, ast: Dict) -> Tuple[Dict, int]:
     idx1 = int(var1.split('_')[1])
 
     # Initialize constraint
-    H = np.zeros(ast['dim'], dtype=np.float32)
+    H = np.zeros(ast['dim'], dtype=np.float64)
     g = 0.0
 
     if '<=' in op or '<' in op:
@@ -297,7 +425,7 @@ def _process_and(tline: str, ast: Dict) -> Tuple[Dict, str]:
             if temp_ast['Hg'] is None:
                 temp_ast['Hg'] = HalfSpace(
                     temp_ast['H'].reshape(1, -1),
-                    np.array([[temp_ast['g']]], dtype=np.float32)
+                    np.array([[temp_ast['g']]], dtype=np.float64)
                 )
             else:
                 temp_ast['Hg'] = HalfSpace(
@@ -341,7 +469,7 @@ def _process_or(tline: str, ast: Dict) -> Tuple[Dict, str]:
 
             halfspace = HalfSpace(
                 or_ast['H'].reshape(1, -1),
-                np.array([[or_ast['g']]], dtype=np.float32)
+                np.array([[or_ast['g']]], dtype=np.float64)
             )
 
             if not temp_ast['Hg']:
@@ -400,158 +528,171 @@ def _process_input_constraint(tline: str, lb_input: np.ndarray, ub_input: np.nda
     return lb_input, ub_input
 
 
+def _read_sexpr(text: str):
+    """Parse one balanced s-expression string into nested lists/atoms.
+
+    Linear time — replaces the char-walking/string-slicing extraction that
+    was quadratic on multi-MB single-assert specs and silently dropped
+    every constraint after the first in each and-block.
+    """
+    tokens = text.replace('(', ' ( ').replace(')', ' ) ').split()
+    pos = 0
+
+    def read():
+        nonlocal pos
+        if pos >= len(tokens):
+            raise ValueError("unexpected end of s-expression")
+        tok = tokens[pos]
+        pos += 1
+        if tok == '(':
+            lst = []
+            while pos < len(tokens) and tokens[pos] != ')':
+                lst.append(read())
+            pos += 1  # consume ')'
+            return lst
+        if tok == ')':
+            raise ValueError("unexpected ')'")
+        return tok
+
+    return read()
+
+
+def _var_index(atom) -> Tuple[str, int]:
+    """``X_3`` -> ('X', 3); ``Y_0`` -> ('Y', 0); else (None, -1)."""
+    if isinstance(atom, str) and len(atom) > 2 and atom[1] == '_' \
+            and atom[0] in ('X', 'Y'):
+        try:
+            return atom[0], int(atom[2:])
+        except ValueError:
+            pass
+    return None, -1
+
+
+def _apply_block_atom(atom, lb: np.ndarray, ub: np.ndarray,
+                      H_rows: List, g_vals: List, output_dim: int) -> None:
+    """Apply one comparison ``(op var value)`` from an and-block.
+
+    X constraints tighten the region bounds; Y constraints append a
+    ``row . y <= g`` halfspace row (Y-vs-const or Y-vs-Y).
+    """
+    if not (isinstance(atom, list) and len(atom) == 3):
+        raise ValueError(f"unsupported constraint in or/and block: {atom!r}")
+    op, a, b = atom
+    kind_a, idx_a = _var_index(a)
+    if kind_a is None:
+        raise ValueError(f"expected variable on constraint LHS: {atom!r}")
+
+    if kind_a == 'X':
+        value = float(b)
+        if op in ('<=', '<'):
+            ub[idx_a] = min(ub[idx_a], value)
+        elif op in ('>=', '>'):
+            lb[idx_a] = max(lb[idx_a], value)
+        else:
+            raise ValueError(f"unsupported operator on input: {op!r}")
+        return
+
+    # Y constraint -> halfspace row
+    row = np.zeros(output_dim, dtype=np.float64)
+    kind_b, idx_b = _var_index(b)
+    if op in ('<=', '<'):
+        row[idx_a] = 1.0
+        if kind_b == 'Y':
+            row[idx_b] -= 1.0
+            gval = 0.0
+        else:
+            gval = float(b)
+    elif op in ('>=', '>'):
+        row[idx_a] = -1.0
+        if kind_b == 'Y':
+            row[idx_b] += 1.0
+            gval = 0.0
+        else:
+            gval = -float(b)
+    else:
+        raise ValueError(f"unsupported operator on output: {op!r}")
+    H_rows.append(row)
+    g_vals.append(gval)
+
+
+def _trivially_true_halfspace(output_dim: int) -> HalfSpace:
+    """``0 . y <= 0`` — always satisfied. Used for disjuncts with no
+    output constraint ('any output violates' for that input region)."""
+    return HalfSpace(np.zeros((1, output_dim), dtype=np.float64),
+                     np.zeros((1, 1), dtype=np.float64))
+
+
 def _process_combined_input_output(tline: str, lb_input: np.ndarray, ub_input: np.ndarray,
                                    output_dim: int) -> Tuple[List[np.ndarray], List[np.ndarray], List[Dict]]:
-    """Process input assertion with combined input and output (or statement)."""
-    # Extract all (and ...) blocks
-    and_blocks = []
-    depth = 0
-    current_block = ""
-    in_and = False
+    """Process an assertion combining input and output constraints:
+    ``(assert (or (and X-bounds... Y-constraints...) ...))``.
 
-    for i, char in enumerate(tline):
-        if char == '(' and i + 3 < len(tline) and tline[i:i+4] == '(and':
-            in_and = True
-            depth = 0
-            current_block = ""
+    Each disjunct becomes one (region, prop) pair: region i is paired
+    with prop entry i.
+    """
+    tree = _read_sexpr(tline)
+    if not (isinstance(tree, list) and tree and tree[0] == 'assert'):
+        raise ValueError(f"expected an assert statement, got: {tline[:80]!r}")
+    formula = tree[1]
+    if isinstance(formula, list) and formula and formula[0] == 'or':
+        blocks = formula[1:]
+    else:
+        blocks = [formula]
 
-        if in_and:
-            current_block += char
-            if char == '(':
-                depth += 1
-            elif char == ')':
-                depth -= 1
-                if depth == 0:
-                    and_blocks.append(current_block)
-                    in_and = False
+    lb_array, ub_array, prop_array = [], [], []
+    for block in blocks:
+        if isinstance(block, list) and block and block[0] == 'and':
+            atoms = block[1:]
+        else:
+            atoms = [block]
 
-    lb_array = []
-    ub_array = []
-    prop_array = []
-
-    for block in and_blocks:
         lb_temp = lb_input.copy()
         ub_temp = ub_input.copy()
-        H_list = []
-        g_list = []
+        H_rows: List = []
+        g_vals: List = []
+        for atom in atoms:
+            _apply_block_atom(atom, lb_temp, ub_temp, H_rows, g_vals, output_dim)
 
-        # Extract constraints from this block
-        constraints = []
-        depth = 0
-        current_constraint = ""
-
-        for char in block:
-            if char == '(':
-                depth += 1
-                current_constraint += char
-            elif char == ')':
-                depth -= 1
-                current_constraint += char
-                if depth == 1:  # Complete constraint at depth 1
-                    if current_constraint.strip() and current_constraint.count('(') > 1:
-                        constraints.append(current_constraint.strip())
-                    current_constraint = ""
-            else:
-                current_constraint += char
-
-        # Process each constraint
-        for constraint in constraints:
-            if 'X' in constraint:
-                lb_temp, ub_temp = _process_input_constraint(constraint, lb_temp, ub_temp)
-            else:
-                H, g = _process_output_combo_constraint(constraint, H_list, g_list, output_dim)
-                H_list = H
-                g_list = g
-
-        # Create HalfSpace
-        if H_list:
-            Hg = HalfSpace(np.array(H_list, dtype=np.float32), np.array(g_list, dtype=np.float32).reshape(-1, 1))
+        if H_rows:
+            Hg = HalfSpace(np.array(H_rows, dtype=np.float64),
+                           np.array(g_vals, dtype=np.float64).reshape(-1, 1))
         else:
-            Hg = None
+            Hg = _trivially_true_halfspace(output_dim)
 
-        prop = {
+        prop_array.append({
             'Hg': Hg,
-            'H': np.array(H_list, dtype=np.float32) if H_list else None,
-            'g': np.array(g_list, dtype=np.float32) if g_list else None
-        }
-
+            'H': Hg.G,
+            'g': Hg.g,
+        })
         lb_array.append(lb_temp)
         ub_array.append(ub_temp)
-        prop_array.append(prop)
 
     return lb_array, ub_array, prop_array
 
 
-def _process_output_combo_constraint(tline: str, H: List, g: List,
-                                     output_dim: int) -> Tuple[List, List]:
-    """Process output constraint in combined input/output format."""
-    parts = tline.split('(')
-    constraint_part = parts[-1] if parts else tline
-
-    tokens = constraint_part.split()
-
-    Hvec = np.zeros(output_dim, dtype=np.float32)
-
-    # Extract variable index
-    var_idx = int(tokens[1].split('_')[1])
-
-    # Extract value
-    value_str = tokens[2].rstrip(')')
-    value = float(value_str)
-
-    # Determine constraint type
-    if '>=' in tokens[0] or '>' in tokens[0]:
-        Hvec[var_idx] = -1
-        gval = -value
-    else:  # '<=' or '<'
-        Hvec[var_idx] = 1
-        gval = value
-
-    H.append(Hvec)
-    g.append(gval)
-
-    return H, g
-
-
 def _process_multiple_inputs(tline: str, lb_input: np.ndarray, ub_input: np.ndarray) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-    """Process input assertion with multiple input sets (or statement)."""
-    tline = tline[11:].strip()  # Remove '(assert (or'
+    """Process an input-only disjunction:
+    ``(assert (or (and X-bounds...) ...))`` -> list of regions."""
+    tree = _read_sexpr(tline)
+    if not (isinstance(tree, list) and tree and tree[0] == 'assert'):
+        raise ValueError(f"expected an assert statement, got: {tline[:80]!r}")
+    formula = tree[1]
+    if isinstance(formula, list) and formula and formula[0] == 'or':
+        blocks = formula[1:]
+    else:
+        blocks = [formula]
 
-    pars = 1
-    lb_array = []
-    ub_array = []
-    arr_count = -1
-
-    lb_temp = lb_input.copy()
-    ub_temp = ub_input.copy()
-
-    while tline and pars > 0:
-        tline = tline.strip()
-
-        if tline.startswith('(<=') or tline.startswith('(>='):
-            # Find end of constraint
-            end_idx = tline.find(')')
-            constraint = tline[:end_idx+1]
-            lb_temp, ub_temp = _process_input_constraint(constraint, lb_temp, ub_temp)
-            tline = tline[end_idx+1:].strip()
-
-        elif tline.startswith('(or'):
-            raise ValueError("Currently we do not support an OR statement within an OR statement.")
-
-        elif tline.startswith('(and'):
-            arr_count += 1
-            lb_temp = lb_input.copy()
-            ub_temp = ub_input.copy()
-            tline = tline[4:].strip()
-            pars += 1
-
-        elif tline.startswith(')'):
-            pars -= 1
-            tline = tline[1:].strip()
-            if arr_count >= 0 and pars == 1:
-                lb_array.append(lb_temp)
-                ub_array.append(ub_temp)
+    lb_array, ub_array = [], []
+    for block in blocks:
+        if isinstance(block, list) and block and block[0] == 'and':
+            atoms = block[1:]
         else:
-            raise ValueError("Something went wrong while processing vnnlib property with multiple inputs.")
+            atoms = [block]
+        lb_temp = lb_input.copy()
+        ub_temp = ub_input.copy()
+        for atom in atoms:
+            _apply_block_atom(atom, lb_temp, ub_temp, [], [], 0)
+        lb_array.append(lb_temp)
+        ub_array.append(ub_temp)
 
     return lb_array, ub_array

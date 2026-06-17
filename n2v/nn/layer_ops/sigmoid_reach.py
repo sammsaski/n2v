@@ -152,9 +152,12 @@ def _s_curve_single_star_approx(
     varying_map = np.where(np.abs(ubs - lbs) >= 1e-10)[0]
 
     if len(varying_map) == 0:
-        # All constant — just apply function
+        # All constant — apply the function to the constant VALUE
+        # (lbs == ubs), not the center column: a star can carry its
+        # value in constrained predicate variables (e.g. the z vars of
+        # a McCormick product) with a zero center column.
         new_V = np.zeros_like(I.V)
-        new_V[:, 0] = func(I.V[:, 0])
+        new_V[:, 0] = func(lbs)
         return Star(new_V, I.C, I.d, I.predicate_lb, I.predicate_ub)
 
     # Evaluate function and derivative at bounds

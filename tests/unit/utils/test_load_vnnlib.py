@@ -272,14 +272,18 @@ class TestLoadVNNLibErrorHandling:
             load_vnnlib('/nonexistent/path/to/file.vnnlib')
 
     def test_empty_file(self):
-        """Test handling of empty file."""
+        """An empty/unparseable spec must raise, not silently return empty.
+
+        Silently returning an empty spec means 'verify nothing' — the
+        verifier would report a vacuous result. ``load_vnnlib`` guards
+        against this and raises.
+        """
         with tempfile.NamedTemporaryFile(mode='w', suffix='.vnnlib', delete=False) as f:
             f.write("")
             temp_file = f.name
 
         try:
-            prop = load_vnnlib(temp_file)
-            # Should return empty/default structure
-            assert prop['lb'] is None or len(prop['lb']) == 0
+            with pytest.raises(ValueError, match='empty'):
+                load_vnnlib(temp_file)
         finally:
             os.unlink(temp_file)

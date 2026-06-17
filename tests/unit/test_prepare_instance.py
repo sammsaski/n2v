@@ -205,3 +205,42 @@ class TestLoadAndPrepare:
 
         assert result['input_shape'] == (1, 4, 4)
         assert isinstance(result['regions'][0]['input_set'], ImageStar)
+
+
+class TestCreateInputSetChannelOrder:
+    """VNN-LIB X variables follow the ONNX input order (C, H, W
+    row-major); ImageStar stores HWC. A multi-channel center must be
+    permuted, not reshaped — the old direct reshape channel-scrambled
+    every RGB model's input (caught by the cifar100 degenerate-exactness
+    oracle, dev 1.1e+01)."""
+
+    def test_rgb_center_is_chw_permuted(self):
+        from prepare_instance import create_input_set
+
+        shape = (3, 2, 2)
+        vec = np.arange(12, dtype=np.float64)  # ONNX (C,H,W) flat order
+        s = create_input_set(vec, vec, shape)
+        assert isinstance(s, ImageStar)
+        center = s.V[:, :, :, 0]
+        expected = vec.reshape(3, 2, 2).transpose(1, 2, 0)
+        np.testing.assert_allclose(center, expected)
+
+    def test_rgb_conv_degenerate_exact(self):
+        """End-to-end pin: reach of a point through an RGB conv must
+        reproduce torch's output (in HWC order) exactly."""
+        from prepare_instance import create_input_set
+        from n2v.nn.layer_ops.dispatcher import reach_layer
+
+        torch.manual_seed(0)
+        conv = nn.Conv2d(3, 2, 3, padding=1)
+        shape = (3, 4, 4)
+        vec = np.arange(48, dtype=np.float64) / 10.0
+        out = reach_layer(conv, [create_input_set(vec, vec, shape)],
+                          'approx')[0]
+        lo, hi = out.get_ranges()
+        center = (np.asarray(lo).flatten() + np.asarray(hi).flatten()) / 2
+        with torch.no_grad():
+            y = conv(torch.tensor(vec, dtype=torch.float32)
+                     .reshape(1, *shape)).numpy()[0]
+        np.testing.assert_allclose(center, y.transpose(1, 2, 0).flatten(),
+                                   atol=1e-6)

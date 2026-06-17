@@ -12,6 +12,37 @@ from collections import OrderedDict
 import onnx
 from onnx2torch import convert
 
+# Opset to upgrade old models to when onnx2torch lacks a converter for
+# their version (onnx2torch's converters target modern opsets, ~9-17).
+_ONNX2TORCH_TARGET_OPSET = 13
+
+# Shape-computation ops the set-based reach cannot propagate; folded away
+# by onnx-simplifier under a fixed input shape when present.
+_SHAPE_SUBGRAPH_OPS = {"Shape", "ConstantOfShape"}
+
+
+def _fold_shape_subgraph(onnx_model):
+    """If the model computes shapes with Shape/ConstantOfShape, fix the
+    input shape (dynamic dims -> 1) and constant-fold via onnx-simplifier
+    so the reach never sees those ops. Returns the original model
+    unchanged on any failure or when those ops are absent."""
+    ops = {n.op_type for n in onnx_model.graph.node}
+    if not (ops & _SHAPE_SUBGRAPH_OPS):
+        return onnx_model
+    try:
+        import onnxsim
+        inp = onnx_model.graph.input[0]
+        shape = [d.dim_value if d.dim_value > 0 else 1
+                 for d in inp.type.tensor_type.shape.dim]
+        simplified, ok = onnxsim.simplify(
+            onnx_model, overwrite_input_shapes={inp.name: shape})
+        if ok and not ({n.op_type for n in simplified.graph.node}
+                       & _SHAPE_SUBGRAPH_OPS):
+            return simplified
+    except Exception:  # noqa: BLE001 — fall back to the original model
+        pass
+    return onnx_model
+
 
 def load_pytorch(
     model_path: Optional[Union[str, Path]] = None,
@@ -94,8 +125,32 @@ def load_onnx(
     onnx_model = onnx.load(str(onnx_path))
     onnx.checker.check_model(onnx_model)
 
-    # Convert to PyTorch
-    pytorch_model = convert(onnx_model)
+    # Transformer-style models (vit) compute reshape/transpose targets
+    # with Shape / ConstantOfShape ops that the set-based reach cannot
+    # propagate. With a fixed batch they are pure shape arithmetic and
+    # constant-fold away; onnx-simplifier does this. Gated on those ops
+    # being present so ordinary models are untouched.
+    onnx_model = _fold_shape_subgraph(onnx_model)
+
+    # Convert to PyTorch. onnx2torch registers converters per opset
+    # version; old models (e.g. vgg16-7 is opset 8, but onnx2torch's Gemm
+    # only covers 9/11/13) raise "Converter is not implemented (... Gemm,
+    # version=8)". Upgrade such models to a supported opset and retry —
+    # an n2v-side compatibility shim, not a change to the converter.
+    try:
+        pytorch_model = convert(onnx_model)
+    except NotImplementedError as exc:
+        if "Converter is not implemented" not in str(exc):
+            raise
+        try:
+            from onnx import version_converter
+            upgraded = version_converter.convert_version(
+                onnx_model, _ONNX2TORCH_TARGET_OPSET)
+        except Exception as up_exc:  # noqa: BLE001
+            raise NotImplementedError(
+                f"{exc}; opset upgrade to {_ONNX2TORCH_TARGET_OPSET} also "
+                f"failed: {up_exc}") from exc
+        pytorch_model = convert(upgraded)
     pytorch_model.eval()
 
     return pytorch_model

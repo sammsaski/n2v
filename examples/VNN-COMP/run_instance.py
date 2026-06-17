@@ -100,17 +100,10 @@ def verify_instance(
         prop = load_vnnlib(vnnlib_path)
         input_shape = get_input_shape(onnx_path)
 
-        lb_raw = prop['lb']
-        ub_raw = prop['ub']
-        property_spec = prop['prop']
-
-        # Normalize to list of regions
-        if not isinstance(lb_raw, list):
-            lb_list = [lb_raw]
-            ub_list = [ub_raw]
-        else:
-            lb_list = lb_raw
-            ub_list = ub_raw
+        # Normalized (region, prop) pairs: each input region is verified
+        # against its OWN output property (combined-form specs pair them
+        # per-disjunct; simple specs share one prop across regions).
+        pairs = prop['pairs']
 
         # Get benchmark config (falls back to DEFAULT_CONFIG if category is None/unknown)
         cfg = get_config(category, onnx_path, vnnlib_path)
@@ -126,14 +119,14 @@ def verify_instance(
         # Stage 1: Falsification
         if no_falsify:
             logger.info("Falsification skipped (--no-falsify)")
-        for lb_region, ub_region in zip(lb_list, ub_list):
+        for pair in pairs:
             if no_falsify:
                 break
             try:
-                lb_shaped = np.asarray(lb_region, dtype=np.float64).reshape(input_shape)
-                ub_shaped = np.asarray(ub_region, dtype=np.float64).reshape(input_shape)
+                lb_shaped = np.asarray(pair['lb'], dtype=np.float64).reshape(input_shape)
+                ub_shaped = np.asarray(pair['ub'], dtype=np.float64).reshape(input_shape)
                 falsify_result, cex = falsify(
-                    model, lb_shaped, ub_shaped, property_spec,
+                    model, lb_shaped, ub_shaped, pair['prop'],
                     method=falsify_method,
                     n_samples=falsify_samples,
                     seed=42,
@@ -153,20 +146,19 @@ def verify_instance(
 
         for reach_method, reach_kwargs in cfg['reach_methods']:
             all_unsat = True
-            for lb_region, ub_region in zip(lb_list, ub_list):
-                input_set = create_input_set(lb_region, ub_region, input_shape)
+            for pair in pairs:
+                input_set = create_input_set(pair['lb'], pair['ub'], input_shape)
                 try:
                     extra_kwargs = dict(reach_kwargs)
-                    if reach_method == 'probabilistic':
-                        extra_kwargs['input_shape'] = input_shape
-                    else:
+                    extra_kwargs['input_shape'] = input_shape
+                    if reach_method != 'probabilistic':
                         extra_kwargs['precompute_bounds'] = 'ibp'
 
                     reach_sets = net.reach(
                         input_set, method=reach_method,
                         **extra_kwargs,
                     )
-                    verdict = verify_specification(reach_sets, property_spec)
+                    verdict = verify_specification(reach_sets, pair['prop'])
 
                     if verdict.verdict == "SAT":
                         return {

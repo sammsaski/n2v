@@ -27,8 +27,12 @@ from . import leakyrelu_reach
 from . import sigmoid_reach
 from . import tanh_reach
 from . import conv1d_reach
+from . import conv_transpose2d_reach
 from . import upsample_reach
 from . import sign_reach
+from . import round_reach
+from . import softmax_reach
+from . import trig_reach
 
 # ONNX types (onnx2torch is a required dependency)
 from onnx2torch.node_converters.global_average_pool import (
@@ -38,19 +42,25 @@ from onnx2torch.node_converters.global_average_pool import (
 from onnx2torch.node_converters.reduce import OnnxReduceStaticAxes, OnnxReduceSumStaticAxes
 from onnx2torch.node_converters.resize import OnnxResize
 from onnx2torch.node_converters.neg import OnnxNeg
+from onnx2torch.node_converters.roundings import OnnxRound
 from onnx2torch.node_converters.cast import OnnxCast
 from onnx2torch.node_converters.functions import OnnxFunction
 from onnx2torch.node_converters.transpose import OnnxTranspose
 from onnx2torch.node_converters.flatten import OnnxFlatten
+from onnx2torch.node_converters.squeeze import OnnxSqueezeStaticAxes
+from onnx2torch.node_converters.unsqueeze import OnnxUnsqueezeStaticAxes
 
 _ONNX_GAP_TYPES = (nn.AdaptiveAvgPool2d, OnnxGlobalAveragePool, OnnxGlobalAveragePoolWithKnownInputShape)
 _ONNX_REDUCE_TYPES = (OnnxReduceStaticAxes, OnnxReduceSumStaticAxes)
 _ONNX_RESIZE_TYPES = (nn.Upsample, OnnxResize)
 _ONNX_NEG_TYPES = (OnnxNeg,)
+_ONNX_ROUND_TYPES = (OnnxRound,)
 _ONNX_CAST_TYPES = (OnnxCast,)
 _ONNX_FUNCTION_TYPES = (OnnxFunction,)
 _ONNX_TRANSPOSE_TYPES = (OnnxTranspose,)
 _ONNX_FLATTEN_TYPES = (nn.Flatten, OnnxFlatten)
+# Inserting/removing size-1 axes never reorders entries: flat identity.
+_SHAPE_IDENTITY_TYPES = (OnnxSqueezeStaticAxes, OnnxUnsqueezeStaticAxes)
 
 
 def reach_layer(
@@ -151,23 +161,37 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
                 precomputed_bounds=precomputed_bounds,
             )
 
-    elif isinstance(layer, nn.Sigmoid):
+    elif _is_sigmoid_layer(layer):
         lp_solver = kwargs.get('lp_solver', 'default')
         if method == 'exact':
             warnings.warn("Sigmoid does not support exact method; using approx.")
         return sigmoid_reach.sigmoid_star_approx(input_sets, lp_solver=lp_solver)
 
-    elif isinstance(layer, nn.Tanh):
+    elif _is_tanh_layer(layer):
         lp_solver = kwargs.get('lp_solver', 'default')
         if method == 'exact':
             warnings.warn("Tanh does not support exact method; using approx.")
         return tanh_reach.tanh_star_approx(input_sets, lp_solver=lp_solver)
+
+    elif _trig_kind(layer) is not None:
+        lp_solver = kwargs.get('lp_solver', 'default')
+        return trig_reach.trig_star(input_sets, _trig_kind(layer), lp_solver=lp_solver)
+
+    elif isinstance(layer, nn.Softmax):
+        lp_solver = kwargs.get('lp_solver', 'default')
+        if method == 'exact':
+            warnings.warn("Softmax does not support exact method; using approx.")
+        return softmax_reach.softmax_star(layer, input_sets, lp_solver=lp_solver)
 
     elif isinstance(layer, nn.Conv2d):
         return conv2d_reach.conv2d_star(layer, input_sets, method=method, **kwargs)
 
     elif isinstance(layer, nn.Conv1d):
         return conv1d_reach.conv1d_star(layer, input_sets, **kwargs)
+
+    elif isinstance(layer, nn.ConvTranspose2d):
+        return conv_transpose2d_reach.conv_transpose2d_star(
+            layer, input_sets, method=method, **kwargs)
 
     elif isinstance(layer, nn.MaxPool2d):
         lp_solver = kwargs.get('lp_solver', 'default')
@@ -201,6 +225,11 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, _ONNX_NEG_TYPES):
         return _neg_sets_star(input_sets)
 
+    elif isinstance(layer, _ONNX_ROUND_TYPES):
+        return round_reach.round_star(
+            layer, input_sets,
+            lp_solver=kwargs.get('lp_solver', 'default'))
+
     elif isinstance(layer, _ONNX_CAST_TYPES):
         return input_sets
 
@@ -209,6 +238,9 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
 
     elif _is_sign_layer(layer):
         return sign_reach.sign_star(layer, input_sets, method, **kwargs)
+
+    elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
+        return input_sets
 
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
@@ -238,14 +270,21 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, nn.LeakyReLU):
         return leakyrelu_reach.leakyrelu_zono_approx(input_sets, gamma=layer.negative_slope)
 
-    elif isinstance(layer, nn.Sigmoid):
+    elif _is_sigmoid_layer(layer):
         return sigmoid_reach.sigmoid_zono_approx(input_sets)
 
-    elif isinstance(layer, nn.Tanh):
+    elif _is_tanh_layer(layer):
         return tanh_reach.tanh_zono_approx(input_sets)
+
+    elif _trig_kind(layer) is not None:
+        return trig_reach.trig_zono(input_sets, _trig_kind(layer))
 
     elif isinstance(layer, nn.Conv2d):
         return conv2d_reach.conv2d_zono(layer, input_sets)
+
+    elif isinstance(layer, nn.ConvTranspose2d):
+        return conv_transpose2d_reach.conv_transpose2d_zono(
+            layer, input_sets)
 
     elif isinstance(layer, nn.Conv1d):
         return conv1d_reach.conv1d_zono(layer, input_sets, **kwargs)
@@ -277,6 +316,9 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, _ONNX_NEG_TYPES):
         return _neg_sets_zono(input_sets)
 
+    elif isinstance(layer, _ONNX_ROUND_TYPES):
+        return round_reach.round_zono(layer, input_sets)
+
     elif isinstance(layer, _ONNX_CAST_TYPES):
         return input_sets
 
@@ -285,6 +327,9 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
 
     elif _is_sign_layer(layer):
         return sign_reach.sign_zono(input_sets)
+
+    elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
+        return input_sets
 
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
@@ -313,11 +358,14 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
     elif isinstance(layer, nn.LeakyReLU):
         return leakyrelu_reach.leakyrelu_box(input_sets, gamma=layer.negative_slope)
 
-    elif isinstance(layer, nn.Sigmoid):
+    elif _is_sigmoid_layer(layer):
         return sigmoid_reach.sigmoid_box(input_sets)
 
-    elif isinstance(layer, nn.Tanh):
+    elif _is_tanh_layer(layer):
         return tanh_reach.tanh_box(input_sets)
+
+    elif _trig_kind(layer) is not None:
+        return trig_reach.trig_box(input_sets, _trig_kind(layer))
 
     elif isinstance(layer, nn.Conv1d):
         return conv1d_reach.conv1d_box(layer, input_sets, **kwargs)
@@ -334,6 +382,12 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
     elif isinstance(layer, _ONNX_NEG_TYPES):
         return _neg_sets_box(input_sets)
 
+    elif isinstance(layer, _ONNX_ROUND_TYPES):
+        return round_reach.round_box(layer, input_sets)
+
+    elif isinstance(layer, nn.Softmax):
+        return softmax_reach.softmax_box(layer, input_sets)
+
     elif isinstance(layer, _ONNX_CAST_TYPES):
         return input_sets
 
@@ -342,6 +396,9 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
 
     elif _is_sign_layer(layer):
         return sign_reach.sign_box(input_sets)
+
+    elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
+        return input_sets
 
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
@@ -384,6 +441,9 @@ def _reach_layer_hexatope(layer: nn.Module, input_sets: List, method: str, **kwa
         return _neg_sets_hexatope(input_sets)
 
     elif isinstance(layer, _ONNX_CAST_TYPES):
+        return input_sets
+
+    elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
         return input_sets
 
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
@@ -429,6 +489,9 @@ def _reach_layer_octatope(layer: nn.Module, input_sets: List, method: str, **kwa
     elif isinstance(layer, _ONNX_CAST_TYPES):
         return input_sets
 
+    elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
+        return input_sets
+
     elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
         return input_sets
 
@@ -453,6 +516,37 @@ def _is_sign_layer(layer: nn.Module) -> bool:
     if isinstance(layer, _ONNX_FUNCTION_TYPES):
         return getattr(layer, 'function', None) is torch.sign
     return False
+
+
+def _is_tanh_layer(layer: nn.Module) -> bool:
+    """Tanh as nn.Tanh OR an OnnxFunction wrapping torch.tanh (a bare
+    ONNX Tanh node converts to the latter)."""
+    if isinstance(layer, nn.Tanh):
+        return True
+    if isinstance(layer, _ONNX_FUNCTION_TYPES):
+        return getattr(layer, 'function', None) is torch.tanh
+    return False
+
+
+def _is_sigmoid_layer(layer: nn.Module) -> bool:
+    """Sigmoid as nn.Sigmoid OR an OnnxFunction wrapping torch.sigmoid."""
+    if isinstance(layer, nn.Sigmoid):
+        return True
+    if isinstance(layer, _ONNX_FUNCTION_TYPES):
+        return getattr(layer, 'function', None) is torch.sigmoid
+    return False
+
+
+def _trig_kind(layer: nn.Module):
+    """Return 'sin'/'cos' if layer is an OnnxFunction wrapping
+    torch.sin/torch.cos, else None."""
+    if isinstance(layer, _ONNX_FUNCTION_TYPES):
+        fn = getattr(layer, 'function', None)
+        if fn is torch.sin:
+            return 'sin'
+        if fn is torch.cos:
+            return 'cos'
+    return None
 
 
 # ===========================================================================
@@ -521,34 +615,101 @@ def _neg_sets_octatope(input_sets: List) -> List:
 
 
 # ===========================================================================
-# OnnxTranspose helpers — permute dimensions of sets
+# OnnxTranspose helpers — permute tensor AXES of sets
+#
+# Transpose is a bijection on tensor entries: x = c + V·a implies
+# transpose(x) = transpose(c) + transpose(V)·a, so permuting V's rows by
+# the same bijection is EXACT; constraints are untouched. ImageStar/
+# ImageZono carry their tensor shape, so arbitrary batch-preserving perms
+# are supported. Flat sets carry no shape: only perms that provably leave
+# the flat layout unchanged (the size-1 batch axis moving) are allowed —
+# anything else raises until shape tracking lands, replacing the previous
+# silent row-permutation which mis-read axis indices as row indices.
 # ===========================================================================
 
-def _transpose_sets_star(layer: nn.Module, input_sets: List) -> List:
-    """Permute rows of Star V matrix."""
+def _flat_perm_is_identity(perm) -> bool:
+    """Does the perm only move the (size-1) batch axis? Then the flat
+    data layout is unchanged regardless of the unknown tensor shape."""
+    if perm is None:
+        return False
+    non_batch = [p for p in perm if p != 0]
+    return all(a < b for a, b in zip(non_batch, non_batch[1:]))
+
+
+def _transpose_imagestar_perm(layer: nn.Module, rank: int = 4):
     perm = layer.perm
+    if perm is None:
+        perm = list(range(rank))[::-1]  # ONNX default: reverse all axes
+    return [int(p) for p in perm]
+
+
+def _transpose_sets_star(layer: nn.Module, input_sets: List) -> List:
     output_sets = []
     for s in input_sets:
-        new_V = s.V[perm, :]
-        output_sets.append(Star(new_V, s.C, s.d, s.predicate_lb, s.predicate_ub))
+        if isinstance(s, ImageStar):
+            perm = _transpose_imagestar_perm(layer)
+            if len(perm) != 4 or perm[0] != 0:
+                raise NotImplementedError(
+                    f"ImageStar transpose requires a batch-preserving "
+                    f"rank-4 perm, got {perm}"
+                )
+            spatial = [p - 1 for p in perm[1:]]   # over (C, H, W)
+            V_chw = np.transpose(s.V, (2, 0, 1, 3))
+            V_t = np.transpose(V_chw, spatial + [3])
+            c_new, h_new, w_new = V_t.shape[0], V_t.shape[1], V_t.shape[2]
+            V_hwc = np.transpose(V_t, (1, 2, 0, 3))
+            output_sets.append(ImageStar(
+                V_hwc, s.C, s.d, s.predicate_lb, s.predicate_ub,
+                h_new, w_new, c_new))
+        elif _flat_perm_is_identity(layer.perm):
+            output_sets.append(s)
+        else:
+            raise NotImplementedError(
+                f"Transpose with perm={layer.perm} on a flat Star needs "
+                f"tensor-shape tracking (only batch-axis moves are safe "
+                f"without it)"
+            )
     return output_sets
 
 
 def _transpose_sets_zono(layer: nn.Module, input_sets: List) -> List:
-    """Permute rows of Zono center and generators."""
-    perm = layer.perm
     output_sets = []
     for s in input_sets:
-        new_c = s.c[perm, :]
-        new_V = s.V[perm, :]
-        output_sets.append(Zono(new_c, new_V))
+        if isinstance(s, ImageZono):
+            perm = _transpose_imagestar_perm(layer)
+            if len(perm) != 4 or perm[0] != 0:
+                raise NotImplementedError(
+                    f"ImageZono transpose requires a batch-preserving "
+                    f"rank-4 perm, got {perm}"
+                )
+            spatial = [p - 1 for p in perm[1:]]
+            h, w, c = s.height, s.width, s.num_channels
+            # Row mapping via an index tensor (same path as the data).
+            idx = np.arange(h * w * c).reshape(h, w, c)      # HWC storage
+            idx_chw = np.transpose(idx, (2, 0, 1))
+            idx_t = np.transpose(idx_chw, spatial)
+            c_new, h_new, w_new = idx_t.shape
+            rows = np.transpose(idx_t, (1, 2, 0)).flatten()  # new HWC order
+            output_sets.append(ImageZono(
+                s.c[rows, :], s.V[rows, :], h_new, w_new, c_new))
+        elif _flat_perm_is_identity(layer.perm):
+            output_sets.append(s)
+        else:
+            raise NotImplementedError(
+                f"Transpose with perm={layer.perm} on a flat Zono needs "
+                f"tensor-shape tracking"
+            )
     return output_sets
 
 
 def _transpose_sets_box(layer: nn.Module, input_sets: List) -> List:
-    """Permute rows of Box bounds."""
-    perm = layer.perm
     output_sets = []
     for s in input_sets:
-        output_sets.append(Box(s.lb[perm, :], s.ub[perm, :]))
+        if _flat_perm_is_identity(layer.perm):
+            output_sets.append(s)
+        else:
+            raise NotImplementedError(
+                f"Transpose with perm={layer.perm} on a Box needs "
+                f"tensor-shape tracking"
+            )
     return output_sets

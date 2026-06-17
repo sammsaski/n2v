@@ -76,7 +76,9 @@ class TestConcatTwoZonos:
     """Test concatenation of two Zonos."""
 
     def test_concat_two_zonos(self):
-        """Concat two Zonos: vstack c and V."""
+        """Concat two Zonos: generator columns from different sets are
+        not the same noise symbols, so generators compose
+        block-diagonally (sound; per-dim ranges unchanged)."""
         c1 = np.array([[1.0], [2.0]])
         V1 = np.array([[0.5, 0.0], [0.0, 0.3]])
         c2 = np.array([[3.0], [4.0], [5.0]])
@@ -90,7 +92,10 @@ class TestConcatTwoZonos:
 
         assert isinstance(out, Zono)
         assert np.allclose(out.c, np.vstack([c1, c2]))
-        assert np.allclose(out.V, np.vstack([V1, V2]))
+        expected_V = np.zeros((5, 4))
+        expected_V[:2, :2] = V1
+        expected_V[2:, 2:] = V2
+        assert np.allclose(out.V, expected_V)
         assert out.dim == 5  # 2 + 3
 
 

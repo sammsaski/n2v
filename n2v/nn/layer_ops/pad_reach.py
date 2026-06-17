@@ -41,8 +41,11 @@ def _extract_padding(layer: nn.Module) -> Tuple[int, int, int, int]:
                 top, left = int(pads[2]), int(pads[3])
                 bottom, right = int(pads[6]), int(pads[7])
                 return (left, right, top, bottom)
-        # Fallback
-        return (0, 0, 0, 0)
+        # No resolvable pads: fail loud rather than silently apply zero
+        # padding (which would produce a wrong, smaller output).
+        raise NotImplementedError(
+            f"Cannot extract pad amounts from {type(layer).__name__}; "
+            f"the pads input was not resolved")
 
     raise TypeError(f"Cannot extract padding from {type(layer).__name__}")
 

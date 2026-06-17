@@ -45,14 +45,13 @@ def get_input_shape(onnx_path: str) -> tuple:
     input_tensor = true_inputs[0]
     dims = input_tensor.type.tensor_type.shape.dim
 
-    # Strip batch dimension (first dim), extract remaining
-    shape = []
-    for i, d in enumerate(dims):
-        if i == 0:
-            continue  # skip batch dim
-        shape.append(d.dim_value)
-
-    return tuple(shape)
+    # Strip the leading dim only when it looks like a batch dim
+    # (1, or 0 = dynamic). A rank-1 input (e.g. a flat vector packing
+    # image + spec params) has no batch dim to strip.
+    shape = tuple(d.dim_value for d in dims)
+    if len(shape) > 1 and shape[0] in (0, 1):
+        shape = shape[1:]
+    return shape
 
 
 from n2v.sets import Star
@@ -76,10 +75,13 @@ def create_input_set(lb: np.ndarray, ub: np.ndarray, input_shape: tuple):
     ub = np.asarray(ub, dtype=np.float64).flatten()
 
     if len(input_shape) == 3:
-        # Spatial input (C, H, W) -> ImageStar
+        # Spatial input (C, H, W) -> ImageStar. VNN-LIB X variables
+        # follow the ONNX input tensor order, i.e. (C, H, W) row-major;
+        # ImageStar.from_bounds expects HWC. For C == 1 the permutation
+        # is the identity.
         C, H, W = input_shape
-        lb_col = lb.reshape(-1, 1)
-        ub_col = ub.reshape(-1, 1)
+        lb_col = lb.reshape(C, H, W).transpose(1, 2, 0).reshape(-1, 1)
+        ub_col = ub.reshape(C, H, W).transpose(1, 2, 0).reshape(-1, 1)
         return ImageStar.from_bounds(lb_col, ub_col, height=H, width=W, num_channels=C)
     else:
         # Flat input (1D or 2D flattened) -> Star

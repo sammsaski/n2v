@@ -1,0 +1,14 @@
+name: n2v
+# ami: <fill in the prepared AWS AMI id for the competition machine>
+scripts_dir: examples/Submission/VNN_COMP2026/
+manual_installation_step: False
+run_installation_script_as_root: True
+run_post_installation_script_as_root: False
+run_toolkit_as_root: False
+description: >
+  n2v (NNV-Python): a Python toolbox for neural network verification. It
+  performs sound set-based reachability analysis (Star / Zonotope / Box /
+  ImageStar) for piecewise-linear and convolutional networks, with
+  falsification (random + PGD) for counterexample search, and probabilistic
+  verification via conformal inference for models beyond exact reach. n2v is
+  a Python translation of the MATLAB NNV tool.

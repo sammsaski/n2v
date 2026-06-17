@@ -252,22 +252,110 @@ def _ibp_sequential(
     return layer_bounds
 
 
+def _get_param_np(graph_module: Any, node: Any) -> np.ndarray:
+    """Extract a parameter tensor (get_attr or OnnxConstant) as a numpy array."""
+    if getattr(node, 'op', None) == 'call_module':
+        module = dict(graph_module.named_modules()).get(node.target)
+        if module is not None and hasattr(module, 'value'):
+            return module.value.detach().cpu().numpy()
+    obj = graph_module
+    for attr in node.target.split('.'):
+        obj = getattr(obj, attr)
+    return obj.detach().cpu().numpy()
+
+
+def _ibp_onnx_matmul(graph_module, node, node_bounds):
+    """IBP through OnnxMatMul ``y = x @ W`` (W a frozen parameter)."""
+    if len(node.args) != 2:
+        return None
+    a, w = node.args
+    if not (hasattr(a, 'name') and a.name in node_bounds):
+        return None
+    if getattr(w, 'op', None) != 'get_attr':
+        return None
+    W = _get_param_np(graph_module, w)
+    la, ua, _ = node_bounds[a.name]
+    new_lb, new_ub = _ibp_linear(la.flatten(), ua.flatten(), W.T, None)
+    return new_lb, new_ub, None
+
+
+def _ibp_onnx_binary(graph_module, node, module, node_bounds):
+    """IBP through OnnxBinaryMathOperation (Add/Sub/Mul/Div).
+
+    Handles both the residual case (two computed branches) and the
+    constant case (second operand a frozen parameter). Returns None when
+    the operation cannot be soundly propagated (e.g. a per-channel
+    constant that does not broadcast onto a flattened image), so the
+    caller marks the result untrusted and falls back to LP.
+    """
+    if len(node.args) != 2 or not hasattr(module, 'math_op_function'):
+        return None
+    a, b = node.args
+    op = module.math_op_function.__name__
+    a_known = hasattr(a, 'name') and a.name in node_bounds
+    b_known = hasattr(b, 'name') and b.name in node_bounds
+
+    if a_known and b_known:  # residual: both operands are computed sets
+        la, ua, sa = node_bounds[a.name]
+        lb2, ub2, _ = node_bounds[b.name]
+        la, ua, lb2, ub2 = (x.flatten() for x in (la, ua, lb2, ub2))
+        if la.shape != lb2.shape:
+            return None
+        if 'add' in op:
+            return la + lb2, ua + ub2, sa
+        if 'sub' in op:
+            return la - ub2, ua - lb2, sa
+        if op == 'mul':
+            p = np.stack([la * lb2, la * ub2, ua * lb2, ua * ub2])
+            return p.min(0), p.max(0), sa
+        return None
+
+    if not a_known or getattr(b, 'op', None) != 'get_attr':
+        return None
+    param = _get_param_np(graph_module, b).flatten()
+    la, ua, sa = node_bounds[a.name]
+    la, ua = la.flatten(), ua.flatten()
+    if param.size not in (1, la.size):
+        return None  # non-broadcastable (e.g. per-channel on flat image)
+    if op == 'mul':
+        p = np.stack([la * param, ua * param])
+        return p.min(0), p.max(0), sa
+    if op == '_onnx_div':
+        inv = 1.0 / param
+        p = np.stack([la * inv, ua * inv])
+        return p.min(0), p.max(0), sa
+    if 'add' in op:
+        return la + param, ua + param, sa
+    if 'sub' in op:
+        return la - param, ua - param, sa
+    return None
+
+
 def _ibp_graphmodule(
     graph_module: Any,
     lb: np.ndarray,
     ub: np.ndarray,
     spatial_shape: Optional[tuple] = None,
 ) -> Dict[str, Tuple[np.ndarray, np.ndarray]]:
-    """IBP for GraphModule (ONNX-converted) models."""
+    """IBP for GraphModule (ONNX-converted) models.
+
+    Tracks, per node, whether its bounds are *trusted* (every op on the
+    path was soundly propagated). Bounds are recorded for a nonlinear
+    layer only when its input is trusted — so an unhandled op makes the
+    pre-pass skip downstream layers (reach falls back to LP for them)
+    rather than attach stale / wrong-dimension bounds.
+    """
     import operator
 
     named_modules = dict(graph_module.named_modules())
-    node_bounds = {}  # node_name -> (lb, ub, spatial_shape)
+    node_bounds = {}    # node_name -> (lb, ub, spatial_shape)
+    node_trusted = {}   # node_name -> bool
     layer_bounds = {}
 
     for node in graph_module.graph.nodes:
         if node.op == 'placeholder':
             node_bounds[node.name] = (lb, ub, spatial_shape)
+            node_trusted[node.name] = True
 
         elif node.op == 'get_attr':
             pass
@@ -277,30 +365,48 @@ def _ibp_graphmodule(
             if module is None:
                 continue
 
-            # Get input bounds
-            cur_lb, cur_ub, cur_shape = lb, ub, spatial_shape
-            if node.args and hasattr(node.args[0], 'name') and node.args[0].name in node_bounds:
-                cur_lb, cur_ub, cur_shape = node_bounds[node.args[0].name]
+            in_name = (node.args[0].name
+                       if node.args and hasattr(node.args[0], 'name')
+                       else None)
+            cur_lb, cur_ub, cur_shape = node_bounds.get(
+                in_name, (lb, ub, spatial_shape))
+            cur_trusted = node_trusted.get(in_name, True)
 
-            # Record bounds before nonlinear layers
-            if isinstance(module, NONLINEAR_TYPES):
-                layer_bounds[node.name] = (cur_lb.reshape(-1, 1), cur_ub.reshape(-1, 1))
+            # Record bounds before nonlinear layers (only if trusted).
+            if isinstance(module, NONLINEAR_TYPES) and cur_trusted:
+                layer_bounds[node.name] = (
+                    cur_lb.reshape(-1, 1), cur_ub.reshape(-1, 1))
 
-            # Propagate
-            try:
-                new_lb, new_ub, new_shape = _ibp_propagate_layer(module, cur_lb, cur_ub, cur_shape)
+            # Propagate. Try ONNX graph ops first, then standard layers.
+            module_type = type(module).__name__
+            result = None
+            if module_type == 'OnnxMatMul':
+                result = _ibp_onnx_matmul(graph_module, node, node_bounds)
+            elif module_type == 'OnnxBinaryMathOperation':
+                result = _ibp_onnx_binary(
+                    graph_module, node, module, node_bounds)
+
+            if result is not None:
+                new_lb, new_ub, new_shape = result
                 node_bounds[node.name] = (new_lb, new_ub, new_shape)
-                lb, ub, spatial_shape = new_lb, new_ub, new_shape
-            except (NotImplementedError, Exception):
-                # For unsupported layers, pass through with infinite bounds
-                node_bounds[node.name] = (cur_lb, cur_ub, cur_shape)
-                lb, ub, spatial_shape = cur_lb, cur_ub, cur_shape
+                node_trusted[node.name] = cur_trusted
+            else:
+                try:
+                    new_lb, new_ub, new_shape = _ibp_propagate_layer(
+                        module, cur_lb, cur_ub, cur_shape)
+                    node_bounds[node.name] = (new_lb, new_ub, new_shape)
+                    node_trusted[node.name] = cur_trusted
+                except Exception:  # noqa: BLE001 - unknown op: stop trusting
+                    node_bounds[node.name] = (cur_lb, cur_ub, cur_shape)
+                    node_trusted[node.name] = False
 
         elif node.op == 'call_function':
             if node.target is operator.getitem:
                 src_node = node.args[0]
                 if hasattr(src_node, 'name') and src_node.name in node_bounds:
                     node_bounds[node.name] = node_bounds[src_node.name]
+                    node_trusted[node.name] = node_trusted.get(
+                        src_node.name, False)
 
         elif node.op == 'output':
             pass

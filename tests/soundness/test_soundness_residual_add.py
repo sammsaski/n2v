@@ -115,6 +115,147 @@ class TestResidualAddImageStarSoundness:
             )
 
 
+def _assert_contained(model_fns, combine, result, lb_in, ub_in, n=300,
+                      input_shape=None, seed=7):
+    """House soundness pattern: sample inputs, forward through torch,
+    assert every true output lies in the reach set's ranges."""
+    lo, hi = result.estimate_ranges()
+    lo, hi = lo.flatten(), hi.flatten()
+    rng = np.random.default_rng(seed)
+    for _ in range(n):
+        x = rng.uniform(lb_in, ub_in)
+        t = torch.tensor(x, dtype=torch.float32)
+        if input_shape is not None:
+            t = t.reshape(input_shape)
+        t = t.unsqueeze(0)
+        with torch.no_grad():
+            y = combine(*[f(t) for f in model_fns]).numpy().flatten()
+        assert np.all(y >= lo - 1e-5) and np.all(y <= hi + 1e-5), (
+            f"containment violated: y={y}, lo={lo}, hi={hi}")
+
+
+class TestResidualAddMismatchedPredicates:
+    """Residual adds where the branches do NOT share identical predicate
+    systems — the cersyve/cifar100/tinyimagenet/yolo failure class.
+
+    Before task 2.1 these either crashed (different predicate counts) or
+    silently took the shared-predicate path on shape alone (equal counts,
+    different constraints — unsound)."""
+
+    def test_relu_on_one_branch(self):
+        """cersyve shape: relu(W1 x) + W2 x — approx-star ReLU appends
+        predicates on one branch only. Used to crash with a broadcast
+        error."""
+        torch.manual_seed(1)
+        W1 = nn.Linear(4, 4)
+        W2 = nn.Linear(4, 4)
+        relu = nn.ReLU()
+        star = Star.from_bounds(np.full(4, -1.0), np.ones(4))
+
+        branch_a = reach_layer(relu, reach_layer(W1, [star], 'approx'),
+                               'approx')
+        branch_b = reach_layer(W2, [star], 'approx')
+        result = _add_sets(branch_a, branch_b, 'add')[0]
+
+        _assert_contained(
+            [lambda t: relu(W1(t)), W2], lambda a, b: a + b, result,
+            np.full(4, -1.0), np.ones(4))
+
+    def test_relu_on_both_branches(self):
+        """ResNet-trunk shape: relu(W1 x) + relu(W2 x) — both branches
+        append their own (different) relaxation predicates."""
+        torch.manual_seed(2)
+        W1 = nn.Linear(3, 5)
+        W2 = nn.Linear(3, 5)
+        relu = nn.ReLU()
+        star = Star.from_bounds(np.full(3, -1.0), np.ones(3))
+
+        branch_a = reach_layer(relu, reach_layer(W1, [star], 'approx'),
+                               'approx')
+        branch_b = reach_layer(relu, reach_layer(W2, [star], 'approx'),
+                               'approx')
+        result = _add_sets(branch_a, branch_b, 'add')[0]
+
+        _assert_contained(
+            [lambda t: relu(W1(t)), lambda t: relu(W2(t))],
+            lambda a, b: a + b, result,
+            np.full(3, -1.0), np.ones(3))
+
+    def test_equal_counts_different_constraints(self):
+        """relu(x) + relu(-x) = |x| on x in [-1,1]: both branches gain
+        exactly ONE relaxation predicate (same nVar) but with DIFFERENT
+        constraints. Shape-based predicate sharing is unsound here; the
+        constraint systems must be compared, not the shapes."""
+        x_id = nn.Linear(1, 1, bias=False)
+        x_neg = nn.Linear(1, 1, bias=False)
+        with torch.no_grad():
+            x_id.weight.copy_(torch.tensor([[1.0]]))
+            x_neg.weight.copy_(torch.tensor([[-1.0]]))
+        relu = nn.ReLU()
+        star = Star.from_bounds(np.array([-1.0]), np.array([1.0]))
+
+        branch_a = reach_layer(relu, reach_layer(x_id, [star], 'approx'),
+                               'approx')
+        branch_b = reach_layer(relu, reach_layer(x_neg, [star], 'approx'),
+                               'approx')
+        assert branch_a[0].nVar == branch_b[0].nVar  # the trap
+        result = _add_sets(branch_a, branch_b, 'add')[0]
+
+        _assert_contained(
+            [lambda t: relu(x_id(t)), lambda t: relu(x_neg(t))],
+            lambda a, b: a + b, result,
+            np.array([-1.0]), np.array([1.0]), n=500)
+        # |x| reaches 1.0 at x=+/-1: the set must cover it
+        lo, hi = result.estimate_ranges()
+        assert hi.flatten()[0] >= 1.0 - 1e-5
+
+    def test_identical_constraints_stay_exact(self):
+        """Two LINEAR branches share the ancestor's predicate system
+        exactly -> the join must remain the exact shared-predicate sum
+        (W1+W2)x, not a loose Minkowski sum."""
+        torch.manual_seed(3)
+        W1 = nn.Linear(2, 2, bias=False)
+        W2 = nn.Linear(2, 2, bias=False)
+        star = Star.from_bounds(np.full(2, -1.0), np.ones(2))
+
+        result = _add_sets(reach_layer(W1, [star], 'approx'),
+                           reach_layer(W2, [star], 'approx'), 'add')[0]
+        lo, hi = result.estimate_ranges()
+
+        Wsum = (W1.weight + W2.weight).detach().numpy()
+        exact_hi = np.abs(Wsum).sum(axis=1)   # max of Wsum @ x over the box
+        np.testing.assert_allclose(hi.flatten(), exact_hi, atol=1e-6)
+        np.testing.assert_allclose(lo.flatten(), -exact_hi, atol=1e-6)
+
+    def test_mismatched_imagestar(self):
+        """yolo/cifar shape: conv->relu branch + conv skip on ImageStars."""
+        torch.manual_seed(4)
+        conv1 = nn.Conv2d(1, 2, 3, padding=1)
+        conv2 = nn.Conv2d(1, 2, 1)
+        relu = nn.ReLU()
+        lb = np.zeros((3, 3, 1))
+        ub = np.ones((3, 3, 1)) * 0.5
+        img = ImageStar.from_bounds(lb, ub, height=3, width=3,
+                                    num_channels=1)
+
+        branch_a = reach_layer(relu, reach_layer(conv1, [img], 'approx'),
+                               'approx')
+        branch_b = reach_layer(conv2, [img], 'approx')
+        result = _add_sets(branch_a, branch_b, 'add')[0]
+
+        lo, hi = result.estimate_ranges()
+        lo, hi = lo.flatten(), hi.flatten()
+        rng = np.random.default_rng(11)
+        for _ in range(200):
+            point = rng.uniform(0.0, 0.5, size=(3, 3, 1))
+            t = torch.tensor(point.transpose(2, 0, 1)[np.newaxis],
+                             dtype=torch.float32)
+            with torch.no_grad():
+                y = (relu(conv1(t)) + conv2(t)).numpy()
+            y = y[0].transpose(1, 2, 0).flatten()
+            assert np.all(y >= lo - 1e-5) and np.all(y <= hi + 1e-5)
+
+
 class TestResidualAddZonoSoundness:
     """Soundness tests for residual add with Zono sets."""
 
