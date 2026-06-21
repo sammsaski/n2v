@@ -275,7 +275,16 @@ def _ibp_onnx_matmul(graph_module, node, node_bounds):
         return None
     W = _get_param_np(graph_module, w)
     la, ua, _ = node_bounds[a.name]
-    new_lb, new_ub = _ibp_linear(la.flatten(), ua.flatten(), W.T, None)
+    la_flat = la.flatten()
+    # Soundness/robustness guard: only the plain flat ``x @ W`` form (W a 2-D matrix whose
+    # contraction dim matches the flattened activation) is handled here. For any other shape
+    # (multi-dim left operand, weight-on-the-left, conv-flattened/batched matmul) return None
+    # so the caller falls back to the untrusted/LP path -- mirrors ``_ibp_onnx_binary``. IBP is
+    # only a precompute speedup, so skipping it stays sound and avoids a hard ValueError crash
+    # on these matmuls (see status repo CRASH_ROOTCAUSE.md, Bug A).
+    if W.ndim != 2 or la_flat.shape[0] != W.shape[0]:
+        return None
+    new_lb, new_ub = _ibp_linear(la_flat, ua.flatten(), W.T, None)
     return new_lb, new_ub, None
 
 
@@ -380,11 +389,14 @@ def _ibp_graphmodule(
             # Propagate. Try ONNX graph ops first, then standard layers.
             module_type = type(module).__name__
             result = None
-            if module_type == 'OnnxMatMul':
-                result = _ibp_onnx_matmul(graph_module, node, node_bounds)
-            elif module_type == 'OnnxBinaryMathOperation':
-                result = _ibp_onnx_binary(
-                    graph_module, node, module, node_bounds)
+            try:
+                if module_type == 'OnnxMatMul':
+                    result = _ibp_onnx_matmul(graph_module, node, node_bounds)
+                elif module_type == 'OnnxBinaryMathOperation':
+                    result = _ibp_onnx_binary(
+                        graph_module, node, module, node_bounds)
+            except Exception:  # noqa: BLE001 - IBP precompute is an optimization; never crash reach
+                result = None
 
             if result is not None:
                 new_lb, new_ub, new_shape = result
