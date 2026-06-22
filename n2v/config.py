@@ -6,6 +6,8 @@ This module provides global settings for parallelization, LP solvers, and other 
 
 from typing import Optional, Union
 
+from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp_solver
+
 
 class Config:
     """Global configuration for N2V."""
@@ -17,8 +19,8 @@ class Config:
         self._auto_parallel = True  # Automatically use parallel for dim > threshold
         self._parallel_threshold = 10  # Minimum dimension to use parallel
 
-        # LP solver settings
-        self._default_lp_solver = 'linprog'  # HiGHS via SciPy (fast C++ solver)
+        # LP solver settings: stored as LPSolver enum; setter coerces from str.
+        self._default_lp_solver: LPSolver = LPSolver.LINPROG
 
     @property
     def parallel_lp(self) -> bool:
@@ -65,24 +67,33 @@ class Config:
         self._parallel_threshold = value
 
     @property
-    def lp_solver(self) -> str:
-        """Default LP solver to use."""
+    def lp_solver(self) -> LPSolver:
+        """Default LP solver to use (returns the :class:`LPSolver` enum).
+
+        Because ``LPSolver`` subclasses ``str``, callers comparing against
+        legacy strings (``'linprog'``, ``'GUROBI'``, ...) still work.
+        """
         return self._default_lp_solver
 
     @lp_solver.setter
-    def lp_solver(self, value: str) -> None:
-        """Set default LP solver."""
-        self._default_lp_solver = str(value)
+    def lp_solver(self, value) -> None:
+        """Set default LP solver; accepts ``LPSolver``, str, or None."""
+        # ``allow_sentinel=False`` ensures the global never holds DEFAULT,
+        # which would otherwise recurse back into the config.
+        resolved = _resolve_lp_solver(value)
+        if resolved is LPSolver.DEFAULT:
+            resolved = LPSolver.LINPROG
+        self._default_lp_solver = resolved
 
     @property
-    def default_lp_solver(self) -> str:
+    def default_lp_solver(self) -> LPSolver:
         """Default LP solver to use (alias for lp_solver)."""
         return self._default_lp_solver
 
     @default_lp_solver.setter
-    def default_lp_solver(self, value: str) -> None:
+    def default_lp_solver(self, value) -> None:
         """Set default LP solver (alias for lp_solver)."""
-        self._default_lp_solver = str(value)
+        self.lp_solver = value
 
     def should_use_parallel(self, dim: int) -> bool:
         """
@@ -124,14 +135,14 @@ class Config:
         self._n_workers = 4
         self._auto_parallel = True
         self._parallel_threshold = 10
-        self._default_lp_solver = 'linprog'  # HiGHS via SciPy (fast C++ solver)
+        self._default_lp_solver = LPSolver.LINPROG  # HiGHS via SciPy (fast C++)
 
     def __repr__(self) -> str:
         return (f"Config(parallel_lp={self.parallel_lp}, "
                 f"n_workers={self.n_workers}, "
                 f"auto_parallel={self.auto_parallel}, "
                 f"parallel_threshold={self.parallel_threshold}, "
-                f"default_lp_solver='{self.default_lp_solver}')")
+                f"default_lp_solver='{self.default_lp_solver.value}')")
 
 
 # Global configuration instance
@@ -171,12 +182,13 @@ def set_parallel(enabled: Union[bool, str] = True, n_workers: Optional[int] = No
             config.n_workers = n_workers
 
 
-def set_lp_solver(solver: str) -> None:
+def set_lp_solver(solver) -> None:
     """
     Set default LP solver globally.
 
     Args:
-        solver: Solver name ('default', 'GUROBI', 'MOSEK', 'SCIPY', etc.)
+        solver: Solver name (``'GUROBI'``, ``'MOSEK'``, ``'linprog'``, ...) or
+            an :class:`~n2v.utils.lp_solver_enum.LPSolver` member.
 
     Example:
         >>> import n2v
@@ -187,11 +199,15 @@ def set_lp_solver(solver: str) -> None:
 
 
 def get_config() -> dict:
-    """Get the global configuration as a dictionary."""
+    """Get the global configuration as a dictionary.
+
+    ``lp_solver`` is emitted as the legacy string value for serialization
+    friendliness.
+    """
     return {
         'parallel_lp': config.parallel_lp,
         'n_workers': config.n_workers,
         'auto_parallel': config.auto_parallel,
         'parallel_threshold': config.parallel_threshold,
-        'lp_solver': config.lp_solver,
+        'lp_solver': config.lp_solver.value,
     }

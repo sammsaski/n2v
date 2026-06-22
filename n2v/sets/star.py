@@ -9,7 +9,7 @@ Translated from MATLAB NNV Star.m
 """
 
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
 from scipy.linalg import block_diag
@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 # Import utility modules
 from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch
+from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
 
 from n2v.config import config as global_config
 
@@ -318,7 +319,7 @@ class Star:
 
     # ======================== Bounds Computation ========================
 
-    def get_box(self, lp_solver: str = 'default') -> 'Box':
+    def get_box(self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT) -> 'Box':
         """
         Compute exact bounding box using LP.
 
@@ -329,10 +330,11 @@ class Star:
             Box object
         """
         from .box import Box
-        lb, ub = self.get_ranges(lp_solver=lp_solver)
+        solver = _resolve_lp(lp_solver)
+        lb, ub = self.get_ranges(lp_solver=solver)
         return Box(lb, ub)
 
-    def get_range(self, index: int, lp_solver: str = 'default') -> Tuple[float, float]:
+    def get_range(self, index: int, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT) -> Tuple[float, float]:
         """
         Compute exact range at specific dimension using LP.
 
@@ -349,9 +351,10 @@ class Star:
         if self.nVar == 0:
             return self.V[index, 0], self.V[index, 0]
 
+        solver = _resolve_lp(lp_solver)
         f = self.V[index, 1:].flatten()
         results = self._solve_lp_batch(
-            [f, f], [True, False], lp_solver,
+            [f, f], [True, False], solver,
         )
 
         xmin_val, xmax_val = results[0], results[1]
@@ -360,7 +363,7 @@ class Star:
 
         return xmin_val + self.V[index, 0], xmax_val + self.V[index, 0]
 
-    def get_min(self, index: int, lp_solver: str = 'default') -> Optional[float]:
+    def get_min(self, index: int, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT) -> Optional[float]:
         """
         Compute exact minimum at specific dimension using LP.
 
@@ -377,10 +380,11 @@ class Star:
         if index < 0 or index >= self.dim:
             raise ValueError(f"Invalid index {index}, dimension is {self.dim}")
 
+        solver = _resolve_lp(lp_solver)
         # Define LP: min f^T * alpha subject to C * alpha <= d
         f = self.V[index, 1:].reshape(-1, 1)
 
-        xmin = self._solve_lp(f, minimize=True, lp_solver=lp_solver)
+        xmin = self._solve_lp(f, minimize=True, lp_solver=solver)
 
         if xmin is None:
             return None
@@ -388,7 +392,7 @@ class Star:
         # Add constant term
         return xmin + self.V[index, 0]
 
-    def get_max(self, index: int, lp_solver: str = 'default') -> Optional[float]:
+    def get_max(self, index: int, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT) -> Optional[float]:
         """
         Compute exact maximum at specific dimension using LP.
 
@@ -405,10 +409,11 @@ class Star:
         if index < 0 or index >= self.dim:
             raise ValueError(f"Invalid index {index}, dimension is {self.dim}")
 
+        solver = _resolve_lp(lp_solver)
         # Define LP: max f^T * alpha subject to C * alpha <= d
         f = self.V[index, 1:].reshape(-1, 1)
 
-        xmax = self._solve_lp(f, minimize=False, lp_solver=lp_solver)
+        xmax = self._solve_lp(f, minimize=False, lp_solver=solver)
 
         if xmax is None:
             return None
@@ -416,7 +421,7 @@ class Star:
         # Add constant term
         return xmax + self.V[index, 0]
 
-    def get_ranges(self, lp_solver: str = 'default', parallel: bool = None,
+    def get_ranges(self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT, parallel: bool = None,
                    n_workers: int = None) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute exact ranges for all dimensions.
@@ -443,6 +448,7 @@ class Star:
             >>> # Force sequential
             >>> lb, ub = star.get_ranges(parallel=False)
         """
+        solver = _resolve_lp(lp_solver)
         # Determine if we should use parallel
         if parallel is None:
             use_parallel = global_config.should_use_parallel(self.dim)
@@ -454,12 +460,12 @@ class Star:
             n_workers = global_config.get_n_workers(self.dim)
 
         if use_parallel:
-            return self._get_ranges_parallel(lp_solver, n_workers)
+            return self._get_ranges_parallel(solver, n_workers)
 
         # Batch path: single solve_lp_batch call for all dimensions
-        return self._get_ranges_batch(lp_solver)
+        return self._get_ranges_batch(solver)
 
-    def _get_ranges_parallel(self, lp_solver: str = 'default',
+    def _get_ranges_parallel(self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
                             n_workers: int = 4) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute ranges for all dimensions in parallel using ThreadPoolExecutor.
@@ -501,7 +507,7 @@ class Star:
         return lb, ub
 
     def _get_ranges_batch(
-        self, lp_solver: str = 'default',
+        self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute ranges for all dimensions using a single batched LP call.
@@ -618,7 +624,7 @@ class Star:
         self,
         objectives: List[np.ndarray],
         minimize_flags: List[bool],
-        lp_solver: str = 'default',
+        lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
     ) -> List[Optional[float]]:
         """
         Batch solve LPs sharing this star's constraints.
@@ -647,7 +653,8 @@ class Star:
         )
 
     def _solve_lp(
-        self, f: np.ndarray, minimize: bool = True, lp_solver: str = 'default'
+        self, f: np.ndarray, minimize: bool = True,
+        lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
     ) -> Optional[float]:
         """
         Solve LP: min/max f^T * alpha subject to C * alpha <= d and bounds.
@@ -686,13 +693,15 @@ class Star:
         else:
             return None
 
-    def is_empty_set(self, lp_solver: str = 'default') -> bool:
+    def is_empty_set(self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT) -> bool:
         """
         Check if Star is empty (constraints are infeasible).
 
         Returns:
             True if empty, False otherwise
         """
+        solver = _resolve_lp(lp_solver)
+
         # Point Star (no predicate variables): the set is the single point
         # V[:, 0]. Any constraints have an empty coefficient matrix, so each
         # row reduces to the constant ``0 <= d_i``. The set is empty iff some
@@ -711,13 +720,13 @@ class Star:
         lb = self.predicate_lb if self.predicate_lb is not None else None
         ub = self.predicate_ub if self.predicate_ub is not None else None
 
-        return not check_feasibility(A=A, b=b, lb=lb, ub=ub, lp_solver=lp_solver)
+        return not check_feasibility(A=A, b=b, lb=lb, ub=ub, lp_solver=solver)
 
     def contains(
         self,
         X: np.ndarray,
         method: str = 'lp',
-        lp_solver: str = 'default',
+        lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
         _eps: float = 1e-9,
     ):
         """
@@ -740,6 +749,7 @@ class Star:
             ValueError: On wrong-shape input, or when method='algebraic' is
                 requested but V[:, 1:] does not have full column rank.
         """
+        lp_solver = _resolve_lp(lp_solver)
         X = np.asarray(X, dtype=np.float64)
 
         # Dispatch on shape: (dim,) or (dim, 1) -> single; (N, dim) -> batch.

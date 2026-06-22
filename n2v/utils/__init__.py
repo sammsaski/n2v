@@ -5,6 +5,7 @@ This module provides helper functions for model loading, LP solving,
 conversions, verification, falsification, and other utilities.
 """
 
+from n2v.utils.lp_solver_enum import Backend, LPSolver, resolve as resolve_lp_solver
 from n2v.utils.lpsolver import solve_lp, solve_lp_batch
 from n2v.utils.model_loader import load_onnx, load_pytorch
 from n2v.utils.load_vnnlib import load_vnnlib
@@ -28,4 +29,7 @@ __all__ = [
     "falsify",
     "fuse_batchnorm",
     "strip_final_softmax",
+    "Backend",
+    "LPSolver",
+    "resolve_lp_solver",
 ]

@@ -16,6 +16,9 @@ from n2v.sets import Star, Zono, Box, Hexatope, Octatope
 from n2v.sets.image_star import ImageStar
 from n2v.sets.image_zono import ImageZono
 
+# LP solver enum + resolver (coerce kwargs once at the dispatcher boundary)
+from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
+
 # Import layer-specific reach functions
 from . import linear_reach, relu_reach, conv2d_reach, flatten_reach
 from . import maxpool2d_reach, avgpool2d_reach, global_avgpool_reach
@@ -125,7 +128,7 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
         return linear_reach.linear_star(layer, input_sets)
 
     elif isinstance(layer, nn.ReLU):
-        lp_solver = kwargs.get('lp_solver', 'default')
+        lp_solver = _resolve_lp(kwargs.get('lp_solver', LPSolver.DEFAULT))
         verbose = kwargs.get('verbose', False)
         parallel = kwargs.get('parallel', None)
         n_workers = kwargs.get('n_workers', None)
@@ -147,7 +150,7 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
 
     elif isinstance(layer, nn.LeakyReLU):
         gamma = layer.negative_slope
-        lp_solver = kwargs.get('lp_solver', 'default')
+        lp_solver = _resolve_lp(kwargs.get('lp_solver', LPSolver.DEFAULT))
         verbose = kwargs.get('verbose', False)
         precomputed_bounds = kwargs.get('precomputed_bounds', None)
         if method == 'exact':
@@ -162,13 +165,13 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
             )
 
     elif _is_sigmoid_layer(layer):
-        lp_solver = kwargs.get('lp_solver', 'default')
+        lp_solver = _resolve_lp(kwargs.get('lp_solver', LPSolver.DEFAULT))
         if method == 'exact':
             warnings.warn("Sigmoid does not support exact method; using approx.")
         return sigmoid_reach.sigmoid_star_approx(input_sets, lp_solver=lp_solver)
 
     elif _is_tanh_layer(layer):
-        lp_solver = kwargs.get('lp_solver', 'default')
+        lp_solver = _resolve_lp(kwargs.get('lp_solver', LPSolver.DEFAULT))
         if method == 'exact':
             warnings.warn("Tanh does not support exact method; using approx.")
         return tanh_reach.tanh_star_approx(input_sets, lp_solver=lp_solver)
@@ -194,7 +197,7 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
             layer, input_sets, method=method, **kwargs)
 
     elif isinstance(layer, nn.MaxPool2d):
-        lp_solver = kwargs.get('lp_solver', 'default')
+        lp_solver = _resolve_lp(kwargs.get('lp_solver', LPSolver.DEFAULT))
         verbose = kwargs.get('verbose', False)
         return maxpool2d_reach.maxpool2d_star(
             layer, input_sets, method=method, lp_solver=lp_solver,

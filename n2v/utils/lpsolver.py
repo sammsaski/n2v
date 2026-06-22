@@ -9,12 +9,14 @@ Supports:
 """
 
 import warnings
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cvxpy as cp
 import numpy as np
 from scipy.optimize import linprog as scipy_linprog
 from scipy.sparse import issparse
+
+from n2v.utils.lp_solver_enum import Backend, LPSolver, resolve
 
 # Try to import highspy for direct HiGHS API access
 try:
@@ -23,13 +25,10 @@ try:
 except ImportError:
     _HAS_HIGHSPY = False
 
-# Solvers that use scipy linprog backend
-SCIPY_SOLVERS = {'linprog', 'highs', 'highs-ds', 'highs-ipm'}
-
-# Solvers eligible for the direct highspy batch path.
-# Specific variants (highs-ds, highs-ipm) are routed through scipy to preserve
-# the user's method choice.
-_HIGHSPY_BATCH_SOLVERS = {'linprog', 'highs'}
+# Back-compat aliases: kept so any external importer still sees the sets.
+# Derived from the enum; prefer LPSolver methods in new code.
+SCIPY_SOLVERS = {m.value for m in LPSolver if m.is_scipy()}
+_HIGHSPY_BATCH_SOLVERS = {m.value for m in LPSolver if m.is_highspy_batch_eligible()}
 
 
 def solve_lp_batch(
@@ -39,7 +38,7 @@ def solve_lp_batch(
     lb: Optional[np.ndarray] = None,
     ub: Optional[np.ndarray] = None,
     minimize_flags: Optional[List[bool]] = None,
-    lp_solver: str = 'default',
+    lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
 ) -> List[Optional[float]]:
     """
     Solve multiple LPs sharing the same constraints but different objectives.
@@ -65,10 +64,9 @@ def solve_lp_batch(
     if not objectives:
         return []
 
-    # Resolve solver
-    if lp_solver == 'default':
-        from n2v.config import config
-        lp_solver = config.lp_solver
+    # Resolve solver at the public boundary. ``allow_sentinel=False`` drops
+    # ``LPSolver.DEFAULT`` down to whatever ``config.lp_solver`` currently is.
+    solver = resolve(lp_solver, allow_sentinel=False)
 
     # Normalize and validate objectives
     objectives = [np.asarray(obj, dtype=np.float64).flatten() for obj in objectives]
@@ -85,11 +83,11 @@ def solve_lp_batch(
         )
 
     # Direct HiGHS path (fast)
-    if _HAS_HIGHSPY and lp_solver in _HIGHSPY_BATCH_SOLVERS:
+    if _HAS_HIGHSPY and solver.is_highspy_batch_eligible():
         return _solve_batch_highspy(objectives, A, b, lb, ub, minimize_flags, n)
 
     # SciPy linprog fallback (for highs, highs-ds, highs-ipm, linprog)
-    if lp_solver in SCIPY_SOLVERS:
+    if solver.is_scipy():
         if lb is not None:
             lb_arr = np.asarray(lb, dtype=np.float64).flatten()
         else:
@@ -102,12 +100,13 @@ def solve_lp_batch(
         A_ub = np.asarray(A, dtype=np.float64) if A is not None else None
         b_ub = np.asarray(b, dtype=np.float64).flatten() if b is not None else None
 
+        method = solver.scipy_method or 'highs'
         results = []
         for i, (f_obj, do_min) in enumerate(zip(objectives, minimize_flags)):
             f = f_obj if do_min else -f_obj
 
             try:
-                res = scipy_linprog(c=f, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+                res = scipy_linprog(c=f, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method=method)
                 if res.success:
                     fval = -res.fun if not do_min else res.fun
                     results.append(fval)
@@ -129,7 +128,7 @@ def solve_lp_batch(
         f_col = f_obj.reshape(-1, 1)
         _, fval, status, _ = solve_lp(
             f=f_col, A=A, b=b, lb=lb, ub=ub,
-            lp_solver=lp_solver, minimize=do_min,
+            lp_solver=solver, minimize=do_min,
         )
         if status in ('optimal', 'optimal_inaccurate'):
             results.append(fval)
@@ -301,7 +300,7 @@ def solve_lp(
     beq: Optional[np.ndarray] = None,
     lb: Optional[np.ndarray] = None,
     ub: Optional[np.ndarray] = None,
-    lp_solver: str = 'default',
+    lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
     minimize: bool = True,
     **solver_kwargs
 ) -> Tuple[Optional[np.ndarray], Optional[float], str, Dict[str, Any]]:
@@ -339,16 +338,15 @@ def solve_lp(
             status: Solution status string
             info: Dictionary with solver information
     """
-    # Check global config for 'default' solver
-    if lp_solver == 'default':
-        from n2v.config import config
-        lp_solver = config.lp_solver
+    # Coerce once at the public boundary; sentinel is resolved against the
+    # global config so the remainder of this function speaks enum only.
+    solver = resolve(lp_solver, allow_sentinel=False)
 
     # Route to appropriate solver backend
     # Direct highspy path: fastest, no equality constraint support
     if (
         _HAS_HIGHSPY
-        and lp_solver in _HIGHSPY_BATCH_SOLVERS
+        and solver.is_highspy_batch_eligible()
         and Aeq is None
         and beq is None
     ):
@@ -356,15 +354,15 @@ def solve_lp(
             f, A, b, lb, ub, minimize,
         )
 
-    if lp_solver in SCIPY_SOLVERS:
+    if solver.is_scipy():
         return _solve_lp_scipy(
             f, A, b, Aeq, beq, lb, ub,
-            lp_solver, minimize, **solver_kwargs,
+            solver, minimize, **solver_kwargs,
         )
 
     return _solve_lp_cvxpy(
         f, A, b, Aeq, beq, lb, ub,
-        lp_solver, minimize, **solver_kwargs,
+        solver, minimize, **solver_kwargs,
     )
 
 
@@ -376,7 +374,7 @@ def _solve_lp_scipy(
     beq: Optional[np.ndarray] = None,
     lb: Optional[np.ndarray] = None,
     ub: Optional[np.ndarray] = None,
-    lp_solver: str = 'highs',
+    lp_solver: Union[LPSolver, str] = LPSolver.HIGHS,
     minimize: bool = True,
     **solver_kwargs
 ) -> Tuple[Optional[np.ndarray], Optional[float], str, Dict[str, Any]]:
@@ -422,11 +420,9 @@ def _solve_lp_scipy(
 
     bounds = list(zip(lb, ub))
 
-    # Map solver name to scipy method
-    if lp_solver == 'linprog':
-        method = 'highs'  # Default to HiGHS
-    else:
-        method = lp_solver
+    # Map solver name to scipy method via enum metadata.
+    solver = resolve(lp_solver) if not isinstance(lp_solver, LPSolver) else lp_solver
+    method = solver.scipy_method or 'highs'
 
     try:
         result = scipy_linprog(
@@ -477,7 +473,7 @@ def _solve_lp_cvxpy(
     beq: Optional[np.ndarray] = None,
     lb: Optional[np.ndarray] = None,
     ub: Optional[np.ndarray] = None,
-    lp_solver: str = 'default',
+    lp_solver: Union[LPSolver, str] = LPSolver.DEFAULT,
     minimize: bool = True,
     **solver_kwargs
 ) -> Tuple[Optional[np.ndarray], Optional[float], str, Dict[str, Any]]:
@@ -525,11 +521,16 @@ def _solve_lp_cvxpy(
     # Create and solve problem
     prob = cp.Problem(objective, constraints)
 
+    solver = (
+        lp_solver if isinstance(lp_solver, LPSolver) else resolve(lp_solver)
+    )
+    cvxpy_name = solver.cvxpy_name  # None for SENTINEL/SCIPY-family
+
     try:
-        if lp_solver == 'default' or lp_solver is None:
+        if cvxpy_name is None:
             prob.solve(**solver_kwargs)
         else:
-            prob.solve(solver=lp_solver, **solver_kwargs)
+            prob.solve(solver=cvxpy_name, **solver_kwargs)
 
         # Extract results
         if prob.status in ['optimal', 'optimal_inaccurate']:
@@ -551,7 +552,7 @@ def _solve_lp_cvxpy(
 
         # Prepare info dictionary
         info = {
-            'solver': prob.solver_stats.solver_name if hasattr(prob, 'solver_stats') else lp_solver,
+            'solver': prob.solver_stats.solver_name if hasattr(prob, 'solver_stats') else cvxpy_name,
             'num_iters': prob.solver_stats.num_iters if hasattr(prob, 'solver_stats') else None,
             'setup_time': prob.solver_stats.setup_time if hasattr(prob, 'solver_stats') else None,
             'solve_time': prob.solver_stats.solve_time if hasattr(prob, 'solver_stats') else None,
@@ -571,7 +572,7 @@ def check_feasibility(
     beq: Optional[np.ndarray] = None,
     lb: Optional[np.ndarray] = None,
     ub: Optional[np.ndarray] = None,
-    lp_solver: str = 'default',
+    lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
 ) -> bool:
     """
     Check if a system of linear constraints is feasible.
@@ -594,11 +595,14 @@ def check_feasibility(
     else:
         raise ValueError("Cannot determine problem dimension")
 
+    # Coerce once; solve_lp will also coerce defensively.
+    solver = resolve(lp_solver)
+
     # Use zero objective (feasibility problem)
     f = np.zeros(n)
 
     x_opt, _, status, _ = solve_lp(
-        f, A, b, Aeq, beq, lb, ub, lp_solver=lp_solver, minimize=True
+        f, A, b, Aeq, beq, lb, ub, lp_solver=solver, minimize=True
     )
 
     return status in ['optimal', 'optimal_inaccurate']

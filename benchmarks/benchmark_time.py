@@ -20,6 +20,7 @@ import torch.nn as nn
 from n2v.config import config
 from n2v.nn import NeuralNetwork
 from n2v.sets import Star
+from n2v.utils.lp_solver_enum import LPSolver
 import n2v.utils.lpsolver as lps
 
 
@@ -47,9 +48,9 @@ def benchmark_solver(
 
     try:
         if solver_name == 'CVXPY':
-            config._default_lp_solver = 'CLARABEL'
+            config._default_lp_solver = LPSolver.CLARABEL
         elif solver_name == 'SciPy linprog':
-            config._default_lp_solver = 'linprog'
+            config._default_lp_solver = LPSolver.LINPROG
             lps._HAS_HIGHSPY = False
         elif solver_name == 'highspy batch':
             try:
@@ -59,7 +60,7 @@ def benchmark_solver(
                     "highspy is not installed. "
                     "Install with: pip install highspy"
                 )
-            config._default_lp_solver = 'linprog'
+            config._default_lp_solver = LPSolver.LINPROG
             lps._HAS_HIGHSPY = True
 
         # Warm up

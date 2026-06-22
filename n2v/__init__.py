@@ -22,6 +22,7 @@ from n2v.probabilistic import (
 from n2v import utils
 from n2v import probabilistic
 from n2v.config import config, set_parallel, set_lp_solver, get_config
+from n2v.utils.lp_solver_enum import Backend, LPSolver
 
 __all__ = [
     # Sets
@@ -51,4 +52,6 @@ __all__ = [
     "set_parallel",
     "set_lp_solver",
     "get_config",
+    "Backend",
+    "LPSolver",
 ]

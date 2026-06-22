@@ -19,6 +19,7 @@ import numpy as np
 from typing import List, Optional
 from n2v.sets import Star, Zono
 from n2v.sets.image_star import ImageStar
+from n2v.utils.lp_solver_enum import LPSolver
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
 def leakyrelu_star_exact(
     input_stars: List[Star],
     gamma: float = 0.01,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False,
     precomputed_bounds: tuple = None,
 ) -> List[Star]:
@@ -62,7 +63,7 @@ def leakyrelu_star_exact(
 def _leakyrelu_single_star_exact(
     I: Star,
     gamma: float,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     verbose: bool = False,
     precomputed_bounds: tuple = None,
 ) -> List[Star]:
@@ -111,7 +112,7 @@ def _leakyrelu_single_star_exact(
     return current_stars
 
 
-def _step_leakyrelu(I: Star, index: int, gamma: float, lp_solver: str = 'default') -> List[Star]:
+def _step_leakyrelu(I: Star, index: int, gamma: float, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> List[Star]:
     """Split a single neuron for LeakyReLU (exact step reach)."""
     xmin, xmax = I.get_range(index, lp_solver)
 
@@ -170,7 +171,7 @@ def _step_leakyrelu(I: Star, index: int, gamma: float, lp_solver: str = 'default
 def leakyrelu_star_approx(
     input_stars: List[Star],
     gamma: float = 0.01,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     precomputed_bounds: tuple = None,
 ) -> List[Star]:
     """
@@ -203,7 +204,7 @@ def leakyrelu_star_approx(
 def _leakyrelu_single_star_approx(
     I: Star,
     gamma: float,
-    lp_solver: str = 'default',
+    lp_solver: "LPSolver | str" = LPSolver.DEFAULT,
     precomputed_bounds: tuple = None,
 ) -> Optional[Star]:
     """Approximate LeakyReLU for a single Star."""
