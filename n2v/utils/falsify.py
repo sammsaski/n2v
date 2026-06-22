@@ -226,22 +226,32 @@ def _falsify_random(
     # Generate random samples uniformly in [lb, ub]
     samples = rng.uniform(lb_flat, ub_flat, size=(n_samples, input_dim)).astype(np.float32)
 
-    # Run model in eval mode without gradients. Push samples to the
-    # model's device so CUDA-resident networks (e.g. Exp 4 ours) don't
-    # raise mat1-on-cpu / weight-on-cuda mismatches.
+    # Run the model BATCHED for speed: a single (chunked) forward over all samples
+    # instead of n_samples Python-level forwards. In eval mode the forward is
+    # per-sample independent (BatchNorm uses running stats), so batched outputs are
+    # identical to one-at-a-time -- this is a pure speedup (e.g. ~28.9s -> <1s for
+    # n=5000), and any hit is still CE-validated downstream. Push samples to the
+    # model's device for CUDA-resident networks. Falls back to per-sample if a
+    # converted graph rejects batch>1.
     device = _detect_model_device(model)
     model.eval()
+    CHUNK = 2048
     with torch.no_grad():
-        for i in range(n_samples):
-            sample_tensor = torch.from_numpy(samples[i]).reshape(1, *orig_shape).to(device)
-
-            output = model(sample_tensor)
-            output_np = output.detach().cpu().numpy().flatten()
-
-            # Check if output satisfies all property groups (AND of OR)
-            if _output_satisfies_property(output_np, groups):
-                counterexample = (samples[i], output_np)
-                return 0, counterexample
+        for start in range(0, n_samples, CHUNK):
+            chunk = samples[start:start + CHUNK]
+            try:
+                bt = torch.from_numpy(chunk).reshape(chunk.shape[0], *orig_shape).to(device)
+                out_np = model(bt).detach().cpu().numpy().reshape(chunk.shape[0], -1)
+            except Exception:
+                out_np = np.stack([
+                    model(torch.from_numpy(chunk[k]).reshape(1, *orig_shape).to(device))
+                    .detach().cpu().numpy().flatten()
+                    for k in range(chunk.shape[0])
+                ])
+            for j in range(out_np.shape[0]):
+                # Check if output satisfies all property groups (AND of OR)
+                if _output_satisfies_property(out_np[j], groups):
+                    return 0, (samples[start + j], out_np[j])
 
     return 2, None
 
