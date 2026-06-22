@@ -387,11 +387,17 @@ def _falsify_pgd(
 
             total_loss = torch.stack(group_losses).max()
 
-            # Check if we found a counterexample
+            # Check if we found a counterexample. The float32 margin proxy
+            # (total_loss) can dip <= 0 at the boundary where the canonical,
+            # tolerance-aware check still rejects; gate the SAT on the same
+            # _output_satisfies_property check that random/square -- and PGD's
+            # own final check below -- already use, so a boundary proxy hit can
+            # only cost breadth, never yield a false `sat` (-150).
             if total_loss.item() <= 0:
                 output_np = output.detach().cpu().numpy().flatten()
-                input_np = x.detach().cpu().numpy().flatten()
-                return 0, (input_np, output_np)
+                if _output_satisfies_property(output_np, groups):
+                    input_np = x.detach().cpu().numpy().flatten()
+                    return 0, (input_np, output_np)
 
             # Backward pass
             if x.grad is not None:
@@ -502,10 +508,17 @@ def _falsify_apgd(
                 group_losses.append(best_in_group)
             total_loss = torch.stack(group_losses).max()
 
+            # Gate the SAT on the canonical _output_satisfies_property check
+            # (not just the float32 total_loss proxy), matching random/square
+            # and PGD's final check. A boundary proxy hit the canonical check
+            # rejects falls through and APGD keeps optimizing -- breadth loss
+            # at worst, never a false `sat`. Makes the 'strong' ensemble fully
+            # canonical-gated on every leg.
             if total_loss.item() <= 0:
                 output_np = output.detach().cpu().numpy().flatten()
-                input_np = x.detach().cpu().numpy().flatten()
-                return 0, (input_np, output_np)
+                if _output_satisfies_property(output_np, groups):
+                    input_np = x.detach().cpu().numpy().flatten()
+                    return 0, (input_np, output_np)
 
             if total_loss.item() < best_loss - 1e-9:
                 best_loss = total_loss.item()
