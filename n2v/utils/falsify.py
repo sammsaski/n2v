@@ -242,7 +242,7 @@ def _falsify_random(
             try:
                 bt = torch.from_numpy(chunk).reshape(chunk.shape[0], *orig_shape).to(device)
                 out_np = model(bt).detach().cpu().numpy().reshape(chunk.shape[0], -1)
-            except Exception:
+            except Exception:  # noqa: BLE001 - converted graph may reject batch>1; fall back to per-sample
                 out_np = np.stack([
                     model(torch.from_numpy(chunk[k]).reshape(1, *orig_shape).to(device))
                     .detach().cpu().numpy().flatten()
@@ -251,7 +251,18 @@ def _falsify_random(
             for j in range(out_np.shape[0]):
                 # Check if output satisfies all property groups (AND of OR)
                 if _output_satisfies_property(out_np[j], groups):
-                    return 0, (samples[start + j], out_np[j])
+                    # The batched forward's row j can differ from the true
+                    # single-sample forward (float reordering, or a converted
+                    # graph that silently mishandles batch>1). Re-run this one
+                    # sample at batch=1 and re-check before emitting `sat`, so the
+                    # returned CE is sound by construction and matches what the
+                    # external onnxruntime checker will see. A mismatch here can
+                    # only cost breadth (miss a CE), never yield a false `sat`.
+                    x_ce = samples[start + j]
+                    out1 = (model(torch.from_numpy(x_ce).reshape(1, *orig_shape).to(device))
+                            .detach().cpu().numpy().flatten())
+                    if _output_satisfies_property(out1, groups):
+                        return 0, (x_ce, out1)
 
     return 2, None
 
