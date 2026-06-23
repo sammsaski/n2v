@@ -26,8 +26,8 @@ def _box_star(lb, ub):
 def test_unsat_only_when_disjoint():
     # Reach outputs in [0,1]^2; unsafe region y0 >= 2 is disjoint -> UNSAT (holds).
     rs = [_box_star([0.0, 0.0], [1.0, 1.0])]
-    safe = HalfSpace(np.array([[-1.0, 0.0]]), np.array([[-2.0]]))  # -y0 <= -2
-    assert verify_specification(rs, safe).verdict == 'UNSAT'
+    unsafe_far = HalfSpace(np.array([[-1.0, 0.0]]), np.array([[-2.0]]))  # -y0 <= -2
+    assert verify_specification(rs, unsafe_far).verdict == 'UNSAT'
 
 
 def test_overlap_is_unknown_never_false_unsat():
@@ -67,5 +67,5 @@ def test_multiple_reach_sets_unsat_only_if_all_disjoint():
     assert verify_specification(rs, unsafe).verdict == 'UNKNOWN'
 
     # Both disjoint from y0 >= 5 -> UNSAT.
-    safe = HalfSpace(np.array([[-1.0]]), np.array([[-5.0]]))
-    assert verify_specification(rs, safe).verdict == 'UNSAT'
+    unsafe_far = HalfSpace(np.array([[-1.0]]), np.array([[-5.0]]))
+    assert verify_specification(rs, unsafe_far).verdict == 'UNSAT'
