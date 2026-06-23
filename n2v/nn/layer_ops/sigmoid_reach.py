@@ -20,6 +20,10 @@ from n2v.sets import Star, Zono
 from n2v.sets.image_star import ImageStar
 from n2v.utils.lp_solver_enum import LPSolver
 
+# Profiler hooks (no-op when profiling is disabled)
+from n2v.profiling import count
+from n2v.nn.layer_ops._profiling import record_layer_neurons
+
 
 def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
     """If original was ImageStar, convert new_star back."""
@@ -60,6 +64,9 @@ def sigmoid_star_approx(
     Returns:
         List of output Stars (no splitting)
     """
+    # Profiler: static neuron count, once per layer (no-op when disabled)
+    record_layer_neurons(input_stars)
+
     output_stars = []
     for star in input_stars:
         star_2d = star.to_star() if isinstance(star, ImageStar) else star
@@ -151,6 +158,12 @@ def _s_curve_single_star_approx(
     # Partition neurons
     constant_map = np.where(np.abs(ubs - lbs) < 1e-10)[0]
     varying_map = np.where(np.abs(ubs - lbs) >= 1e-10)[0]
+
+    # Profiler: smooth activations relax every varying neuron (no split),
+    # summed across the per-star population. n_neurons (static layer size) is
+    # recorded once at the layer level.
+    count("n_constant", len(constant_map))
+    count("n_relaxed", len(varying_map))
 
     if len(varying_map) == 0:
         # All constant — apply the function to the constant VALUE

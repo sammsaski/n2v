@@ -16,6 +16,9 @@ from typing import List, Tuple
 from n2v.sets import Star, ImageStar, ImageZono, Hexatope, Octatope
 from n2v.utils.lp_solver_enum import LPSolver
 
+# Profiler hooks (no-op when profiling is disabled)
+from n2v.profiling import count, is_enabled
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,9 +47,16 @@ def maxpool2d_star(
         List of output Stars (ImageStars)
     """
     if method == 'exact':
-        return _maxpool2d_star_exact_multiple(layer, input_stars, lp_solver, verbose)
+        out = _maxpool2d_star_exact_multiple(layer, input_stars, lp_solver, verbose)
     else:
-        return _maxpool2d_star_approx_multiple(layer, input_stars, lp_solver, verbose)
+        out = _maxpool2d_star_approx_multiple(layer, input_stars, lp_solver, verbose)
+
+    # Profiler: static output pooling-window count (== output elements), once
+    # per layer -- the MaxPool analog of n_neurons (no-op when disabled).
+    if is_enabled() and out:
+        o = out[0]
+        count("n_pool_windows", o.height * o.width * o.num_channels)
+    return out
 
 
 def _maxpool2d_star_exact_single(
@@ -135,6 +145,11 @@ def _maxpool2d_star_exact_single(
                     # Multiple possible maxes - need to split
                     split_positions.append((i, j, k))
 
+    # Profiler: pooling-window classification, summed across the per-star
+    # population (no-op when disabled). uncertain = windows whose argmax is
+    # ambiguous over the input bounds and therefore need splitting.
+    count("n_uncertain", len(split_positions))
+
     # Create initial output star with 4D V
     output_stars = [ImageStar(
         V_out, pad_star.C, pad_star.d,
@@ -157,6 +172,8 @@ def _maxpool2d_star_exact_single(
             split_stars = _step_split_4d(
                 star, pad_star, (i, j, k), max_idx_list, lp_solver
             )
+            # n_split = branch operations = population growth (no-op when off)
+            count("n_split", len(split_stars) - 1)
             new_stars.extend(split_stars)
 
         if verbose:
@@ -256,6 +273,12 @@ def _maxpool2d_star_approx_single(
                 max_indices[(i, j, k)] = max_idx
                 if len(max_idx) > 1:
                     new_pred_count += 1
+
+    # Profiler: classification + relaxation, summed across the per-star
+    # population (approx never splits; no-op when disabled). Each uncertain
+    # window introduces one new predicate variable instead of branching.
+    count("n_uncertain", new_pred_count)
+    count("n_relaxed", new_pred_count)
 
     if verbose and new_pred_count > 0:
         logger.debug(f'{new_pred_count} new variables are introduced')

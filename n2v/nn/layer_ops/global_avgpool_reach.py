@@ -10,6 +10,9 @@ import numpy as np
 from typing import List
 from n2v.sets import Star, Zono, ImageStar, ImageZono
 
+# Profiler hook (no-op when profiling is disabled)
+from n2v.profiling import region, OPERATION
+
 
 def global_avgpool_star(input_stars: List[Star]) -> List[Star]:
     """
@@ -30,7 +33,8 @@ def global_avgpool_star(input_stars: List[Star]) -> List[Star]:
             raise TypeError(
                 f"GlobalAvgPool requires ImageStar input, got {type(star).__name__}"
             )
-        output_star = _global_avgpool_imagestar(star)
+        with region("global_avgpool", OPERATION):
+            output_star = _global_avgpool_imagestar(star)
         output_stars.append(output_star)
     return output_stars
 

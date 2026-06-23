@@ -19,6 +19,29 @@ from n2v.sets.image_zono import ImageZono
 # LP solver enum + resolver (coerce kwargs once at the dispatcher boundary)
 from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
 
+# Profiler hooks (no-op when profiling is disabled)
+from n2v.profiling import region, count, LAYER, is_enabled
+
+# Set-representation arrays whose bytes constitute the carried memory. tracemalloc
+# does NOT see these (numpy buffers are C-allocated), so memory is measured
+# directly from the set's own arrays. Missing attrs are simply skipped.
+# Covers Star/ImageStar (V/C/d/predicate_*), Zono/ImageZono (c/V), Box (lb/ub),
+# and Hexatope/Octatope (center/generators).
+_SET_ARRAY_ATTRS = (
+    "V", "C", "d", "c", "lb", "ub", "predicate_lb", "predicate_ub",
+    "center", "generators",
+)
+
+
+def _set_nbytes(s) -> int:
+    """Total bytes of a set's representation arrays (the memory it carries)."""
+    total = 0
+    for attr in _SET_ARRAY_ATTRS:
+        arr = getattr(s, attr, None)
+        if isinstance(arr, np.ndarray):
+            total += arr.nbytes
+    return total
+
 # Import layer-specific reach functions
 from . import linear_reach, relu_reach, conv2d_reach, flatten_reach
 from . import maxpool2d_reach, avgpool2d_reach, global_avgpool_reach
@@ -103,22 +126,32 @@ def reach_layer(
     # Detect set type from first input
     first_set = input_sets[0]
 
-    # Route based on set type (including ImageStar/ImageZono as subclasses)
-    if isinstance(first_set, (Star, ImageStar)):
-        return _reach_layer_star(layer, input_sets, method, **kwargs)
-    elif isinstance(first_set, (Zono, ImageZono)):
-        return _reach_layer_zono(layer, input_sets, method, **kwargs)
-    elif isinstance(first_set, Box):
-        return _reach_layer_box(layer, input_sets, method, **kwargs)
-    elif isinstance(first_set, Hexatope):
-        return _reach_layer_hexatope(layer, input_sets, method, **kwargs)
-    elif isinstance(first_set, Octatope):
-        return _reach_layer_octatope(layer, input_sets, method, **kwargs)
-    else:
-        raise TypeError(
-            f"Unsupported set type: {type(first_set).__name__}. "
-            f"Supported: Star, ImageStar, Zono, ImageZono, Box, Hexatope, Octatope"
-        )
+    # Per-layer profiling region (a true no-op when profiling is disabled).
+    with region(type(layer).__name__, LAYER, layer_type=type(layer).__name__):
+        count("n_sets_in", len(input_sets))
+
+        # Route based on set type (including ImageStar/ImageZono as subclasses)
+        if isinstance(first_set, (Star, ImageStar)):
+            out = _reach_layer_star(layer, input_sets, method, **kwargs)
+        elif isinstance(first_set, (Zono, ImageZono)):
+            out = _reach_layer_zono(layer, input_sets, method, **kwargs)
+        elif isinstance(first_set, Box):
+            out = _reach_layer_box(layer, input_sets, method, **kwargs)
+        elif isinstance(first_set, Hexatope):
+            out = _reach_layer_hexatope(layer, input_sets, method, **kwargs)
+        elif isinstance(first_set, Octatope):
+            out = _reach_layer_octatope(layer, input_sets, method, **kwargs)
+        else:
+            raise TypeError(
+                f"Unsupported set type: {type(first_set).__name__}. "
+                f"Supported: Star, ImageStar, Zono, ImageZono, Box, Hexatope, Octatope"
+            )
+
+        count("n_sets_out", len(out))
+        # Memory carried out of this layer (the n2v-meaningful peak driver).
+        if is_enabled():
+            count("set_bytes_out", sum(_set_nbytes(s) for s in out))
+        return out
 
 
 def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs) -> List:

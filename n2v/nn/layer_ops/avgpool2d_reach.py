@@ -16,6 +16,9 @@ import numpy as np
 from typing import List
 from n2v.sets import Star, ImageStar, ImageZono, Box, Hexatope, Octatope
 
+# Profiler hook (no-op when profiling is disabled)
+from n2v.profiling import region, OPERATION
+
 
 def avgpool2d_star(
     layer: nn.AvgPool2d,
@@ -41,7 +44,8 @@ def avgpool2d_star(
     output_stars = []
     for star in input_stars:
         if isinstance(star, ImageStar):
-            output_star = _avgpool2d_imagestar_4d(layer, star)
+            with region("avgpool2d", OPERATION):
+                output_star = _avgpool2d_imagestar_4d(layer, star)
         else:
             raise TypeError(f"AvgPool2D expects ImageStar input, got {type(star)}")
         output_stars.append(output_star)
