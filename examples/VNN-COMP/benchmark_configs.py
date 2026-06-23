@@ -96,7 +96,8 @@ BENCHMARK_CONFIGS = {
         # an approx-UNSAT is a true hold; exact (kept as the complete tail) still
         # wins instances where it finishes. approx can only ADD holds or fall
         # through to exact -- it can never emit a false unsat (sound by
-        # construction; locked by test_verify_specification_soundness).
+        # construction; the verify_specification UNSAT invariant is locked by the
+        # soundness-invariant tests added in PR #6).
         'reach_methods': [('approx', {}), ('exact', {})],
         'n_rand': 100,
     },
