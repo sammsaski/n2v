@@ -62,6 +62,41 @@ BENCHMARK_CONFIGS = {
         'n_rand': 100,
     },
 
+    # --- 2026 variants that previously fell to DEFAULT (untuned). All SOUND;
+    #     none introduce a probabilistic (unsound-unsat) path. ---
+    'cgan2026': {
+        # Mirror cgan_2023 non-transformer relax-area(0.8). NO probabilistic
+        # transformer branch: small_transformer sub-models fall to approx -> unknown
+        # (sound); falsify harvests sat.
+        'reach_methods': [
+            ('approx', {'relax_factor': 0.8, 'relax_method': 'area'}),
+            ('approx', {}),
+        ],
+        'n_rand': 100,
+    },
+
+    'challenging_certified_training_2026': {
+        # CNN7: exact never finishes (burns the whole budget) -> approx-only (sound);
+        # random falsify (PGD too slow on CNN7, like cifar100/tinyimagenet).
+        'reach_methods': [('approx', {})],
+        'n_rand': 100,
+        'falsify_method': 'random',
+    },
+
+    'nn4sys_2023': {
+        # mscn-only 2026 dir (no local instances; insurance). SOUND approx -- must
+        # NOT be probabilistic (unlike the 'nn4sys' _default). random falsify.
+        'reach_methods': [('approx', {})],
+        'n_rand': 100,
+        'falsify_method': 'random',
+    },
+
+    'relusplitter_2026': {
+        # Mirror relusplitter (relax-area 1.0); avoids the exact-star timeout.
+        'reach_methods': [('approx', {'relax_factor': 1.0, 'relax_method': 'area'})],
+        'n_rand': 100,
+    },
+
     'cifar100_2024': {
         'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
         'n_rand': 100,
