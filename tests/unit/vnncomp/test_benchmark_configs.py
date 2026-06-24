@@ -56,15 +56,20 @@ class TestGetConfig:
         cfg = get_config('nn4sys', onnx_path='pensieve_big_parallel.onnx')
         assert cfg['reach_methods'] == [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})]
 
-    def test_dist_shift_exact_only(self):
-        """NNV overwrite bug: only exact-star runs."""
+    def test_dist_shift_approx_then_exact(self):
+        """Holds-dominated: sound approx prepended before exact (Track B)."""
         cfg = get_config('dist_shift_2023')
-        assert cfg['reach_methods'] == [('exact', {})]
+        assert cfg['reach_methods'] == [('approx', {}), ('exact', {})]
 
-    def test_malbeware_exact_only(self):
-        """NNV overwrite bug: only exact-star runs."""
+    def test_malbeware_approx_then_exact(self):
+        """Holds-dominated: sound approx prepended before exact (Track B)."""
         cfg = get_config('malbeware')
-        assert cfg['reach_methods'] == [('exact', {})]
+        assert cfg['reach_methods'] == [('approx', {}), ('exact', {})]
+
+    def test_linearizenn_approx_then_exact(self):
+        """Holds-dominated; loadable post matmul-guard: approx before exact."""
+        cfg = get_config('linearizenn_2024')
+        assert cfg['reach_methods'] == [('approx', {}), ('exact', {})]
 
     def test_tllverify_relax_then_approx(self):
         cfg = get_config('tllverifybench_2023')

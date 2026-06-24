@@ -137,21 +137,28 @@ BENCHMARK_CONFIGS = {
     },
 
     'dist_shift_2023': {
-        # NNV overwrite bug: reachOptionsList{1} overwritten, only exact-star runs
-        'reach_methods': [('exact', {})],
+        # Holds-dominated (gold 65 unsat / 7 sat). Prepend a SOUND approx pass
+        # before exact: approx (triangle over-approximation) terminates fast and
+        # an approx-UNSAT is a true hold; exact (kept as the complete tail) still
+        # wins instances where it finishes. approx can only ADD holds or fall
+        # through to exact -- it can never emit a false unsat (sound by
+        # construction; the verify_specification UNSAT invariant is locked by the
+        # soundness-invariant tests added in PR #6).
+        'reach_methods': [('approx', {}), ('exact', {})],
         'n_rand': 100,
     },
 
     'linearizenn_2024': {
-        # NNV overwrite bug: only exact-star runs
-        # NNV falls back to cp-star if matlab2nnv fails, but we don't need that
-        'reach_methods': [('exact', {})],
+        # Holds-dominated (gold 59 unsat / 1 sat); loadable now (IBP matmul guard).
+        # Prepend a sound approx pass before exact (same rationale as dist_shift).
+        'reach_methods': [('approx', {}), ('exact', {})],
         'n_rand': 100,
     },
 
     'malbeware': {
-        # NNV overwrite bug: only exact-star runs
-        'reach_methods': [('exact', {})],
+        # Holds-dominated (gold 131 unsat / 19 sat). Prepend a sound approx pass
+        # before exact (same rationale as dist_shift).
+        'reach_methods': [('approx', {}), ('exact', {})],
         'n_rand': 100,
     },
 
