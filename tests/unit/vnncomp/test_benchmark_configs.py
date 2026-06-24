@@ -96,6 +96,17 @@ class TestGetConfig:
         cfg = get_config('acasxu_2023', vnnlib_path='prop_1.vnnlib')
         assert cfg['falsify_method'] == 'random+pgd'
 
+    def test_cifar100_uses_bounded_random_apgd(self):
+        """Differentiable ResNet, tiny eps: bounded gradient attack, not random."""
+        cfg = get_config('cifar100_2024')
+        assert cfg['falsify_method'] == 'random+apgd'
+        assert cfg['falsify_kwargs'] == {'n_restarts': 1, 'n_steps': 30}
+
+    def test_tinyimagenet_uses_bounded_random_apgd(self):
+        cfg = get_config('tinyimagenet_2024')
+        assert cfg['falsify_method'] == 'random+apgd'
+        assert cfg['falsify_kwargs'] == {'n_restarts': 1, 'n_steps': 30}
+
     def test_probabilistic_configs_have_kwargs(self):
         """All probabilistic methods must specify m, epsilon, and surrogate."""
         PROBABILISTIC_BENCHMARKS = [

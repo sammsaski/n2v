@@ -98,9 +98,16 @@ BENCHMARK_CONFIGS = {
     },
 
     'cifar100_2024': {
+        # Tiny-eps adversarial CEs on a differentiable ResNet: random alone can't
+        # reach them (curse of dimensionality). Use a BOUNDED gradient attack —
+        # 'random+apgd' with 1 restart / 30 steps (~31 fwd + 30 bwd) — affordable
+        # where the full default PGD (10x50=500 steps, ~220s) was not. Reach stays
+        # probabilistic (unchanged). Finding the CE in Stage-1 also pre-empts a
+        # probabilistic unsound 'unsat' on these gold-SAT instances.
         'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
         'n_rand': 100,
-        'falsify_method': 'random',  # PGD too slow for ResNet medium (~220s for 500 gradient steps)
+        'falsify_method': 'random+apgd',
+        'falsify_kwargs': {'n_restarts': 1, 'n_steps': 30},
     },
 
     'collins_rul_cnn_2022': {
@@ -189,8 +196,15 @@ BENCHMARK_CONFIGS = {
     },
 
     'tinyimagenet_2024': {
+        # Had no falsify_method -> inherited DEFAULT 'random+pgd' at DEFAULT budget
+        # (10x50=500 grad steps, ~200s on a ResNet) -> the falsifier was likely
+        # timing out before reach even ran. Switch to a BOUNDED 'random+apgd'
+        # (1 restart / 30 steps): fixes the latent timeout AND upgrades to APGD's
+        # adaptive step schedule. Reach stays probabilistic (unchanged).
         'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
         'n_rand': 500,
+        'falsify_method': 'random+apgd',
+        'falsify_kwargs': {'n_restarts': 1, 'n_steps': 30},
     },
 
     'tllverifybench_2023': {
