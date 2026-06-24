@@ -463,6 +463,11 @@ class Star:
         else:
             use_parallel = parallel and self.dim > 1
 
+        # The batched-GPU LP path solves all 2*dim objectives in one call, so it
+        # supersedes the per-dimension ThreadPool: route through the batch path.
+        if global_config.use_gpu_lp:
+            use_parallel = False
+
         # Determine number of workers
         if n_workers is None:
             n_workers = global_config.get_n_workers(self.dim)
@@ -559,6 +564,89 @@ class Star:
 
         return lb, ub
 
+    @staticmethod
+    def get_ranges_population(
+        stars: List["Star"],
+        max_iters: int = 2000,
+        tol: float = 1e-6,
+    ) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Certified per-coordinate ranges for a whole star population at once.
+
+        Cross-population batched-GPU LP (PT-2, 4a-ii): every star's ``2*dim``
+        bound LPs ride a single 3D batched PDHG, then the vectorized
+        Neumaier-Shcherbina certificate turns the duals into *sound*
+        over-approximate bounds. This is the throughput lever when many stars
+        share var/objective structure (constraint counts may differ -- they are
+        zero-row padded, which is inert under NS).
+
+        Returns NS-certified bounds identical in contract to per-star
+        :meth:`get_ranges`. Falls back to per-star solving when no CUDA device is
+        available or the population is not shape-uniform (differing ``dim`` or
+        ``nVar``), so the result is always correct.
+
+        Args:
+            stars: Population of Stars (same ``dim`` and ``nVar`` to batch).
+            max_iters, tol: PDHG iteration cap / early-stop tolerance.
+
+        Returns:
+            ``list`` of ``(lb, ub)`` pairs, each shape ``(dim, 1)``, one per star.
+        """
+        if not stars:
+            return []
+
+        def _per_star_fallback():
+            return [s.get_ranges() for s in stars]
+
+        # GPU + shape-uniformity gate. Non-uniform or GPU-absent => exact CPU.
+        try:
+            from n2v.utils.lpsolver_gpu import gpu_available, solve_lp_population_gpu
+        except Exception:
+            return _per_star_fallback()
+        if not gpu_available():
+            return _per_star_fallback()
+
+        dim0 = stars[0].dim
+        nvar0 = stars[0].nVar
+        if nvar0 == 0 or any(s.dim != dim0 or s.nVar != nvar0 for s in stars):
+            return _per_star_fallback()
+
+        B = len(stars)
+        m_max = max(int(s.C.shape[0]) if s.C.size > 0 else 0 for s in stars)
+        if m_max == 0:
+            # Box-only population: estimate_range is the exact (sound) box bound.
+            return [s.estimate_ranges() for s in stars]
+
+        # Build padded shared-shape tensors. Objective col 2i/2i+1 = generator
+        # row i (min/max); flags shared across the population.
+        A = np.zeros((B, m_max, nvar0), dtype=np.float64)
+        b = np.zeros((B, m_max), dtype=np.float64)
+        lb = np.zeros((B, nvar0), dtype=np.float64)
+        ub = np.zeros((B, nvar0), dtype=np.float64)
+        C = np.zeros((B, nvar0, 2 * dim0), dtype=np.float64)
+        for s_idx, s in enumerate(stars):
+            ms = int(s.C.shape[0]) if s.C.size > 0 else 0
+            if ms > 0:
+                A[s_idx, :ms, :] = s.C
+                b[s_idx, :ms] = s.d.flatten()
+            lb[s_idx, :] = s.predicate_lb.flatten()
+            ub[s_idx, :] = s.predicate_ub.flatten()
+            gens = s.V[:, 1:]                       # (dim, nVar)
+            C[s_idx, :, 0::2] = gens.T              # min columns
+            C[s_idx, :, 1::2] = gens.T              # max columns
+        minimize_flags = [j % 2 == 0 for j in range(2 * dim0)]  # [min,max]*dim
+
+        bounds = solve_lp_population_gpu(
+            A, b, lb, ub, C, minimize_flags, max_iters=max_iters, tol=tol,
+        )  # (B, 2*dim)
+
+        out: List[Tuple[np.ndarray, np.ndarray]] = []
+        for s_idx, s in enumerate(stars):
+            centers = s.V[:, 0]
+            lb_s = (bounds[s_idx, 0::2] + centers).reshape(-1, 1)
+            ub_s = (bounds[s_idx, 1::2] + centers).reshape(-1, 1)
+            out.append((lb_s, ub_s))
+        return out
+
     def estimate_range(self, index: int) -> Tuple[float, float]:
         """
         Fast over-approximate range estimation using predicate bounds.
@@ -652,6 +740,18 @@ class Star:
         b = self.d if self.C.size > 0 else None
         lb = self.predicate_lb
         ub = self.predicate_ub
+
+        # Batched-GPU sound LP path (PT-2): route to the first-order GPU solver +
+        # Neumaier-Shcherbina certificate when enabled and a CUDA device exists.
+        # Returns NS-certified (sound over-approximate) bounds. Falls through to
+        # the CPU HiGHS path otherwise -- this never changes soundness.
+        if global_config.use_gpu_lp:
+            from n2v.utils.lpsolver_gpu import gpu_available, solve_lp_batch_gpu
+            if gpu_available():
+                return solve_lp_batch_gpu(
+                    objectives=objectives, A=A, b=b, lb=lb, ub=ub,
+                    minimize_flags=minimize_flags,
+                )
 
         return solve_lp_batch(
             objectives=objectives, A=A, b=b,

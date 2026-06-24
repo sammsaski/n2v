@@ -69,6 +69,11 @@ class Record:
     children: List["Record"] = field(default_factory=list)
     wall_time: float = 0.0
     cpu_time: float = 0.0
+    # Device time for kernels launched in this region, measured via CUDA events
+    # + synchronize() by the GPU code (see ``add_gpu_time``). 0.0 on CPU-only
+    # regions. ``device`` is 'cuda' once a GPU op runs in the region, else None.
+    gpu_time: float = 0.0
+    device: Optional[str] = None
     counters: Dict[str, Any] = field(default_factory=dict)
     meta: Dict[str, Any] = field(default_factory=dict)
     errored: bool = False
@@ -162,6 +167,18 @@ class Profiler:
             c = self.current().counters
             c[name] = c.get(name, 0) + n
 
+    def add_gpu_time(self, seconds: float, device: str = "cuda") -> None:
+        """Accumulate device time (seconds) on the current region.
+
+        The GPU code measures kernel time with CUDA events + ``synchronize()``
+        and reports it here, so the profiler core stays torch-free. Also tags
+        the region's ``device`` so CPU/GPU regions are distinguishable.
+        """
+        with self._lock:
+            rec = self.current()
+            rec.gpu_time += seconds
+            rec.device = device
+
     def set_meta(self, **kwargs: Any) -> None:
         with self._lock:
             self.current().meta.update(kwargs)
@@ -243,6 +260,18 @@ def set_meta(**kwargs: Any) -> None:
     if prof is None:
         return
     prof.set_meta(**kwargs)
+
+
+def add_gpu_time(seconds: float, device: str = "cuda") -> None:
+    """Record device (kernel) time on the current region. No-op when disabled.
+
+    Called by GPU code that has measured its own CUDA-event elapsed time, so the
+    profiler core never imports torch. ``device`` tags the region cpu/cuda.
+    """
+    prof = _active
+    if prof is None:
+        return
+    prof.add_gpu_time(seconds, device=device)
 
 
 # --------------------------------------------------------------------------- #
@@ -344,6 +373,13 @@ class ProfileResult:
         _walk(rec)
         return agg
 
+    def _subtree_gpu_time(self, rec: Record) -> float:
+        """Sum a region's own device time with all of its descendants'."""
+        total = rec.gpu_time
+        for c in rec.children:
+            total += self._subtree_gpu_time(c)
+        return total
+
     def rollup(self) -> Dict[str, Any]:
         """Run-level aggregate: grand totals + a per-layer-type breakdown.
 
@@ -370,6 +406,7 @@ class ProfileResult:
             )
             agg["count"] += 1
             agg["wall_time"] += r.wall_time
+            agg["gpu_time"] = agg.get("gpu_time", 0.0) + self._subtree_gpu_time(r)
             for k, v in self.subtree_counters(r).items():
                 agg["counters"][k] = agg["counters"].get(k, 0) + v
 
@@ -404,6 +441,7 @@ class ProfileResult:
         )
         return {
             "wall_time": self.root.wall_time,
+            "gpu_time": self._subtree_gpu_time(self.root),
             "n_layers": len(layers),
             "peak_population": peak_population,
             "peak_set_bytes": peak_set_bytes,
@@ -424,6 +462,8 @@ class ProfileResult:
                 f"{indent}{rec.name} [{rec.level_name}] "
                 f"wall={rec.wall_time:.6f}s self={rec.self_time:.6f}s"
             )
+            if rec.gpu_time > 0.0:
+                line += f" gpu={rec.gpu_time:.6f}s"
             if ctr:
                 line += f"  {ctr}"
             lines.append(line)
@@ -441,8 +481,10 @@ class ProfileResult:
         """Render rollup() as a compact, human-readable block."""
         out: List[str] = []
         out.append("=== run rollup ===")
+        gpu = ro.get("gpu_time", 0.0)
+        gpu_str = f"  gpu={gpu:.6f}s" if gpu > 0.0 else ""
         out.append(
-            f"wall={ro['wall_time']:.6f}s  layers={ro['n_layers']}  "
+            f"wall={ro['wall_time']:.6f}s{gpu_str}  layers={ro['n_layers']}  "
             f"peak_population={ro['peak_population']}  "
             f"peak_set_bytes={ro['peak_set_bytes']}"
         )
@@ -470,6 +512,8 @@ class ProfileResult:
             "level_name": rec.level_name,
             "wall_time": rec.wall_time,
             "cpu_time": rec.cpu_time,
+            "gpu_time": rec.gpu_time,
+            "device": rec.device,
             "self_time": rec.self_time,
             "errored": rec.errored,
             "counters": dict(rec.counters),
@@ -510,8 +554,8 @@ class ProfileResult:
                     counter_keys.append(k)
 
         fields = [
-            "depth", "name", "level", "wall_time", "cpu_time",
-            "self_time", "errored",
+            "depth", "name", "level", "wall_time", "cpu_time", "gpu_time",
+            "device", "self_time", "errored",
         ] + counter_keys
 
         buf = io.StringIO()
@@ -520,8 +564,8 @@ class ProfileResult:
         for r, depth in rows:
             row = [
                 depth, r.name, r.level_name,
-                f"{r.wall_time:.9f}", f"{r.cpu_time:.9f}",
-                f"{r.self_time:.9f}", int(r.errored),
+                f"{r.wall_time:.9f}", f"{r.cpu_time:.9f}", f"{r.gpu_time:.9f}",
+                r.device or "", f"{r.self_time:.9f}", int(r.errored),
             ] + [r.counters.get(k, "") for k in counter_keys]
             writer.writerow(row)
         return buf.getvalue()

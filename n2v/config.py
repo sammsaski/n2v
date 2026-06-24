@@ -22,6 +22,15 @@ class Config:
         # LP solver settings: stored as LPSolver enum; setter coerces from str.
         self._default_lp_solver: LPSolver = LPSolver.LINPROG
 
+        # Batched-GPU sound LP (PT-2). When enabled and a CUDA device is
+        # available, Star.get_ranges routes its 2*dim bound LPs through the
+        # first-order GPU solver + Neumaier-Shcherbina certificate
+        # (n2v.utils.lpsolver_gpu). Default OFF: the certified-sound bounds are
+        # validated separately and the CPU HiGHS path stays the default. The
+        # flag only ever changes *which sound bound* is computed, never
+        # soundness (the GPU path returns NS-certified over-approximations).
+        self._use_gpu_lp = False
+
     @property
     def parallel_lp(self) -> bool:
         """Whether to use parallel LP solving by default."""
@@ -95,6 +104,15 @@ class Config:
         """Set default LP solver (alias for lp_solver)."""
         self.lp_solver = value
 
+    @property
+    def use_gpu_lp(self) -> bool:
+        """Whether Star.get_ranges routes bound LPs through the GPU+NS path."""
+        return self._use_gpu_lp
+
+    @use_gpu_lp.setter
+    def use_gpu_lp(self, value: bool) -> None:
+        self._use_gpu_lp = bool(value)
+
     def should_use_parallel(self, dim: int) -> bool:
         """
         Determine if parallel LP solving should be used for given dimension.
@@ -136,13 +154,15 @@ class Config:
         self._auto_parallel = True
         self._parallel_threshold = 10
         self._default_lp_solver = LPSolver.LINPROG  # HiGHS via SciPy (fast C++)
+        self._use_gpu_lp = False
 
     def __repr__(self) -> str:
         return (f"Config(parallel_lp={self.parallel_lp}, "
                 f"n_workers={self.n_workers}, "
                 f"auto_parallel={self.auto_parallel}, "
                 f"parallel_threshold={self.parallel_threshold}, "
-                f"default_lp_solver='{self.default_lp_solver.value}')")
+                f"default_lp_solver='{self.default_lp_solver.value}', "
+                f"use_gpu_lp={self.use_gpu_lp})")
 
 
 # Global configuration instance
@@ -210,4 +230,20 @@ def get_config() -> dict:
         'auto_parallel': config.auto_parallel,
         'parallel_threshold': config.parallel_threshold,
         'lp_solver': config.lp_solver.value,
+        'use_gpu_lp': config.use_gpu_lp,
     }
+
+
+def set_gpu_lp(enabled: bool = True) -> None:
+    """Enable or disable the batched-GPU sound LP path (PT-2) globally.
+
+    When enabled (and a CUDA device is available), ``Star.get_ranges`` solves
+    its bound LPs with the first-order GPU solver + Neumaier-Shcherbina
+    certificate. Returns NS-certified (sound over-approximate) bounds; falls
+    back to the CPU HiGHS path when no GPU is present.
+
+    Example:
+        >>> import n2v
+        >>> n2v.set_gpu_lp(True)
+    """
+    config.use_gpu_lp = enabled
