@@ -18,6 +18,9 @@ from typing import List, Optional
 from n2v.sets import Star, ImageStar
 from n2v.sets.image_zono import ImageZono
 
+# Profiler hook (no-op when profiling is disabled)
+from n2v.profiling import region, count, OPERATION, is_enabled
+
 
 def _ct2d(layer: nn.ConvTranspose2d, x: torch.Tensor,
           bias: Optional[torch.Tensor]) -> torch.Tensor:
@@ -59,7 +62,20 @@ def conv_transpose2d_star(
                 "ConvTranspose2D requires ImageStar input. Convert Star "
                 "to ImageStar with proper height/width/channels first."
             )
-        output_stars.append(_conv_transpose2d_imagestar(layer, star))
+        with region("conv_transpose2d", OPERATION):
+            out = _conv_transpose2d_imagestar(layer, star)
+            # FLOPs (input-driven MAC count for transposed conv, x2 for
+            # mul-add, applied to every basis column).
+            if is_enabled():
+                kh, kw = (layer.kernel_size
+                          if isinstance(layer.kernel_size, tuple)
+                          else (layer.kernel_size, layer.kernel_size))
+                in_elems = star.height * star.width * star.num_channels
+                n_cols = out.V.shape[-1]
+                count("flops",
+                      2 * in_elems * (layer.out_channels // layer.groups)
+                      * kh * kw * n_cols)
+        output_stars.append(out)
     return output_stars
 
 

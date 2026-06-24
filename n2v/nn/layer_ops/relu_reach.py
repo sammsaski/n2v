@@ -10,12 +10,21 @@ and converted back to ImageStar (via _preserve_imagestar_type()).
 """
 
 import logging
+import warnings
 
 import numpy as np
 from typing import List, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from n2v.sets import Star, Zono, Hexatope, Octatope
 from n2v.sets.image_star import ImageStar
+
+# Profiler hooks (no-op when profiling is disabled)
+from n2v.profiling import count, is_enabled
+from n2v.nn.layer_ops._profiling import (
+    record_layer_neurons,
+    record_classification,
+    record_relax_outcome,
+)
 from n2v.utils.lp_solver_enum import LPSolver
 
 logger = logging.getLogger(__name__)
@@ -59,6 +68,9 @@ def relu_star_exact(
     Returns:
         List of output Star sets (may be more than input due to splitting)
     """
+    # Profiler: static neuron count, once per layer (no-op when disabled)
+    record_layer_neurons(input_stars)
+
     # Check if we should use parallel processing
     use_parallel = _should_use_star_parallel(len(input_stars), parallel, n_workers)
 
@@ -137,6 +149,11 @@ def _relu_single_star_exact(
     # Neurons crossing zero (lb < 0 and ub > 0) - need splitting
     split_map = np.where((lb.flatten() < 0) & (ub.flatten() > 0))[0]
 
+    # Profiler: neuron stability classification, summed across the per-star
+    # population. reset_map = always inactive (ub<=0); split_map = unstable
+    # (lb<0<ub); the remainder active. n_neurons (static) is at the layer level.
+    record_classification(I.dim, len(reset_map), len(split_map))
+
     # Recursively split each uncertain neuron
     for i, neuron_idx in enumerate(split_map):
         if verbose:
@@ -171,11 +188,13 @@ def _step_relu(I: Star, index: int, lp_solver: "LPSolver | str" = LPSolver.DEFAU
         return []
 
     if xmin >= 0:
-        # Always active
+        # Always active (the exact LP resolved an estimated-unstable neuron)
+        count("n_resolved", 1)
         return [I]
 
     elif xmax <= 0:
-        # Always inactive - zero out
+        # Always inactive - zero out (estimated-unstable resolved by exact LP)
+        count("n_resolved", 1)
         new_V = I.V.copy()
         new_V[index, :] = 0
 
@@ -192,6 +211,7 @@ def _step_relu(I: Star, index: int, lp_solver: "LPSolver | str" = LPSolver.DEFAU
 
     else:
         # Split into two cases
+        count("n_split", 1)
         c = I.V[index, 0]
         V = I.V[index, 1:I.nVar + 1].reshape(1, -1)
 
@@ -244,6 +264,11 @@ def relu_star_approx(
     """
     if relax_factor == 0.0:
         return relu_star_exact(input_stars, lp_solver, precomputed_bounds=precomputed_bounds)
+
+    # Profiler: static neuron count, once per layer (no-op when disabled).
+    # (The relax_factor==0 branch above delegates to relu_star_exact, which
+    # records it; record here only for the genuinely-approximate path.)
+    record_layer_neurons(input_stars)
 
     output_stars = []
 
@@ -325,6 +350,11 @@ def _relu_single_star_approx(
     # Classify neurons
     reset_map = np.where(ub_est <= 0)[0]
     crossing_map = np.where((lb_est < 0) & (ub_est > 0))[0]
+
+    # Profiler: classification + relaxation, summed across the per-star
+    # population (approx never splits). n_neurons (static) is at the layer level.
+    record_classification(I.dim, len(reset_map), len(crossing_map))
+    count("n_relaxed", len(crossing_map))
 
     # Zero out inactive neurons
     V = I.V.copy()
@@ -456,6 +486,8 @@ def relu_zono_approx(input_zonos: List[Zono]) -> List[Zono]:
     Returns:
         List of output Zonotopes (over-approximation)
     """
+    record_layer_neurons(input_zonos)  # static neuron count, once per layer
+
     output_zonos = []
 
     for zono in input_zonos:
@@ -477,6 +509,19 @@ def _relu_single_zono(I: Zono) -> Zono:
         Output Zonotope (over-approximation)
     """
     lb, ub = I.get_bounds()
+
+    # Profiler: per-zono classification + relaxation, matching the loop logic
+    # below (ub<=0 inactive; else lb>=0 active; else crossing). Guarded because
+    # these two boolean passes + reductions exist ONLY for profiling -- the
+    # per-neuron loop below recomputes classification itself and never reads
+    # them -- so the disabled path must pay nothing (cf. affine_map).
+    if is_enabled():
+        _inactive = ub.flatten() <= 0
+        _active = (~_inactive) & (lb.flatten() >= 0)
+        n_inactive = int(_inactive.sum())
+        n_unstable = I.dim - n_inactive - int(_active.sum())
+        record_classification(I.dim, n_inactive, n_unstable)
+        count("n_relaxed", n_unstable)
 
     new_c = I.c.copy()
     new_V = I.V.copy()
@@ -597,6 +642,9 @@ def _relu_single_star_relax_range(
     # Step 3: Find neurons crossing zero
     map2 = np.where((lb < 0) & (ub > 0))[0]
 
+    # Profiler: per-star classification (no-op when disabled)
+    record_classification(I.dim, len(map1), len(map2))
+
     if len(map2) == 0:
         return In
 
@@ -638,6 +686,9 @@ def _relu_single_star_relax_range(
     map9 = np.concatenate([map22, map8]) if len(map8) > 0 else map22
     lb3 = np.concatenate([lb1, lb2]) if len(lb2) > 0 else lb1
     ub3 = np.concatenate([ub1, ub2]) if len(ub2) > 0 else ub1
+
+    # Profiler: relaxed vs LP-resolved (no-op when disabled)
+    record_relax_outcome(len(map2), len(map9))
 
     if len(map9) == 0:
         return In
@@ -706,6 +757,9 @@ def _relu_single_star_relax_area(
     # Find neurons crossing zero
     map2 = np.where((lb < 0) & (ub > 0))[0]
 
+    # Profiler: per-star classification (no-op when disabled)
+    record_classification(I.dim, len(map1), len(map2))
+
     if len(map2) == 0:
         return In
 
@@ -743,6 +797,9 @@ def _relu_single_star_relax_area(
     map9 = np.concatenate([map22, map8]) if len(map8) > 0 else map22
     lb3 = np.concatenate([lb1, lb2]) if len(lb2) > 0 else lb1
     ub3 = np.concatenate([ub1, ub2]) if len(ub2) > 0 else ub1
+
+    # Profiler: relaxed vs LP-resolved (no-op when disabled)
+    record_relax_outcome(len(map2), len(map9))
 
     if len(map9) == 0:
         return In
@@ -810,6 +867,9 @@ def _relu_single_star_relax_bound(
     # Find neurons crossing zero
     map2 = np.where((lb < 0) & (ub > 0))[0]
 
+    # Profiler: per-star classification (no-op when disabled)
+    record_classification(I.dim, len(map1), len(map2))
+
     if len(map2) == 0:
         return In
 
@@ -874,6 +934,9 @@ def _relu_single_star_relax_bound(
     drop = (np.concatenate([map4, proven_active])
             if n_drop > 0 else np.array([], dtype=int))
     crossing_neurons = np.setdiff1d(map2, drop)
+
+    # Profiler: relaxed vs LP-resolved (no-op when disabled)
+    record_relax_outcome(len(map2), len(crossing_neurons))
 
     if len(crossing_neurons) == 0:
         return In
@@ -1119,6 +1182,18 @@ def _relu_star_exact_parallel(
         return output_stars
 
     # Parallel processing
+    # Profiler caveat: worker PROCESSES can't share the parent's region tree, so
+    # their counts (n_split/n_lp_solves/classification) are lost — totals read
+    # low here. Warn once so the numbers aren't silently CPU-count-dependent.
+    # (See plan §9 "process-pool record-return".) Run n_workers=1 for accuracy.
+    if is_enabled():
+        warnings.warn(
+            "Profiler: exact-ReLU ProcessPool path active; per-worker counters "
+            "are not captured (totals will read low). Use n_workers=1 for "
+            "accurate profiling.",
+            RuntimeWarning, stacklevel=2,
+        )
+
     # Convert ImageStars to Stars first (conversion is fast, not worth parallelizing)
     stars_2d = [s.to_star() if isinstance(s, ImageStar) else s for s in input_stars]
     output_stars = []
@@ -1186,6 +1261,9 @@ def _relu_single_hexatope(I: Hexatope, solver: str = None) -> List[Hexatope]:
     # Step 2: Split crossing neurons
     crossing = np.where((lb.flatten() < 0) & (ub.flatten() > 0))[0]
 
+    # Profiler: per-set neuron classification (no-op when disabled)
+    record_classification(n, len(inactive), len(crossing))
+
     if len(crossing) == 0:
         return [I]
 
@@ -1211,6 +1289,8 @@ def _relu_single_hexatope(I: Hexatope, solver: str = None) -> List[Hexatope]:
 
             new_sets.append(active)
             new_sets.append(inactive_set)
+        # n_split = branches added this neuron: P sets each double (P->2P).
+        count("n_split", len(current_sets))
         current_sets = new_sets
 
     return current_sets
@@ -1227,6 +1307,7 @@ def relu_hexatope(input_hexatopes: List[Hexatope], solver: str = None) -> List[H
         input_hexatopes: List of input Hexatope sets
         solver: Optional solver method ('lp' or 'mcf').
     """
+    record_layer_neurons(input_hexatopes)  # static neuron count, once per layer
     output_hexatopes = []
     for hexatope in input_hexatopes:
         output_hexatopes.extend(_relu_single_hexatope(hexatope, solver=solver))
@@ -1274,6 +1355,9 @@ def _relu_single_octatope(I: Octatope, solver: str = None) -> List[Octatope]:
 
     crossing = np.where((lb.flatten() < 0) & (ub.flatten() > 0))[0]
 
+    # Profiler: per-set neuron classification (no-op when disabled)
+    record_classification(n, len(inactive), len(crossing))
+
     if len(crossing) == 0:
         return [I]
 
@@ -1297,6 +1381,8 @@ def _relu_single_octatope(I: Octatope, solver: str = None) -> List[Octatope]:
 
             new_sets.append(active)
             new_sets.append(inactive_set)
+        # n_split = branches added this neuron: P sets each double (P->2P).
+        count("n_split", len(current_sets))
         current_sets = new_sets
 
     return current_sets
@@ -1310,6 +1396,7 @@ def relu_octatope(input_octatopes: List[Octatope], solver: str = None) -> List[O
         input_octatopes: List of input Octatope sets
         solver: Optional solver method ('lp' or 'mcf').
     """
+    record_layer_neurons(input_octatopes)  # static neuron count, once per layer
     output_octatopes = []
     for octatope in input_octatopes:
         output_octatopes.extend(_relu_single_octatope(octatope, solver=solver))

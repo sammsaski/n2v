@@ -26,6 +26,9 @@ from n2v.nn.layer_ops.dispatcher import reach_layer
 from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
 from n2v.utils.model_preprocessing import fuse_batchnorm, has_batchnorm
 from n2v.utils.bounds_precomputation import compute_intermediate_bounds
+
+# Profiler hooks (no-op when profiling is disabled)
+from n2v.profiling import region, PHASE
 from n2v.probabilistic.conformal_reach import ConformalReachConfig, conformal_reach
 from n2v.probabilistic.flow.reach import FlowReachConfig, flow_reach
 from onnx2torch.node_converters.reshape import OnnxReshape
@@ -350,7 +353,8 @@ def reach_pytorch_model(
                 f"Tracing failed with: {e}"
             ) from e
 
-    return _handle_graphmodule(model, [input_set], method, **kwargs)
+    with region("reach", PHASE):
+        return _handle_graphmodule(model, [input_set], method, **kwargs)
 
 
 def _function_node_to_module(

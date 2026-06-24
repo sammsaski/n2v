@@ -21,6 +21,13 @@ from n2v.sets import Star, Zono
 from n2v.sets.image_star import ImageStar
 from n2v.utils.lp_solver_enum import LPSolver
 
+# Profiler hooks (no-op when profiling is disabled)
+from n2v.profiling import count
+from n2v.nn.layer_ops._profiling import (
+    record_layer_neurons,
+    record_classification,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +58,9 @@ def leakyrelu_star_exact(
     Returns:
         List of output Star sets (may be more than input due to splitting)
     """
+    # Profiler: static neuron count, once per layer (no-op when disabled)
+    record_layer_neurons(input_stars)
+
     output_stars = []
     for star in input_stars:
         star_2d = star.to_star() if isinstance(star, ImageStar) else star
@@ -100,6 +110,10 @@ def _leakyrelu_single_star_exact(
     # Split on neurons crossing zero
     split_map = np.where((lb.flatten() < 0) & (ub.flatten() > 0))[0]
 
+    # Profiler: classification, summed across the per-star population (inactive =
+    # always-negative-slope; unstable = crossing). n_neurons at the layer level.
+    record_classification(I.dim, len(inactive_map), len(split_map))
+
     for i, neuron_idx in enumerate(split_map):
         if verbose:
             logger.debug(f'Exact LeakyReLU_{neuron_idx} ({i+1}/{len(split_map)})')
@@ -120,10 +134,12 @@ def _step_leakyrelu(I: Star, index: int, gamma: float, lp_solver: "LPSolver | st
         return []
 
     if xmin >= 0:
+        count("n_resolved", 1)
         return [I]
 
     elif xmax <= 0:
         # Always inactive — scale by gamma
+        count("n_resolved", 1)
         new_V = I.V.copy()
         new_V[index, :] = gamma * new_V[index, :]
 
@@ -140,6 +156,7 @@ def _step_leakyrelu(I: Star, index: int, gamma: float, lp_solver: "LPSolver | st
 
     else:
         # Split into two cases
+        count("n_split", 1)
         c = I.V[index, 0]
         V_row = I.V[index, 1:I.nVar + 1].reshape(1, -1)
 
@@ -191,6 +208,9 @@ def leakyrelu_star_approx(
     Returns:
         List of output Stars (no splitting, same count as input)
     """
+    # Profiler: static neuron count, once per layer (no-op when disabled)
+    record_layer_neurons(input_stars)
+
     output_stars = []
     for star in input_stars:
         star_2d = star.to_star() if isinstance(star, ImageStar) else star

@@ -16,6 +16,9 @@ import numpy as np
 from scipy.optimize import linprog as scipy_linprog
 from scipy.sparse import issparse
 
+# Profiler hook (no-op when profiling is disabled)
+from n2v.profiling import count
+
 from n2v.utils.lp_solver_enum import Backend, LPSolver, resolve
 
 # Try to import highspy for direct HiGHS API access
@@ -63,6 +66,8 @@ def solve_lp_batch(
     """
     if not objectives:
         return []
+
+    count("n_lp_solves", len(objectives))
 
     # Resolve solver at the public boundary. ``allow_sentinel=False`` drops
     # ``LPSolver.DEFAULT`` down to whatever ``config.lp_solver`` currently is.

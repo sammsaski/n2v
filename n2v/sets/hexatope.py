@@ -26,6 +26,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
 
+# Profiler hook (no-op when profiling is disabled). Octatope MCF delegates here,
+# so this single site counts every MCF solve across both representations.
+from n2v.profiling import count
+
 # TYPE_CHECKING imports for type hints (avoid circular import at runtime)
 if TYPE_CHECKING:
     from n2v.sets.box import Box
@@ -575,6 +579,9 @@ class Hexatope:
             G[u][v]['capacity'] = finite_cap
 
         try:
+            # Profiler: one MCF solve (the Hexatope/Octatope analog of an LP
+            # solve; no-op when disabled).
+            count("n_mcf_solves", 1)
             # Solve minimum cost flow using network simplex
             flow_cost, flow_dict = nx.network_simplex(G, demand='demand', weight='cost')
 

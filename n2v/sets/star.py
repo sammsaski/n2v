@@ -28,6 +28,9 @@ from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
 
 from n2v.config import config as global_config
 
+# Profiler hooks (no-op when profiling is disabled)
+from n2v.profiling import region, count, is_enabled, OPERATION
+
 
 class Star:
     """
@@ -194,7 +197,12 @@ class Star:
             raise ValueError(f"Matrix W has {W.shape[1]} columns, expected {self.dim}")
 
         # Transform V: new_V = W * V
-        new_V = W @ self.V
+        with region("affine_map", OPERATION):
+            new_V = W @ self.V
+            # FLOPs of the (m,n)@(n,p+1) matmul: 2 mul-adds per output element.
+            # Guarded (like the conv sites) so the disabled path pays nothing.
+            if is_enabled():
+                count("flops", 2 * W.shape[0] * W.shape[1] * self.V.shape[1])
 
         # Add bias to center if provided
         if b is not None:

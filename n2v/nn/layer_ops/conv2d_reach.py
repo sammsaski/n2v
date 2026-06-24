@@ -15,6 +15,9 @@ import numpy as np
 from typing import List
 from n2v.sets import Star, Zono, ImageStar, ImageZono, Hexatope, Octatope
 
+# Profiler hook (no-op when profiling is disabled)
+from n2v.profiling import region, count, OPERATION, is_enabled
+
 
 def conv2d_star(
     layer: nn.Conv2d,
@@ -44,7 +47,20 @@ def conv2d_star(
     for star in input_stars:
         if isinstance(star, ImageStar):
             # Optimized 4D path for ImageStar
-            output_star = _conv2d_imagestar_4d(layer, star)
+            with region("conv2d", OPERATION):
+                output_star = _conv2d_imagestar_4d(layer, star)
+                # FLOPs: 2 mul-adds per (output element x kernel x in_channels),
+                # applied to every basis column (center + generators).
+                if is_enabled():
+                    kh, kw = (layer.kernel_size if isinstance(layer.kernel_size, tuple)
+                              else (layer.kernel_size, layer.kernel_size))
+                    out_elems = (output_star.height * output_star.width
+                                 * output_star.num_channels)
+                    n_cols = output_star.V.shape[-1]
+                    # each output channel connects to in_channels/groups inputs
+                    count("flops",
+                          2 * out_elems * n_cols * kh * kw
+                          * (layer.in_channels // layer.groups))
         elif isinstance(star, Star):
             # TODO: Add conv2d support for Star by constructing conv matrix
             # For now, require ImageStar
