@@ -86,10 +86,12 @@ class TestGetConfig:
         cfg = get_config('acasxu_2023')
         assert cfg['n_rand'] == 500
 
-    def test_cora_uses_random_falsify(self):
-        """cora uses random-only falsification (PGD too slow for OnnxMatMul)."""
+    def test_cora_uses_bounded_random_apgd(self):
+        """cora: bounded random+apgd (full PGD too slow for 784-dim OnnxMatMul,
+        but 1 restart / 30 steps is affordable and lifts sat — validated +2/4)."""
         cfg = get_config('cora_2024', onnx_path='mnist-set.onnx')
-        assert cfg['falsify_method'] == 'random'
+        assert cfg['falsify_method'] == 'random+apgd'
+        assert cfg['falsify_kwargs'] == {'n_restarts': 1, 'n_steps': 30}
 
     def test_default_falsify_method_is_random_pgd(self):
         """Benchmarks without explicit falsify_method default to random+pgd."""

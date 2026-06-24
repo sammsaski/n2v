@@ -129,7 +129,11 @@ BENCHMARK_CONFIGS = {
             ],
         },
         'n_rand': 100,
-        'falsify_method': 'random',  # PGD too slow for 784-dim OnnxMatMul models
+        # Bounded gradient attack: full PGD was too slow on 784-dim OnnxMatMul, but
+        # random+apgd at 1 restart / 30 steps is affordable and (like cifar100) may
+        # crack thin-sliver CEs random misses. cora is the largest sat pool (131).
+        'falsify_method': 'random+apgd',
+        'falsify_kwargs': {'n_restarts': 1, 'n_steps': 30},
     },
 
     'dist_shift_2023': {
