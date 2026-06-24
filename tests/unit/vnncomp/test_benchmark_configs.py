@@ -147,3 +147,33 @@ class TestGetConfig:
                 assert method in ('exact', 'approx', 'probabilistic'), \
                     f"{category} has invalid method: {method}"
                 assert isinstance(kwargs, dict)
+
+    def test_no_benchmark_silently_falls_to_default(self):
+        """Drift guard: every shipped benchmark category must have an explicit
+        config OR be on the intentional-DEFAULT allowlist. A NEW category that
+        silently falls to DEFAULT (untuned -> may timeout to 0) fails here ->
+        update this snapshot (with rationale) when the benchmark set changes."""
+        BENCHMARK_DIRS = {
+            'acasxu_2023', 'adaptive_cruise_control_non_linear_2026', 'cctsdb_yolo_2023',
+            'cersyve', 'cgan_2023', 'cgan2026', 'challenging_certified_training_2026',
+            'cifar100_2024', 'collins_aerospace_benchmark', 'collins_rul_cnn_2022',
+            'cora_2024', 'dist_shift_2023', 'isomorphic_acasxu_2026', 'linearizenn_2024',
+            'lsnc_relu', 'malbeware', 'metaroom_2023', 'ml4acopf_2024',
+            'monotonic_acasxu_2026', 'nn4sys', 'nn4sys_2023', 'relusplitter',
+            'relusplitter_2026', 'safenlp_2024', 'sat_relu', 'smart_turn_multimodal_2026',
+            'soundnessbench', 'soundnessbench_2026', 'test', 'tinyimagenet_2024',
+            'tllverifybench_2023', 'traffic_signs_recognition_2023', 'vggnet16_2022',
+            'vit_2023', 'yolo_2023',
+        }
+        # Intentionally left on sound DEFAULT [approx,exact] or handled by a
+        # separate runner path (nonlinear/quantized/relational specs + unsupported-op
+        # cats that degrade to a sound 'unknown').
+        INTENTIONAL_DEFAULT = {
+            'adaptive_cruise_control_non_linear_2026',         # nonlinear spec
+            'smart_turn_multimodal_2026',                      # quantized multi-input
+            'cctsdb_yolo_2023',                                # unsupported detection-head ops
+            'isomorphic_acasxu_2026', 'monotonic_acasxu_2026',  # relational (verify_relational_instance)
+        }
+        for cat in BENCHMARK_DIRS:
+            assert cat in BENCHMARK_CONFIGS or cat in INTENTIONAL_DEFAULT, \
+                f"{cat} has no explicit config and is not on the intentional-DEFAULT allowlist"
