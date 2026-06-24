@@ -257,7 +257,9 @@ def test_t15_single_region_no_counters():
     # no counters anywhere -> totals empty, csv has just the fixed columns
     assert p.rollup()["totals"] == {}
     header = p.to_csv().splitlines()[0]
-    assert header.startswith("depth,name,level,wall_time,cpu_time,self_time,errored")
+    assert header.startswith(
+        "depth,name,level,wall_time,cpu_time,gpu_time,device,self_time,errored"
+    )
 
 
 # --------------------------------------------------------------------------- #
