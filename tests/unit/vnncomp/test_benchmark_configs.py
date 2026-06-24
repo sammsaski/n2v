@@ -66,19 +66,6 @@ class TestGetConfig:
         cfg = get_config('malbeware')
         assert cfg['reach_methods'] == [('exact', {})]
 
-    def test_cersyve_sound_reach_no_probabilistic(self):
-        """Switched probabilistic -> sound [approx, exact] (removes unsound unsat)."""
-        cfg = get_config('cersyve')
-        assert cfg['reach_methods'] == [('approx', {}), ('exact', {})]
-        assert cfg['n_rand'] == 3000
-        assert all(m != 'probabilistic' for m, _ in cfg['reach_methods'])
-
-    def test_ml4acopf_sound_reach_no_probabilistic(self):
-        """Switched probabilistic -> sound approx (the only confirmed -150 cat)."""
-        cfg = get_config('ml4acopf_2024')
-        assert cfg['reach_methods'] == [('approx', {})]
-        assert all(m != 'probabilistic' for m, _ in cfg['reach_methods'])
-
     def test_tllverify_relax_then_approx(self):
         cfg = get_config('tllverifybench_2023')
         methods = cfg['reach_methods']
@@ -138,12 +125,10 @@ class TestGetConfig:
 
     def test_probabilistic_configs_have_kwargs(self):
         """All probabilistic methods must specify m, epsilon, and surrogate."""
-        # Truly-probabilistic single-config cats. cersyve + ml4acopf_2024 were
-        # switched to sound approx/exact; soundnessbench/collins are also no longer
-        # probabilistic. (cgan-transformer / nn4sys-default are tested separately.)
         PROBABILISTIC_BENCHMARKS = [
-            'cifar100_2024', 'tinyimagenet_2024',
-            'vggnet16_2022', 'vit_2023', 'yolo_2023',
+            'cersyve', 'cifar100_2024', 'soundnessbench', 'tinyimagenet_2024',
+            'collins_aerospace_benchmark', 'ml4acopf_2024', 'vggnet16_2022',
+            'vit_2023', 'yolo_2023',
         ]
         for category in PROBABILISTIC_BENCHMARKS:
             cfg = get_config(category)
