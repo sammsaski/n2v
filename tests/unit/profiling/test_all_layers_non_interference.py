@@ -68,6 +68,14 @@ def img_zono(h=4, w=4, c=2):
     return ImageZono.from_bounds(lb, ub, h, w, c)
 
 
+def img_star_one_window():
+    """2x2x1 ImageStar with an ambiguous argmax -> exact MaxPool splits into a
+    bounded 2 stars (a full image would explode exponentially under exact)."""
+    lb = np.array([[[0.4], [0.4]], [[-1.0], [-1.0]]])
+    ub = np.array([[[0.6], [0.6]], [[-0.8], [-0.8]]])
+    return ImageStar.from_bounds(lb, ub, 2, 2, 1)
+
+
 def _linear(nin, nout):
     torch.manual_seed(0)
     return nn.Linear(nin, nout)
@@ -127,7 +135,8 @@ def _cases():
         ("conv1d-star", nn.Conv1d(2, 3, 3, padding=1), [flat_star(8)], "approx"),
         ("global_avgpool-imagestar", nn.AdaptiveAvgPool2d(1), [img_star()], "approx"),
         ("batchnorm2d-imagestar", _bn2d(), [img_star()], "approx"),
-        ("maxpool2d-imagestar-exact", nn.MaxPool2d(2), [img_star()], "exact"),
+        # tiny single-window input: exact MaxPool splits but stays bounded
+        ("maxpool2d-imagestar-exact", nn.MaxPool2d(2), [img_star_one_window()], "exact"),
         ("maxpool2d-imagestar-approx", nn.MaxPool2d(2), [img_star()], "approx"),
         ("avgpool2d-imagestar", nn.AvgPool2d(2), [img_star()], "approx"),
         ("flatten-imagestar", nn.Flatten(), [img_star()], "approx"),
