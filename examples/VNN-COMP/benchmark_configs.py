@@ -43,10 +43,12 @@ BENCHMARK_CONFIGS = {
     },
 
     'cersyve': {
-        # NNV uses cp-star; n2v matched via falsification already.
-        # n_rand bumped 100->3000: validated to find more SOUND (CE-validated) sat
-        # (1->4) now that batched random sampling makes it cheap.
-        'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
+        # Tier-1 sound-reach (BENCHMARK_SUPPORT); tiny nets (6-20 KB), 100s budget.
+        # Switch probabilistic -> sound [approx, exact] (MIXED 6 sat / 6 unsat): the
+        # probabilistic path can only emit an UNSOUND coverage-set 'unsat' (-150 on a
+        # falsify-missed sat); approx/exact give SOUND holds, falsify gives sat.
+        # Keep n_rand=3000 (validated 1->4 sound sat).
+        'reach_methods': [('approx', {}), ('exact', {})],
         'n_rand': 3000,
     },
 
@@ -244,16 +246,20 @@ BENCHMARK_CONFIGS = {
     },
 
     'ml4acopf_2024': {
-        # Falsify with random+apgd (was the random+pgd default). Validated (gold-aware,
-        # 2026-06-23): at nr=3/ns=50 APGD cracks the gold-sat 300_ieee_prop2 (linear-
-        # residual) CE that random/pgd miss and it survives the onnxruntime re-check ->
-        # one more sound +10 sat AND one fewer instance that falls through to the
-        # (unsound) probabilistic reach and emits a false `unsat` (-150). The cheaper
-        # nr=1/ns=30 budget does NOT crack it, so the stronger budget is required here.
-        # Independent of the reach decision (#36). (300_ieee base onnx stays uncrackable.)
+        # Falsify with random+apgd (PR #37; was the random+pgd default). Validated
+        # (gold-aware, 2026-06-23): at nr=3/ns=50 APGD cracks the gold-sat 300_ieee_prop2
+        # (linear-residual) CE that random/pgd miss and it survives the onnxruntime
+        # re-check -> one more sound +10 sat. The cheaper nr=1/ns=30 budget does NOT crack
+        # it, so the stronger budget is required. (300_ieee base onnx stays uncrackable.)
         'falsify_method': 'random+apgd',
         'falsify_kwargs': {'n_restarts': 3, 'n_steps': 50},
-        'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
+        # Reach (PR #36, integrity-first): probabilistic -> SOUND approx. ml4acopf was the
+        # only empirically-confirmed unsound 'unsat' (GAP_ANALYSIS: ml4acopf x2); a
+        # probabilistic coverage-set 'unsat' on a falsify-missed sat = -150. approx
+        # over-approximates -> any 'unsat' is a true hold; an unsupported op -> unknown.
+        # NOT exact (would blow up on the 930KB/4MB 118/300 nets). MUST gold-validate
+        # (zero wrong unsat); concede 300_ieee -> [] if approx too slow.
+        'reach_methods': [('approx', {})],
         'n_rand': 100,
     },
 
