@@ -217,16 +217,31 @@ n2v's `_same_predicate_system` decides "shared α" by **structural equality** of
 mis-identified as correlated, and `_add_sets` takes the exact `V1+V2` branch,
 cancelling generators and **excluding true outputs** (CE: `x∈[-1,1]` and
 `branch=(-1)·x'` with `x'` an *independent* `[-1,1]`; structural check passes,
-result collapses to `{0}` vs true `[-2,2]`). This is a latent n2v bug
-(tracked as I-35 "prefix-aligned variant").
+result collapses to `{0}` vs true `[-2,2]`). This is a latent *soundness* concern
+in the exact-branch gating.
+
+Two distinct issues, do not conflate: (a) the block-diagonal **fallback** in
+`_add_sets`/`_join_predicates` is **sound but loose** — tightening it to a
+prefix-aligned join is the tracked **precision** future-work **I-35** (referenced
+in the `_add_sets` docstring; lives in `.claude/issues.md`, which is gitignored
+and not in-clone, so the issue text is unavailable here). (b) The
+structural-equality **exact-branch gate** above is a separate latent
+**unsoundness**. The repo already found & fixed a prior prefix-align
+under-approximation in `Concat` (`TestConcatMismatchedPredicates` in
+`tests/soundness/test_soundness_mul_div_concat.py`) — prefix-align must be done
+carefully.
 
 For our attention residual `y = x + attn(x)`, `attn(x)` is built **from** `x` by
 only **appending** predicate columns, so `x`'s α is a genuine **prefix** of
-`attn(x)`'s α. The sound **and tight** op is **prefix-aligned addition**: pad
-`x`'s generators with zeros for the fresh columns and add over `attn(x)`'s
-constraint system (which already contains `x`'s). We implement this with
-provenance we control, never relying on the structural fast path. Where
-provenance can't be proven, fall back to the block-diagonal join (sound, looser).
+`attn(x)`'s α. The sound **and tight** op is **provenance-aware prefix-aligned
+addition**: pad `x`'s generators with zeros for the fresh columns and add over
+`attn(x)`'s constraint system (which already contains `x`'s). We use provenance
+we control (never the structural fast path), which delivers I-35's tightness
+*and* avoids the gate's false-positive. `relational.py::_relational_join` already
+implements this prefix-aligned construction (input predicates identified,
+block-diagonal only over the appended tails) and is directly adaptable — it
+stacks states, the residual needs element-wise add. Where provenance can't be
+proven, fall back to the block-diagonal join (sound, looser).
 
 ### 6.3 Other guardrails
 - A·V: assert `a_lb≥0` (and `a_ub≥a_lb`) on entry; the slope FP-clamp is then a
