@@ -61,6 +61,22 @@ over-approximation ≈ ±1000 vs true ≈ ±10), so ε\*=0 there.
 (symbolic attention, §5) has a chance of flipping individual margins positive,
 and where any future BaB would converge fastest.
 
+## 3bis. Symbolic precision mode (`mode='symbolic-av'`)
+
+The concretize driver box-lifts the attention output, discarding the value-path
+correlation. The `symbolic-av` mode instead keeps it: A·V via `av_envelope_star`
+(O affine in V's predicates + sign-aware McCormick slack) and a provenance-aware
+**prefix-aligned residual** (§6.2) so the stream stays input-correlated. QKᵀ and
+softmax are still concretized (so the attention *weights* A remain box-lifted).
+
+Validated on pgd_2_3_16 inst 0 at full ε (LP margins): **sound** (0/3 containment
+violations), and **tighter** — LP min-margin **−522 vs −848** concretize (≈1.6×),
+with **fewer predicates** (4308 vs 14776, since S/A/O are not all box-lifted). So
+the value-path + prefix-residual is a real, sound precision gain. It is not by
+itself enough to certify the (deliberately BaB-hard) instances at full ε — the
+remaining looseness is the box-lifted attention *weights* A, which needs the
+symbolic softmax (design Slices 1–2), and ultimately BaB (§5).
+
 ## 4. Why full-ε ≈ 0 is principled (the key insight)
 
 `generate_properties.py` builds each instance set by keeping only CIFAR images
