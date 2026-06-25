@@ -116,7 +116,7 @@ def softmax_attn_zono(
 
 def softmax_attn_star(
     input_stars: List[Star], shape: Sequence[int], axis: int = -1,
-    lp_solver: str = "default",
+    lp_solver: str = "default", bounds: str = "estimate",
 ) -> List[Star]:
     """Sound softmax for Star logits (box-precision enclosure).
 
@@ -127,7 +127,12 @@ def softmax_attn_star(
     """
     out: List[Star] = []
     for star in input_stars:
-        lo, hi = star.get_ranges(lp_solver=lp_solver)
+        if bounds == "lp":
+            lo, hi = star.get_ranges(lp_solver=lp_solver)
+        elif bounds == "estimate":
+            lo, hi = star.estimate_ranges()
+        else:
+            raise ValueError(f"unknown bounds mode {bounds!r}")
         a_lb, a_ub = _bounds_to_flat(
             np.asarray(lo).reshape(-1), np.asarray(hi).reshape(-1), shape, axis)
         out.append(Star.from_bounds(a_lb, a_ub))

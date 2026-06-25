@@ -42,6 +42,19 @@ def _as_flat(lb: np.ndarray, ub: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
             np.asarray(ub, dtype=np.float64).reshape(-1))
 
 
+def _star_bounds(star, bounds: str, lp_solver: str):
+    """Per-dim bounds of a Star. ``bounds='lp'`` is exact (``get_ranges``);
+    ``bounds='estimate'`` uses the predicate-box estimate -- pure numpy, a sound
+    over-approximation in general and *exact* when the star has no constraint
+    rows (the usual case in the concretise pipeline before any relaxation).
+    Both are sound (the estimate is a superset)."""
+    if bounds == "lp":
+        return _as_flat(*star.get_ranges(lp_solver=lp_solver))
+    if bounds == "estimate":
+        return _as_flat(*star.estimate_ranges())
+    raise ValueError(f"unknown bounds mode {bounds!r}")
+
+
 def _interval_matmul(
     al: np.ndarray, au: np.ndarray, bl: np.ndarray, bu: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -164,7 +177,7 @@ def bilinear_matmul_star(
     left_stars: List[Star], right_stars: List[Star],
     left_shape: Sequence[int], right_shape: Sequence[int],
     scale: float = 1.0, mode: str = "concretize",
-    lp_solver: str = "default",
+    lp_solver: str = "default", bounds: str = "estimate",
 ) -> List[Star]:
     """Sound ``scale * (left @ right)`` for Star operands.
 
@@ -184,8 +197,8 @@ def bilinear_matmul_star(
     for ls_star, rs_star in zip(left_stars, right_stars):
         ls = _check_shapes(ls_star.dim, left_shape, "left")
         rs = _check_shapes(rs_star.dim, right_shape, "right")
-        ll, lu = _as_flat(*ls_star.get_ranges(lp_solver=lp_solver))
-        rl, ru = _as_flat(*rs_star.get_ranges(lp_solver=lp_solver))
+        ll, lu = _star_bounds(ls_star, bounds, lp_solver)
+        rl, ru = _star_bounds(rs_star, bounds, lp_solver)
         cl, cu = _concretize_bounds(ll, lu, rl, ru, ls, rs, scale)
         out.append(Star.from_bounds(cl, cu))
     return out
