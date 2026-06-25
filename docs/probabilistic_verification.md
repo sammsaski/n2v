@@ -370,7 +370,9 @@ def compute_bounds(surrogate_lb, surrogate_ub, threshold, tau):
 
 1. Hashemi et al. "Scaling Data-Driven Probabilistic Robustness Analysis for Semantic Segmentation Neural Networks" (NeurIPS 2025)
 
-2. Vovk et al. "Algorithmic Learning in a Random World" (Conformal prediction foundations)
+2. Hashemi et al. "Probabilistic Robustness Analysis in High Dimensional Space: Application to Semantic Segmentation Network" (pre-print)
+
+3. Vovk et al. "Algorithmic Learning in a Random World" (Conformal prediction foundations)
 
 ## Implementation Files
 
