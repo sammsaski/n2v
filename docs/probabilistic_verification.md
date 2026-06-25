@@ -368,9 +368,9 @@ def compute_bounds(surrogate_lb, surrogate_ub, threshold, tau):
 
 ## References
 
-1. Hashemi et al. "Scaling Data-Driven Probabilistic Reachability Analysis to High-Dimensional Image Classification" (ICLR 2026)
+1. Hashemi et al. "Scaling Data-Driven Probabilistic Reachability Analysis to High-Dimensional Image Classification" (NeurIPS 2025)
 
-2. Hashemi et al. "Data-Driven Reachability Analysis via Conformal Prediction" (Older paper, ReLU surrogate approach)
+2. Hashemi et al. "Probabilistic Robustness Analysis in High Dimensional Space: Application to Semantic Segmentation Network" (pre-print)
 
 3. Vovk et al. "Algorithmic Learning in a Random World" (Conformal prediction foundations)
 
