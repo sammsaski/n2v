@@ -1,4 +1,4 @@
-"""Exp 1 — SaVer-Toolbox (Convertino HSCC 2025) runner.
+"""Exp 1 — SaVer-Toolbox (Sivaramakrishnan et al., HSCC 2025) runner.
 
 Mirrors :mod:`examples.FlowConformal.experiments.exp2_prob_scale.exp2_run_saver`
 but adapted to Exp 1's instance-loading interface (``list_instances``

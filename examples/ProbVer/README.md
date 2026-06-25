@@ -201,5 +201,5 @@ n2v/probabilistic/
 
 - [Full documentation](../../docs/probabilistic_verification.md)
 - Research papers:
-  - Hashemi et al. "Scaling Data-Driven Probabilistic Reachability Analysis to High-Dimensional Image Classification" (ICLR 2026)
+  - Hashemi et al. "Scaling Data-Driven Probabilistic Robustness Analysis for Semantic Segmentation Neural Networks" (NeurIPS 2025)
   - Vovk et al. "Algorithmic Learning in a Random World" (Conformal prediction foundations)

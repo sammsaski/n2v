@@ -172,6 +172,6 @@ When adding a new layer operation or method:
 ## References
 
 1. Star Set: Tran et al. "Star-Based Reachability Analysis of Deep Neural Networks" (FM 2019)
-2. Zonotope: Ghorbal et al. "Characterizing the Accuracy of the Zonotope Abstract Domain" (NASA 2009)
+2. Zonotope: Ghorbal et al. "The Zonotope Abstract Domain Taylor1+" (CAV 2009)
 3. Verification Benchmarks: VNN-COMP 2020-2024 benchmarks
-4. Probabilistic Verification: Hashemi et al. "Scaling Data-Driven Probabilistic Reachability Analysis" (ICLR 2026)
+4. Probabilistic Verification: Hashemi et al. "Scaling Data-Driven Probabilistic Robustness Analysis for Semantic Segmentation Neural Networks" (NeurIPS 2025)

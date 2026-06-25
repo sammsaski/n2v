@@ -14,7 +14,7 @@ baselines/
 ├── _common.py                      # shared loaders, CSV schema, spec helpers
 ├── run_hashemi_clipping.py         # Hashemi clipping-block surrogate
 ├── run_rs.py                       # Cohen et al. randomized smoothing
-├── run_saver.py                    # Convertino HSCC 2025 (DKW path)
+├── run_saver.py                    # Sivaramakrishnan et al., HSCC 2025 (DKW path)
 ├── run_probstar.py                 # Tran et al. ProbStar/StarV
 └── outputs/                        # per-runner CSVs
 ```

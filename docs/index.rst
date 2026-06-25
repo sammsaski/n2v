@@ -319,7 +319,7 @@ The methods implemented in n2v are based upon or used in the following publicati
 
    N.\  Hashemi, S. Sasaki, I. Oguz, M. Ma, T.T. Johnson,
    "Scaling Data-Driven Probabilistic Robustness Analysis for Semantic Segmentation Neural Networks,"
-   in *38th Conference on Neural Information Processing Systems (NeurIPS)*, 2025.
+   in *39th Conference on Neural Information Processing Systems (NeurIPS)*, 2025.
 
    S.\  Sasaki, D. Manzanas Lopez, P.K. Robinette, T.T. Johnson,
    "Robustness Verification of Video Classification Neural Networks,"
@@ -331,7 +331,7 @@ The methods implemented in n2v are based upon or used in the following publicati
    in *23rd International Symposium on Formal Methods (FM)*, 2019.
 
    H.-D.\  Tran, S. Bak, W. Xiang, T.T. Johnson,
-   "Towards Verification of Large Convolutional Neural Networks Using ImageStars,"
+   "Verification of Deep Convolutional Neural Networks Using ImageStars,"
    in *32nd International Conference on Computer-Aided Verification (CAV)*, 2020.
 
 Acknowledgements
