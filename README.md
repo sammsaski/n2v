@@ -138,17 +138,17 @@ The methods implemented in n2v are based upon or used in the following papers:
 
 - Diego Manzanas Lopez, Sung Woo Choi, Hoang-Dung Tran, Taylor T. Johnson, "NNV 2.0: The Neural Network Verification Tool". In: Enea, C., Lal, A. (eds) Computer Aided Verification. CAV 2023. Lecture Notes in Computer Science, vol 13965. Springer, Cham. [https://doi.org/10.1007/978-3-031-37703-7_19]
 
-- Navid Hashemi, Samuel Sasaki, Ipek Oguz, Meiyi Ma, Taylor T. Johnson, "Scaling Data-Driven Probabilistic Robustness Analysis for Semantic Segmentation Neural Networks", 38th Conference on Neural Information Processing Systems (NeurIPS), 2025.
+- Navid Hashemi, Samuel Sasaki, Ipek Oguz, Meiyi Ma, Taylor T. Johnson, "Scaling Data-Driven Probabilistic Robustness Analysis for Semantic Segmentation Neural Networks", 39th Conference on Neural Information Processing Systems (NeurIPS), 2025.
 
 - Samuel Sasaki, Diego Manzanas Lopez, Preston K. Robinette, Taylor T. Johnson, "Robustness Verification of Video Classification Neural Networks", IEEE/ACM 13th International Conference on Formal Methods in Software Engineering (FormaliSE), 2025. [https://doi.org/10.1109/FormaliSE66629.2025.00009]
 
 - Lucas C. Cordeiro, Matthew L. Daggitt, Julien Girard-Satabin, Omri Isac, Taylor T. Johnson, Guy Katz, Ekaterina Komendantskaya, Augustin Lemesle, Edoardo Manino, Artjoms Sinkarovs, Haoze Wu, "Neural Network Verification is a Programming Language Challenge", 34th European Symposium on Programming (ESOP), 2025. [https://doi.org/10.1007/978-3-031-91118-7_9]
 
-- Diego Manzanas Lopez, Samuel Sasaki, Taylor T. Johnson, "NNV: A Star Set Reachability Approach (Competition Contribution)", 7th Workshop on Formal Methods for ML-Enabled Autonomous Systems (SAIV), 2025. [https://doi.org/10.1007/978-3-031-99991-8_15]
+- Diego Manzanas Lopez, Samuel Sasaki, Taylor T. Johnson, "NNV: A Star Set Reachability Approach (Competition Contribution)", 2nd International Symposium on AI Verification (SAIV), 2025. [https://doi.org/10.1007/978-3-031-99991-8_15]
 
 - Hoang-Dung Tran, Neelanjana Pal, Patrick Musau, Xiaodong Yang, Nathaniel P. Hamilton, Diego Manzanas Lopez, Stanley Bak, Taylor T. Johnson, "Robustness Verification of Semantic Segmentation Neural Networks using Relaxed Reachability", In 33rd International Conference on Computer-Aided Verification (CAV), Springer, 2021. [http://www.taylortjohnson.com/research/tran2021cav.pdf]
 
-- Hoang-Dung Tran, Stanley Bak, Weiming Xiang, Taylor T. Johnson, "Towards Verification of Large Convolutional Neural Networks Using ImageStars", 32nd International Conference on Computer-Aided Verification (CAV), 2020. [http://taylortjohnson.com/research/tran2020cav.pdf]
+- Hoang-Dung Tran, Stanley Bak, Weiming Xiang, Taylor T. Johnson, "Verification of Deep Convolutional Neural Networks Using ImageStars", 32nd International Conference on Computer-Aided Verification (CAV), 2020. [http://taylortjohnson.com/research/tran2020cav.pdf]
 
 - Hoang-Dung Tran, Patrick Musau, Diego Manzanas Lopez, Xiaodong Yang, Luan Viet Nguyen, Weiming Xiang, Taylor T.Johnson, "Star-Based Reachability Analysis for Deep Neural Networks", The 23rd International Symposium on Formal Methods (FM), Porto, Portugal, 2019, Acceptance Rate 30%. . [http://taylortjohnson.com/research/tran2019fm.pdf]
 

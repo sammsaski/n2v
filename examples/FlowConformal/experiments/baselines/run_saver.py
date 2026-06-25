@@ -1,4 +1,4 @@
-"""SaVer-Toolbox runner (Convertino HSCC 2025, vigsiv/SaVer-Toolbox).
+"""SaVer-Toolbox runner (Sivaramakrishnan et al., HSCC 2025, vigsiv/SaVer-Toolbox).
 
 Calls the DKW empirical-CDF verifier from
 ``~/v/other/SaVer-Toolbox/SaVer_Toolbox/verify.py``. For each instance:

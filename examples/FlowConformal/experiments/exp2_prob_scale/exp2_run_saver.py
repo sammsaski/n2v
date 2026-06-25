@@ -1,4 +1,4 @@
-"""Exp 2 — SaVer-Toolbox (Convertino HSCC 2025) runner.
+"""Exp 2 — SaVer-Toolbox (Sivaramakrishnan et al., HSCC 2025) runner.
 
 Mirrors the per-(experiment, tool) runner pattern used elsewhere
 (``--benchmark X``, ``--smoke``, ``--instance-idx <N>``,

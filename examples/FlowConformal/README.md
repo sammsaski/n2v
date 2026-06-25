@@ -96,7 +96,7 @@ FlowConformal/
 │   ├── baselines/                  shared probabilistic-baseline helpers
 │   │   ├── run_hashemi_clipping.py    Hashemi clipping-block surrogate
 │   │   ├── run_rs.py                  Cohen et al. randomized smoothing
-│   │   ├── run_saver.py               SaVer (Convertino HSCC 2025)
+│   │   ├── run_saver.py               SaVer (Sivaramakrishnan et al., HSCC 2025)
 │   │   ├── run_probstar.py            ProbStar / StarV (Tran et al.)
 │   │   └── _common.py
 │   │

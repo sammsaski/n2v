@@ -86,7 +86,7 @@ Same as §1.2 plus `pca_components` (default 32).
 
 ### 1.4 `exp1_<benchmark>_saver.csv`
 
-Sample-based DKW (Convertino et al., HSCC 2025). Applies to every
+Sample-based DKW (Sivaramakrishnan et al., HSCC 2025). Applies to every
 benchmark (sample-based, spec-shape-agnostic).
 
 | Column | Description |

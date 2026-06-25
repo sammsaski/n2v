@@ -27,7 +27,7 @@ _common.py                        shared loaders, sweep harness
 exp2_run_ours.py                  ours runner, --benchmark X
 exp2_run_hashemi_clipping.py      Hashemi-clipping baseline (m=8000)
 exp2_run_hashemi_clipping_pca.py  Hashemi-clipping with PCA (used for the headline rows)
-exp2_run_saver.py                 SaVer (Convertino HSCC 2025)
+exp2_run_saver.py                 SaVer (Sivaramakrishnan et al., HSCC 2025)
 exp2_run_probstar.py              ProbStar / StarV
 exp2_run_rs.py                    Cohen RS (cifar100_2024 only)
 ground_truth.csv                  pre-computed SAT-wins consensus from VNN-COMP 2025 (8 tools)

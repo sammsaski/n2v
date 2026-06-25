@@ -179,7 +179,7 @@ The full benchmark consists of 186 instances (prop_1-4: 45 each, prop_5-10: 1 ea
 
 ## References
 
-1. Kaulen, K., et al. "The 6th International Verification of Neural Networks Competition (VNN-COMP 2025): Summary and Results." *arXiv:2512.19007*, 2024. https://arxiv.org/abs/2512.19007
+1. Kaulen, K., et al. "The 6th International Verification of Neural Networks Competition (VNN-COMP 2025): Summary and Results." *arXiv:2512.19007*, 2025. https://arxiv.org/abs/2512.19007
 2. Katz, G., et al. "Reluplex: An efficient SMT solver for verifying deep neural networks." *CAV 2017*.
 3. VNN-COMP: International Verification of Neural Networks Competition. https://vnncomp.christopher-brix.de/
 4. ACAS Xu: Airborne Collision Avoidance System for unmanned aircraft
