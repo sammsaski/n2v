@@ -24,9 +24,25 @@ import numpy as np
 from n2v.sets import Star, ImageStar
 from n2v.nn.layer_ops.conv2d_reach import conv2d_star
 from n2v.nn.layer_ops.relu_reach import relu_star_approx
-from n2v.nn.layer_ops.bilinear_matmul_reach import bilinear_matmul_star
+from n2v.nn.layer_ops.bilinear_matmul_reach import (
+    bilinear_matmul_star, av_envelope_star)
 from n2v.nn.layer_ops.softmax_attention_reach import softmax_attn_star
 from n2v.nn.reach import _add_sets
+
+
+def _prefix_add(x: Star, full: Star) -> Star:
+    """Sound + exact residual ``x + full`` when x's predicates are a PREFIX of
+    full's (the attention/MLP case: the branch only appends relaxation
+    predicates to the shared stream). Pads x's generators with zeros for the
+    appended predicates and adds over full's (superset) constraint system. This
+    keeps the residual correlation that a block-diagonal join drops (design
+    SS6.2 / I-35). Falls back to the caller for non-prefix operands."""
+    nx, nf = x.nVar, full.nVar
+    if nx > nf or x.dim != full.dim:
+        raise ValueError("prefix_add: x is not a prefix-compatible operand")
+    Vx = np.zeros((x.dim, 1 + nf))
+    Vx[:, :1 + nx] = x.V
+    return Star(Vx + full.V, full.C, full.d, full.predicate_lb, full.predicate_ub)
 
 
 def _lin(layer) -> Tuple[np.ndarray, np.ndarray]:
@@ -81,10 +97,15 @@ class ViTReacher:
         vp = _permute_rows(v, (L, H, D), (1, 0, 2))   # (H,L,D)
         kT = _permute_rows(k, (L, H, D), (1, 2, 0))   # (H,D,L)
         S = bilinear_matmul_star([qp], [kT], (H, L, D), (H, D, L),
-                                 scale=scale, mode=self.mode)[0]      # (H,L,L)
+                                 scale=scale, mode="concretize")[0]   # (H,L,L)
         A = softmax_attn_star([S], (H, L, L), axis=-1)[0]            # (H,L,L)
-        O = bilinear_matmul_star([A], [vp], (H, L, L), (H, L, D),
-                                 mode=self.mode)[0]                   # (H,L,D)
+        if self.mode.startswith("symbolic"):
+            # Keep the value path symbolic: O affine in V (input-correlated).
+            a_lb, a_ub = (b.reshape(H, L, L) for b in A.estimate_ranges())
+            O = av_envelope_star(a_lb, a_ub, vp, H, L, L, D)         # (H,L,D)
+        else:
+            O = bilinear_matmul_star([A], [vp], (H, L, L), (H, L, D),
+                                     mode="concretize")[0]
         Ob = _permute_rows(O, (H, L, D), (1, 0, 2))   # -> (L,inner) token-major
         Wo, bo = _lin(attn.out)
         return _per_token_affine(Ob, Wo, bo, L)
@@ -96,15 +117,26 @@ class ViTReacher:
         Wl3, bl3 = _lin(ff.l3)
         return _per_token_affine(z, Wl3, bl3, L)
 
+    def _add(self, x: Star, branch: Star) -> Star:
+        """Residual x + branch. In symbolic mode use the provenance-aware
+        prefix-aligned add (keeps stream correlation); else the sound
+        block-diagonal join."""
+        if self.mode.startswith("symbolic"):
+            try:
+                return _prefix_add(x, branch)
+            except ValueError:
+                pass
+        return _add_sets([x], [branch], "add")[0]
+
     def _block(self, x: Star, blk, L: int, dim: int) -> Star:
         sc, sh = blk.norm_attn.affine()
         h = _per_token_affine(x, np.diag(sc), sh, L)
         a = self._attn(h, blk.attn, L, dim)
-        x = _add_sets([x], [a], "add")[0]
+        x = self._add(x, a)
         sc2, sh2 = blk.norm_ff.affine()
         h2 = _per_token_affine(x, np.diag(sc2), sh2, L)
         f = self._ff(h2, blk.ff, L)
-        x = _add_sets([x], [f], "add")[0]
+        x = self._add(x, f)
         return x
 
     def reach(self, input_imagestar: ImageStar) -> Star:
