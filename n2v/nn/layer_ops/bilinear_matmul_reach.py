@@ -173,6 +173,83 @@ def bilinear_matmul_zono(
     return out
 
 
+def av_envelope_star(
+    a_lb: np.ndarray, a_ub: np.ndarray, v_star: Star,
+    H: int, M: int, K: int, D: int,
+) -> Star:
+    """Sound symbolic ``O = A @ V`` keeping V's predicates (value-path correlation).
+
+    ``A`` is a concretized interval ``[a_lb, a_ub]`` of attention weights, shape
+    ``(H, M, K)`` with ``a_lb >= 0`` (softmax invariant); ``v_star`` is a symbolic
+    Star of dim ``H*K*D`` (row-major ``(H, K, D)``). Returns a Star of dim
+    ``H*M*D`` (row-major ``(H, M, D)``) where each output is a fresh predicate
+    constrained by the sign-aware A·V envelope (affine in V's predicates), so the
+    output stays correlated with V (hence the network input). See
+    ``docs/theory/sound-vit-reach.md`` SS3.4/SS6bis.
+    """
+    a_lb = np.asarray(a_lb, dtype=np.float64).reshape(H, M, K)
+    a_ub = np.asarray(a_ub, dtype=np.float64).reshape(H, M, K)
+    if np.any(a_lb < -1e-12):
+        raise ValueError("av_envelope_star requires a_lb >= 0 (softmax invariant)")
+    vlo, vhi = (b.reshape(H, K, D) for b in v_star.estimate_ranges())
+    n_old = v_star.nVar
+    cV = v_star.V[:, 0].reshape(H, K, D)
+    GV = v_star.V[:, 1:].reshape(H, K, D, n_old)
+
+    alb = a_lb[:, :, :, None]      # (H,M,K,1)
+    aub = a_ub[:, :, :, None]
+    vl = vlo[:, None, :, :]        # (H,1,K,D)
+    vh = vhi[:, None, :, :]
+    pos = vl >= 0
+    neg = vh <= 0
+    mixed = ~(pos | neg)
+    width = np.where(mixed, vh - vl, 1.0)
+    up_slope_mixed = (aub * vh - alb * vl) / width
+    low_slope_mixed = (alb * vh - aub * vl) / width
+    up_slope = np.where(pos, aub, np.where(neg, alb, up_slope_mixed))
+    low_slope = np.where(pos, alb, np.where(neg, aub, low_slope_mixed))
+    up_bias = np.where(mixed, alb * vl - up_slope_mixed * vl, 0.0)
+    low_bias = np.where(mixed, aub * vl - low_slope_mixed * vl, 0.0)
+    up_slope = np.maximum(up_slope, 0.0)      # FP guard (no-op when a_lb>=0)
+    low_slope = np.maximum(low_slope, 0.0)
+
+    n_out = H * M * D
+    coef_up = np.einsum("hmkd,hkdn->hmdn", up_slope, GV).reshape(n_out, n_old)
+    coef_low = np.einsum("hmkd,hkdn->hmdn", low_slope, GV).reshape(n_out, n_old)
+    const_up = (np.einsum("hmkd,hkd->hmd", up_slope, cV)
+                + up_bias.sum(axis=2)).reshape(-1)
+    const_low = (np.einsum("hmkd,hkd->hmd", low_slope, cV)
+                 + low_bias.sum(axis=2)).reshape(-1)
+    o_lb = (np.einsum("hmkd,hkd->hmd", low_slope, vlo)
+            + low_bias.sum(axis=2)).reshape(-1)
+    o_ub = (np.einsum("hmkd,hkd->hmd", up_slope, vhi)
+            + up_bias.sum(axis=2)).reshape(-1)
+
+    V_out = np.zeros((n_out, 1 + n_old + n_out))
+    V_out[:, 1 + n_old:] = np.eye(n_out)      # O_k = alpha_new_k
+
+    old_C = np.asarray(v_star.C, dtype=np.float64).reshape(-1, n_old) \
+        if np.asarray(v_star.C).size else np.zeros((0, n_old))
+    old_d = np.asarray(v_star.d, dtype=np.float64).reshape(-1, 1) \
+        if np.asarray(v_star.d).size else np.zeros((0, 1))
+    nc = old_C.shape[0]
+    I = np.eye(n_out)
+    C = np.zeros((nc + 2 * n_out, n_old + n_out))
+    C[:nc, :n_old] = old_C
+    C[nc:nc + n_out, :n_old] = -coef_up        # O <= up facet
+    C[nc:nc + n_out, n_old:] = I
+    C[nc + n_out:, :n_old] = coef_low          # O >= low facet
+    C[nc + n_out:, n_old:] = -I
+    d = np.vstack([old_d, const_up.reshape(-1, 1), (-const_low).reshape(-1, 1)])
+
+    def _pb(p, fill):
+        return (np.asarray(p, dtype=np.float64).reshape(-1, 1) if p is not None
+                else np.full((n_old, 1), fill))
+    plb = np.vstack([_pb(v_star.predicate_lb, -np.inf), o_lb.reshape(-1, 1)])
+    pub = np.vstack([_pb(v_star.predicate_ub, np.inf), o_ub.reshape(-1, 1)])
+    return Star(V_out, C, d, plb, pub)
+
+
 def bilinear_matmul_star(
     left_stars: List[Star], right_stars: List[Star],
     left_shape: Sequence[int], right_shape: Sequence[int],
