@@ -127,8 +127,31 @@ The sound reach engine is the right substrate; the missing ingredient is
    predicate-preserving; built on the existing `_mul_stars_mccormick` idiom.
 3. **Input splitting** as a fallback on the few most sensitive pixels.
 
-Expected outcome with BaB: approach the 79/200 sound reference. Reaching 200/200
-soundly is an open problem (no sound tool has done it).
+## 5bis. BaB implemented — and the honest ViT outcome
+
+A general, manual BaB engine is now in the toolbox (`n2v/nn/bab.py`, no external
+verifier; see `docs/theory/branch-and-bound.md`): **input-domain BaB**
+(`verify_bab`/`verify_bab_model`, any model/layer), **controlled ReLU
+neuron-split BaB** (`verify_bab_relu`, nn.Sequential), and n2v's **exact reach** =
+complete ReLU split. All sound, 8 tests.
+
+Applied to ViT (input-split, bounder = symbolic-av, falsifier = `falsify`):
+- It trivially verifies instances already at/under the single-shot radius
+  (ε=0.50, 0.55/255 → 1 node).
+- Just **above** the single-shot radius (≈0.57/255), it does not scale: at
+  ε=0.60/255 it ran 150 nodes to **depth 80**, a leaf reached margin +0.027, but
+  the covering tree did not close. A **3072-dim** input box has exponentially
+  many corners each needing ~80 splits — the curse of dimensionality.
+- ReLU neuron-split doesn't help the ViT either: the full-ε looseness is the
+  **softmax** attention weights, not the FF ReLUs.
+
+**Conclusion:** sound star+LP bounding + BaB (input- or ReLU-split) cannot reach
+the 79/200 at full ε. That number requires **CROWN-style linear bounds + a
+branching rule over the softmax/attention nonlinearity** (α,β-CROWN's
+general-nonlinearity BaB, the paper behind this benchmark) — a different bounder
+than star+LP (whose symbolic attention blows up predicates/LP). The BaB search
+scaffold here is reusable; the missing piece is that CROWN-class bounder + a
+softmax split. See `docs/theory/branch-and-bound.md` §3.
 
 ## 6. Reproduce
 
