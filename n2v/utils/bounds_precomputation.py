@@ -580,6 +580,7 @@ def _zono_graphmodule(graph_module: Any, zono_set: Union[Zono, ImageZono]) -> Di
     from n2v.nn.layer_ops.dispatcher import reach_layer
     from n2v.nn.reach import (
         _handle_reshape,
+        _reshape_feeds_spatial,
         _handle_onnx_concat,
         _handle_onnx_slice,
         _handle_onnx_split,
@@ -621,13 +622,16 @@ def _zono_graphmodule(graph_module: Any, zono_set: Union[Zono, ImageZono]) -> Di
                 shape_node = node.args[1]
                 shape_tensor = _get_parameter(graph_module, shape_node)
                 target_shape = tuple(shape_tensor.numpy().astype(int))
-                result_sets = _handle_reshape(input_sets_op, target_shape)
+                force_flat = not _reshape_feeds_spatial(node, graph_module)
+                result_sets = _handle_reshape(
+                    input_sets_op, target_shape, force_flat=force_flat)
                 node_values[node.name] = result_sets
                 current_sets = result_sets
                 continue
 
             if isinstance(module, OnnxConcat):
-                result_sets = _handle_onnx_concat(module, node, node_values)
+                result_sets = _handle_onnx_concat(
+                    module, node, node_values, graph_module)
                 if result_sets is not None:
                     node_values[node.name] = result_sets
                     current_sets = result_sets

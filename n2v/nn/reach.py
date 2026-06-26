@@ -751,7 +751,9 @@ def _handle_graphmodule(
                     target_shape = tuple(shape_args[0])
                 else:
                     target_shape = tuple(shape_args)
-                result_sets = _handle_reshape(input_sets_op, target_shape)
+                force_flat = not _reshape_feeds_spatial(node, graph_module)
+                result_sets = _handle_reshape(
+                    input_sets_op, target_shape, force_flat=force_flat)
                 node_values[node.name] = result_sets
                 current_sets = result_sets
 
@@ -1093,11 +1095,17 @@ _SPATIAL_CONSUMERS = frozenset({
     'AdaptiveAvgPool2d', 'OnnxGlobalAveragePool',
 })
 # Pass-through ops that preserve spatial layout and may sit between a reshape
-# and its spatial consumer (so the forward walk must look past them).
+# and its spatial consumer (so the forward walk must look past them). Erring
+# toward "keep flat" is soundness-safe (an actual conv reached with a flat set
+# raises loudly), so only well-understood layout-preserving ops are listed.
 _SPATIAL_PASSTHROUGH = frozenset({
     'ReLU', 'ReLU6', 'LeakyReLU', 'Sigmoid', 'Tanh', 'GELU', 'ELU',
     'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d', 'Dropout', 'Identity',
-    'OnnxBinaryMathOperation', 'OnnxClip', 'OnnxPad', 'OnnxPadDynamic',
+    'OnnxBinaryMathOperation', 'OnnxClip', 'OnnxPadStatic', 'OnnxPadDynamic',
+    # Layout-permuting/reshaping ops that can sit between a reshape and a conv
+    # (e.g. the common Reshape -> Transpose(to NCHW) -> Conv export); the walk
+    # must look past them to find the real spatial consumer.
+    'OnnxTranspose', 'OnnxResize', 'OnnxSlice', 'OnnxSliceV9', 'OnnxGather',
 })
 
 
