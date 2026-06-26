@@ -92,6 +92,20 @@ def test_bab_falsifies_false_property():
     assert y >= thresh - 1e-4                  # counterexample really violates
 
 
+def test_exact_relu_split_is_complete():
+    # n2v's method='exact' performs complete ReLU (neuron) splitting via
+    # relu_star_exact; it verifies the same relaxation gap that 'approx' (a
+    # single triangle-relaxed star) cannot. This is the per-neuron split
+    # completeness already in the toolbox (BaB is its budget-controlled cousin).
+    m, tmax, smax = _gap_net()
+    spec = _spec_leq(tmax + 0.5 * (smax - tmax))
+    approx = NeuralNetwork(m).reach(Star.from_bounds(LB, UB), method="approx")
+    assert verify_specification(approx, spec).verdict == "UNKNOWN"
+    exact = NeuralNetwork(m).reach(Star.from_bounds(LB, UB), method="exact")
+    assert verify_specification(exact, spec).verdict == "UNSAT"
+    assert len(exact) > 1                       # it actually split
+
+
 def test_bab_budget_is_sound_unknown():
     m, tmax, smax = _gap_net()
     res = verify_bab_model(m, LB, UB, _spec_leq(tmax + 0.5 * (smax - tmax)),
