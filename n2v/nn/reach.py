@@ -1624,9 +1624,18 @@ def _handle_onnx_matmul(
         in_shape = (node_shapes or {}).get(
             getattr(first_input, 'name', None))
         K = weight_matrix.shape[1]
-        size = input_sets_op[0].dim if input_sets_op else K
-        if in_shape is not None:
+        # The running set's dim is the authoritative count of flat input
+        # variables. node_shapes is only a hint and can be inflated by
+        # broadcasting in shape inference — e.g. a 1-D `W @ x` model whose
+        # bias add broadcasts (M, 1) + (M,) -> (M, M), reporting M*M elements
+        # for an M-vector. Trust the set dim; fall back to in_shape / K only
+        # when no set is present.
+        if input_sets_op:
+            size = input_sets_op[0].dim
+        elif in_shape is not None:
             size = int(np.prod(in_shape))
+        else:
+            size = K
         if size % K != 0:
             raise ValueError(
                 f"MatMul(W, x) shape mismatch: weight {weight_matrix.shape}"
