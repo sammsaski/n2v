@@ -601,6 +601,12 @@ def _handle_graphmodule(
                         layer_kwargs['precomputed_bounds'] = layer_bounds[node.name]
                     else:
                         layer_kwargs.pop('precomputed_bounds', None)
+                    # OnnxResize carries its scales/sizes as graph inputs
+                    # (node.args[2]/[3]), not module attributes. Resolve the
+                    # real constants here so the reach uses the model's actual
+                    # scale factors instead of guessing them from a probe.
+                    if module_type == 'OnnxResize':
+                        _add_resize_scale_kwargs(graph_module, node, layer_kwargs)
                     output_sets = reach_layer(module, input_sets_op, method, **layer_kwargs)
                     node_values[node.name] = output_sets
                     current_sets = output_sets
@@ -924,6 +930,38 @@ def _get_parameter(graph_module: fx.GraphModule, node: Any) -> torch.Tensor:
     call_module, or a constant SUBGRAPH (ops applied only to constants,
     e.g. Transpose of a weight) — folded recursively."""
     return _const_eval(graph_module, node, {})
+
+
+def _add_resize_scale_kwargs(graph_module: fx.GraphModule, node: Any,
+                             layer_kwargs: dict) -> None:
+    """Resolve an OnnxResize node's scales/sizes constants from the graph
+    and stash them in ``layer_kwargs`` as ``resize_scales`` / ``resize_sizes``
+    for the upsample reach op.
+
+    onnx2torch's OnnxResize takes (x, roi, scales[, sizes]) as forward
+    inputs, so the factors live in node.args, not the module. Resolving
+    them here lets the reach use the model's real scale factors instead of
+    probing the bare module (which cannot recover them). Empty/absent
+    inputs are skipped; anything non-constant is left for the op to error on.
+    """
+    def _maybe_const(arg):
+        if arg is None or not hasattr(arg, 'op'):
+            return None
+        try:
+            tensor = _get_parameter(graph_module, arg)
+        except Exception:  # noqa: BLE001 — non-constant: let the op handle it
+            return None
+        return tensor if tensor.numel() > 0 else None
+
+    args = node.args
+    if len(args) > 2:
+        scales = _maybe_const(args[2])
+        if scales is not None:
+            layer_kwargs['resize_scales'] = scales.flatten().tolist()
+    if len(args) > 3:
+        sizes = _maybe_const(args[3])
+        if sizes is not None:
+            layer_kwargs['resize_sizes'] = [int(v) for v in sizes.flatten().tolist()]
 
 
 def _const_eval(graph_module: fx.GraphModule, node: Any, memo: dict) -> torch.Tensor:
