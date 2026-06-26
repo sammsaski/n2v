@@ -19,8 +19,8 @@ jupyter>=1.0.0
 ipykernel>=6.0.0
 
 # Optional: For ONNX model export/import (CompareMATLAB examples)
-onnx>=1.12.0
-onnxruntime>=1.12.0
+onnx==1.21.0
+onnxruntime==1.26.0
 # onnx2torch is installed from git submodule (see installation instructions)
 # To install: pip install -e third_party/onnx2torch
 
