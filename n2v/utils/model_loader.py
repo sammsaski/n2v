@@ -20,6 +20,38 @@ _ONNX2TORCH_TARGET_OPSET = 13
 # by onnx-simplifier under a fixed input shape when present.
 _SHAPE_SUBGRAPH_OPS = {"Shape", "ConstantOfShape"}
 
+# onnx2torch errors the opset-upgrade shim knows how to recover from:
+# a missing per-opset converter, or a node-name collision left behind by
+# onnx.version_converter (both fixed by upgrade + constant-fold + retry).
+_UPGRADEABLE_CONVERSION_ERRORS = (
+    "Converter is not implemented",        # NotImplementedError: old opset
+    "Got unexpected input value type",     # RuntimeError: ValueType.UNKNOWN
+)
+
+
+def _is_upgradeable_conversion_error(exc) -> bool:
+    """True if an onnx2torch conversion failure is one the opset-upgrade
+    shim should attempt to recover from (vs. an unrelated error to re-raise)."""
+    return any(m in str(exc) for m in _UPGRADEABLE_CONVERSION_ERRORS)
+
+
+def _simplify(onnx_model):
+    """Constant-fold/simplify via onnx-simplifier under a fixed input
+    shape (dynamic dims -> 1). Returns the original model unchanged on
+    any failure."""
+    try:
+        import onnxsim
+        inp = onnx_model.graph.input[0]
+        shape = [d.dim_value if d.dim_value > 0 else 1
+                 for d in inp.type.tensor_type.shape.dim]
+        simplified, ok = onnxsim.simplify(
+            onnx_model, overwrite_input_shapes={inp.name: shape})
+        if ok:
+            return simplified
+    except Exception:  # noqa: BLE001 — fall back to the original model
+        pass
+    return onnx_model
+
 
 def _fold_shape_subgraph(onnx_model):
     """If the model computes shapes with Shape/ConstantOfShape, fix the
@@ -29,18 +61,9 @@ def _fold_shape_subgraph(onnx_model):
     ops = {n.op_type for n in onnx_model.graph.node}
     if not (ops & _SHAPE_SUBGRAPH_OPS):
         return onnx_model
-    try:
-        import onnxsim
-        inp = onnx_model.graph.input[0]
-        shape = [d.dim_value if d.dim_value > 0 else 1
-                 for d in inp.type.tensor_type.shape.dim]
-        simplified, ok = onnxsim.simplify(
-            onnx_model, overwrite_input_shapes={inp.name: shape})
-        if ok and not ({n.op_type for n in simplified.graph.node}
-                       & _SHAPE_SUBGRAPH_OPS):
-            return simplified
-    except Exception:  # noqa: BLE001 — fall back to the original model
-        pass
+    simplified = _simplify(onnx_model)
+    if not ({n.op_type for n in simplified.graph.node} & _SHAPE_SUBGRAPH_OPS):
+        return simplified
     return onnx_model
 
 
@@ -135,22 +158,29 @@ def load_onnx(
     # Convert to PyTorch. onnx2torch registers converters per opset
     # version; old models (e.g. vgg16-7 is opset 8, but onnx2torch's Gemm
     # only covers 9/11/13) raise "Converter is not implemented (... Gemm,
-    # version=8)". Upgrade such models to a supported opset and retry —
-    # an n2v-side compatibility shim, not a change to the converter.
+    # version=8)". Opset-9 cGANs use the deprecated Upsample op, which has
+    # no converter either. Upgrade such models to a supported opset and
+    # retry — an n2v-side compatibility shim, not a change to the converter.
     try:
         pytorch_model = convert(onnx_model)
-    except NotImplementedError as exc:
-        if "Converter is not implemented" not in str(exc):
+    except (NotImplementedError, RuntimeError) as exc:
+        if not _is_upgradeable_conversion_error(exc):
             raise
         try:
             from onnx import version_converter
             upgraded = version_converter.convert_version(
                 onnx_model, _ONNX2TORCH_TARGET_OPSET)
         except Exception as up_exc:  # noqa: BLE001
-            raise NotImplementedError(
+            raise type(exc)(
                 f"{exc}; opset upgrade to {_ONNX2TORCH_TARGET_OPSET} also "
                 f"failed: {up_exc}") from exc
-        pytorch_model = convert(upgraded)
+        # convert_version rewrites deprecated ops (e.g. Upsample -> Resize)
+        # but can emit empty-named Constant nodes whose onnx2torch-generated
+        # names collide with existing ones; the dropped node surfaces as a
+        # RuntimeError ("Got unexpected input value type (ValueType.UNKNOWN)").
+        # Constant-fold the upgraded graph first to remove those bare
+        # Constants, then retry the conversion.
+        pytorch_model = convert(_simplify(upgraded))
     pytorch_model.eval()
 
     return pytorch_model

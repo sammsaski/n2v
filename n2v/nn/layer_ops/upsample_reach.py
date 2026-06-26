@@ -77,29 +77,79 @@ class _NeedForwardInspection(Exception):
     pass
 
 
-def _detect_scale_factors_from_forward(layer: nn.Module, h_in: int, w_in: int) -> Tuple[int, int]:
+def _scale_factors_from_onnx(scales, sizes, h_in: int, w_in: int):
+    """Compute integer (scale_h, scale_w) from an ONNX Resize node's
+    ``scales`` or ``sizes`` constant (NCHW layout: [n, c, h, w]).
+
+    These are the model's real factors, resolved from the graph by the
+    reach driver and passed through kwargs — the correct source, versus
+    probing the bare module (onnx2torch's OnnxResize takes scales/sizes as
+    forward inputs, so a probe with no scales cannot recover them).
+
+    Returns None when neither is available; raises for resizes the
+    nearest-neighbor Star op cannot represent exactly.
     """
-    Detect scale factors by running a forward pass with a probe tensor.
+    if scales is not None and len(scales) >= 2:
+        if [float(s) for s in scales[:-2]] != [1.0] * (len(scales) - 2):
+            raise NotImplementedError(
+                f"Resize must not scale batch/channel dims, got scales={scales}"
+            )
+        sh, sw = scales[-2], scales[-1]
+        scale_h, scale_w = int(round(sh)), int(round(sw))
+        if scale_h != sh or scale_w != sw or scale_h < 1 or scale_w < 1:
+            raise NotImplementedError(
+                f"Only integer upsampling scale factors are supported, "
+                f"got scales={scales}"
+            )
+        return scale_h, scale_w
 
-    Args:
-        layer: The upsample/resize module
-        h_in: Input height
-        w_in: Input width
+    if sizes is not None and len(sizes) >= 2:
+        h_out, w_out = int(sizes[-2]), int(sizes[-1])
+        if h_out % h_in or w_out % w_in:
+            raise NotImplementedError(
+                f"Resize sizes {sizes} are not an integer multiple of the "
+                f"input {h_in}x{w_in}"
+            )
+        return h_out // h_in, w_out // w_in
 
-    Returns:
-        (scale_h, scale_w): Integer scale factors
+    return None
+
+
+def _resolve_scale_factors(layer: nn.Module, h_in: int, w_in: int,
+                           kwargs: dict) -> Tuple[int, int]:
+    """Determine (scale_h, scale_w): prefer the ONNX graph's real scales/
+    sizes (threaded in via kwargs), else read them off an nn.Upsample,
+    else fail loudly rather than guess."""
+    onnx = _scale_factors_from_onnx(
+        kwargs.get('resize_scales'), kwargs.get('resize_sizes'), h_in, w_in)
+    if onnx is not None:
+        return onnx
+    try:
+        return _get_scale_factors(layer)
+    except _NeedForwardInspection:
+        return _detect_scale_factors_from_forward(layer, h_in, w_in)
+
+
+def _detect_scale_factors_from_forward(layer: nn.Module, h_in: int, w_in: int) -> Tuple[int, int]:
+    """Detect scale factors by running a forward pass with a probe tensor.
+
+    Only nn.Upsample-style modules (callable with just the input) work
+    here. OnnxResize takes its scales/sizes as forward inputs that the
+    bare module does not carry, so it must reach this op with
+    ``resize_scales`` from the graph; if it did not, fail loudly instead
+    of assuming a scale factor (which would be silently unsound).
     """
     import torch
     probe = torch.zeros(1, 1, h_in, w_in)
-    with torch.no_grad():
-        # OnnxResize may need extra args (roi, scales, sizes)
-        # Try calling with scale factors as positional args
-        try:
+    try:
+        with torch.no_grad():
             out = layer(probe)
-        except TypeError:
-            # OnnxResize forward signature: (input, roi, scales, sizes)
-            scales = torch.tensor([1.0, 1.0, 2.0, 2.0])
-            out = layer(probe, None, scales, None)
+    except (TypeError, ValueError) as exc:
+        raise NotImplementedError(
+            "Cannot determine Resize scale factors from the module alone "
+            "(OnnxResize needs scales/sizes from the ONNX graph); expected "
+            "resize_scales to be supplied by the reach driver"
+        ) from exc
 
     h_out, w_out = out.shape[2], out.shape[3]
     scale_h = h_out // h_in
@@ -149,13 +199,8 @@ def upsample_star(layer: nn.Module, input_stars: List, **kwargs) -> List:
 
     for star in input_stars:
         if isinstance(star, ImageStar):
-            # Get scale factors
-            try:
-                scale_h, scale_w = _get_scale_factors(layer)
-            except _NeedForwardInspection:
-                scale_h, scale_w = _detect_scale_factors_from_forward(
-                    layer, star.height, star.width
-                )
+            scale_h, scale_w = _resolve_scale_factors(
+                layer, star.height, star.width, kwargs)
 
             V_out = _upsample_nearest_4d(star.V, scale_h, scale_w)
             h_out = star.height * scale_h
@@ -202,12 +247,8 @@ def upsample_zono(layer: nn.Module, input_zonos: List, **kwargs) -> List:
 
     for zono in input_zonos:
         if isinstance(zono, ImageZono):
-            try:
-                scale_h, scale_w = _get_scale_factors(layer)
-            except _NeedForwardInspection:
-                scale_h, scale_w = _detect_scale_factors_from_forward(
-                    layer, zono.height, zono.width
-                )
+            scale_h, scale_w = _resolve_scale_factors(
+                layer, zono.height, zono.width, kwargs)
 
             h_in, w_in, c_in = zono.height, zono.width, zono.num_channels
             n_gen = zono.V.shape[1]

@@ -600,3 +600,95 @@ class TestStripFinalSoftmaxOnnxWrapper:
         stripped = strip_final_softmax(gm)
 
         assert torch.allclose(stripped(x), gm(x), atol=1e-6)
+
+
+def _build_opset9_upsample_model(path):
+    """Write a tiny opset-9 model that fails to convert the way the upsample
+    cGANs do, and return its onnxruntime reference outputs.
+
+    The deprecated opset-9 Upsample op has no onnx2torch converter, so the
+    loader upgrades the model to a modern opset. onnx.version_converter
+    rewrites Upsample -> Resize but emits empty-named Constant nodes whose
+    onnx2torch-generated names ("Constant", "Constant_1", ...) collide with
+    the graph's explicitly-named Constant_1; the dropped node then surfaces
+    as RuntimeError("Got unexpected input value type (ValueType.UNKNOWN)").
+    The Reshape fed by an explicit Constant_1 and the Upsample fed by a
+    Constant scales node together reproduce that collision.
+    """
+    import numpy as np
+    from onnx import TensorProto, helper
+
+    rng = np.random.RandomState(0)
+    X = helper.make_tensor_value_info("X", TensorProto.FLOAT, [1, 4])
+    Y = helper.make_tensor_value_info("Y", TensorProto.FLOAT, [1, 1, 2, 4])
+    W = helper.make_tensor(
+        "W", TensorProto.FLOAT, [4, 4], rng.randn(4, 4).astype(np.float32).flatten()
+    )
+    B = helper.make_tensor("B", TensorProto.FLOAT, [4], rng.randn(4).astype(np.float32))
+    shape_const = helper.make_node(
+        "Constant", [], ["shp"], name="Constant_1",
+        value=helper.make_tensor(
+            "v", TensorProto.INT64, [4], np.array([1, 1, 1, 4], np.int64)),
+    )
+    scales_const = helper.make_node(
+        "Constant", [], ["scales"], name="Constant",
+        value=helper.make_tensor(
+            "s", TensorProto.FLOAT, [4], np.array([1, 1, 2, 1], np.float32)),
+    )
+    nodes = [
+        helper.make_node("Gemm", ["X", "W", "B"], ["H"]),
+        shape_const,
+        scales_const,
+        helper.make_node("Reshape", ["H", "shp"], ["R"]),
+        helper.make_node("Upsample", ["R", "scales"], ["Y"], mode="nearest"),
+    ]
+    graph = helper.make_graph(nodes, "g", [X], [Y], initializer=[W, B])
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 9)])
+    model.ir_version = 6
+
+    import onnx
+    onnx.save(model, path)
+
+
+class TestOpset9UpsampleLoadShim:
+    """The opset-upgrade shim in load_onnx recovers the upsample cGANs
+    (cgan_2023 / cgan2026), whose opset-9 Upsample op leaves a node-name
+    collision after onnx.version_converter rewrites it to Resize. Exercised
+    end-to-end through the real load_onnx -> onnx2torch path. (Issue #48)"""
+
+    def test_loads_and_matches_onnxruntime(self, tmp_path):
+        import warnings
+
+        pytest.importorskip("onnx")
+        pytest.importorskip("onnx2torch")
+        pytest.importorskip("onnxsim")
+        ort = pytest.importorskip("onnxruntime")
+        import numpy as np
+
+        from n2v.utils.model_loader import load_onnx
+
+        path = str(tmp_path / "upsample9.onnx")
+        _build_opset9_upsample_model(path)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = load_onnx(path)
+
+        x = np.random.RandomState(1).randn(1, 4).astype(np.float32)
+        sess = ort.InferenceSession(path)
+        ref = sess.run(None, {sess.get_inputs()[0].name: x})[0]
+        with torch.no_grad():
+            out = model(torch.from_numpy(x)).numpy()
+
+        assert out.shape == ref.shape
+        assert np.allclose(out, ref, atol=1e-5)
+
+    def test_upgradeable_conversion_error_discriminates(self):
+        from n2v.utils.model_loader import _is_upgradeable_conversion_error
+
+        assert _is_upgradeable_conversion_error(
+            NotImplementedError("Converter is not implemented (Upsample, version=9)"))
+        assert _is_upgradeable_conversion_error(
+            RuntimeError("Got unexpected input value type (ValueType.UNKNOWN)"))
+        # An unrelated failure must propagate, not trigger an opset upgrade.
+        assert not _is_upgradeable_conversion_error(RuntimeError("some other error"))

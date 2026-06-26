@@ -6,11 +6,16 @@ Tests verify that random samples from the input set always land in the output se
 """
 
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
 from n2v.sets.image_star import ImageStar
 from n2v.sets.image_zono import ImageZono
-from n2v.nn.layer_ops.upsample_reach import upsample_star, upsample_zono
+from n2v.nn.layer_ops.upsample_reach import (
+    upsample_star,
+    upsample_zono,
+    _scale_factors_from_onnx,
+)
 
 
 class TestUpsampleImageStarSoundness:
@@ -148,3 +153,69 @@ class TestUpsampleImageZonoSoundness:
             y_flat = y_torch.reshape(-1, 1)
             assert np.all(y_flat >= lb_out - 1e-6)
             assert np.all(y_flat <= ub_out + 1e-6)
+
+
+class TestOnnxResizeGraphScales:
+    """OnnxResize (opset-9 Upsample upgraded to Resize) takes its scales as
+    forward inputs, not module attributes. The reach driver resolves the
+    real scales from the ONNX graph and passes them via resize_scales — so
+    the op must use those, not probe the bare module (which cannot recover
+    them) and must never assume a scale factor."""
+
+    def test_scale_factors_from_onnx_scales(self):
+        """ONNX scales [n, c, h, w] map to integer (scale_h, scale_w)."""
+        assert _scale_factors_from_onnx([1, 1, 2, 2], None, 4, 4) == (2, 2)
+        assert _scale_factors_from_onnx([1.0, 1.0, 3.0, 3.0], None, 5, 5) == (3, 3)
+
+    def test_scale_factors_from_onnx_sizes(self):
+        """ONNX sizes [n, c, H_out, W_out] divide the input dims."""
+        assert _scale_factors_from_onnx(None, [1, 1, 8, 8], 4, 4) == (2, 2)
+
+    def test_scale_factors_reject_noninteger_and_bc_scaling(self):
+        """Non-integer scales and batch/channel scaling are not exactly
+        representable as nearest-neighbor pixel replication."""
+        with pytest.raises(NotImplementedError):
+            _scale_factors_from_onnx([1, 1, 2.5, 2.5], None, 4, 4)
+        with pytest.raises(NotImplementedError):
+            _scale_factors_from_onnx([1, 2, 2, 2], None, 4, 4)
+        with pytest.raises(NotImplementedError):
+            _scale_factors_from_onnx(None, [1, 1, 7, 7], 4, 4)
+
+    def test_onnx_resize_uses_graph_scales_and_is_sound(self):
+        """upsample_star on a real OnnxResize, given resize_scales from the
+        graph, scales correctly and contains every concrete sample — without
+        probing the module."""
+        from onnx2torch.node_converters.resize import OnnxResize
+
+        layer = OnnxResize(mode='nearest')
+        np.random.seed(7)
+        lb = np.random.rand(3, 3, 2) * 0.5
+        ub = lb + 0.4
+        istar = ImageStar.from_bounds(lb, ub, height=3, width=3, num_channels=2)
+
+        out = upsample_star(layer, [istar], resize_scales=[1, 1, 2, 2])
+        assert out[0].height == 6 and out[0].width == 6 and out[0].num_channels == 2
+
+        lb_out, ub_out = out[0].estimate_ranges()
+        scales = torch.tensor([1.0, 1.0, 2.0, 2.0])
+        for _ in range(200):
+            x = np.random.uniform(lb.flatten(), ub.flatten())
+            x_t = torch.tensor(x.reshape(3, 3, 2), dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
+            with torch.no_grad():
+                y = layer(x_t, None, scales).squeeze(0).permute(1, 2, 0).numpy()
+            y_flat = y.reshape(-1, 1)
+            assert np.all(y_flat >= lb_out - 1e-6)
+            assert np.all(y_flat <= ub_out + 1e-6)
+
+    def test_onnx_resize_without_scales_fails_loudly(self):
+        """With no graph scales, OnnxResize must raise rather than silently
+        assume a scale factor (which would be unsound)."""
+        from onnx2torch.node_converters.resize import OnnxResize
+
+        layer = OnnxResize(mode='nearest')
+        lb = np.zeros((4, 4, 1))
+        ub = np.ones((4, 4, 1))
+        istar = ImageStar.from_bounds(lb, ub, height=4, width=4, num_channels=1)
+
+        with pytest.raises(NotImplementedError):
+            upsample_star(layer, [istar])
