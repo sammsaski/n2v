@@ -35,11 +35,21 @@ import logging
 import numpy as np
 
 from n2v.sets import Star
-from n2v.utils.vnnlib2 import evaluate_nonlinear
+# ``_COMPARE`` shared from the parser so a new VNNLIB 2.0 relational operator
+# only has to be added in one place.
+from n2v.utils.vnnlib2 import _COMPARE, evaluate_nonlinear
 
 logger = logging.getLogger(__name__)
 
-_COMPARE = {"<=", "<", ">=", ">", "==", "!="}
+# Outward soundness margin for the three-valued comparisons. ``_interval``
+# accumulates in round-to-nearest with no directed rounding, so the computed
+# ``[lo, hi]`` can sit a few ulp INSIDE the true range. We widen the
+# zero-thresholds in ``_eval_compare`` by ``_ROUND_EPS * (|lo| + |hi| + 1)`` so
+# a rounding error can never flip a conjunct to a wrong provable True/False (a
+# wrong *False* would yield an unsound UNSAT). The value is far above the real
+# accumulation error (~nVar * 2e-16 * magnitude) yet far below realistic spec
+# decision margins, so it costs no completeness on the benchmarks of interest.
+_ROUND_EPS = 1e-9
 
 
 class _Aff:
@@ -98,6 +108,9 @@ class _Aff:
 
 def _ival_mul(a, b):
     ps = (a.lo * b.lo, a.lo * b.hi, a.hi * b.lo, a.hi * b.hi)
+    if any(np.isnan(p) for p in ps):
+        # 0 * inf -> NaN in IEEE; treat any NaN product as sound-unbounded.
+        return -np.inf, np.inf
     return min(ps), max(ps)
 
 
@@ -120,6 +133,10 @@ def _mul(a, b):
     # Scaling by a constant preserves the affine form (and its tight box).
     if a.is_const or b.is_const:
         k, v = (a.c, b) if a.is_const else (b.c, a)
+        if k == 0.0:
+            # Exact algebraic zero, regardless of v -- avoids 0 * inf = NaN
+            # when v is an unbounded interval (e.g. from a div-by-zero).
+            return _Aff.const(0.0, v.plb, v.pub)
         if v.lin is not None:
             return _Aff.affine(k * v.c, k * v.lin, v.plb, v.pub)
         lo, hi = (k * v.lo, k * v.hi) if k >= 0 else (k * v.hi, k * v.lo)
@@ -131,7 +148,11 @@ def _mul(a, b):
 def _div(a, b):
     if b.is_const:
         if b.c == 0.0:
-            raise ZeroDivisionError("nonlinear spec divides by zero constant")
+            # Division by a constant zero: degrade to an unbounded interval
+            # (-> the enclosing comparison becomes UNKNOWN) rather than raising,
+            # which would abort the whole reach verdict and concede a spec that
+            # other conjuncts might prove UNSAT.
+            return _Aff.interval(-np.inf, np.inf, a.plb, a.pub)
         return _mul(a, _Aff.const(1.0 / b.c, a.plb, a.pub))
     if b.lo <= 0.0 <= b.hi:
         # Denominator straddles zero: unbounded. Sound but useless interval.
@@ -171,28 +192,36 @@ def _eval_arith(node, var_aff, plb, pub):
 
 def _eval_compare(node, var_aff, plb, pub):
     """Three-valued evaluation of a comparison: True/False if the relation
-    holds/fails for every ``alpha`` in the predicate box, else ``None``."""
+    holds/fails for every ``alpha`` in the predicate box, else ``None``.
+
+    A magnitude-scaled outward margin (``tol``) guards every zero-threshold so
+    floating-point rounding in the interval accumulation cannot flip a conjunct
+    to a wrong provable ``False`` (which would yield an unsound UNSAT). The
+    ``False`` branches all require the interval to clear ``tol``; ties go to
+    ``None``. ``==``/``!=`` never return ``False`` for "provably equal" -- that
+    needs an *exact* zero-width interval, which floating point cannot certify."""
     op = node[0]
     d = _add(_eval_arith(node[1], var_aff, plb, pub),
              _neg(_eval_arith(node[2], var_aff, plb, pub)))
     lo, hi = d.lo, d.hi
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return None  # unbounded / NaN term -> cannot decide (sound)
+    tol = _ROUND_EPS * (abs(lo) + abs(hi) + 1.0)
     if op == "<=":
-        return True if hi <= 0 else (False if lo > 0 else None)
+        return True if hi <= -tol else (False if lo > tol else None)
     if op == "<":
-        return True if hi < 0 else (False if lo >= 0 else None)
+        return True if hi <= -tol else (False if lo >= tol else None)
     if op == ">=":
-        return True if lo >= 0 else (False if hi < 0 else None)
+        return True if lo >= tol else (False if hi < -tol else None)
     if op == ">":
-        return True if lo > 0 else (False if hi <= 0 else None)
+        return True if lo >= tol else (False if hi <= -tol else None)
     if op == "==":
-        if lo == 0 and hi == 0:
-            return True
-        return False if (lo > 0 or hi < 0) else None
+        # Provably false iff the interval excludes 0 by the margin; never
+        # provably true (would require certifying an exact zero).
+        return False if (lo > tol or hi < -tol) else None
     if op == "!=":
-        # Non-convex: definitely true only if the interval excludes 0.
-        if lo > 0 or hi < 0:
-            return True
-        return False if (lo == 0 and hi == 0) else None
+        # Provably true iff the interval excludes 0; never provably false.
+        return True if (lo > tol or hi < -tol) else None
     raise ValueError(f"unsupported comparison in nonlinear spec: {op!r}")
 
 
@@ -222,16 +251,30 @@ def _eval_bool(node, var_aff, plb, pub):
 
 
 def _input_affine(input_set):
-    """Recover ``x = center + basis . alpha_in`` from a flat input ``Star``.
-    Returns ``(center, basis, n_in)`` or ``None`` if the set is not a flat
-    Star we can read predicate-wise (e.g. an ImageStar)."""
+    """Recover ``x = center + basis @ alpha_in`` from a flat box-derived input
+    ``Star``. Returns ``(center, basis, n_in, n_pred)`` -- ``center`` is the
+    per-dim midpoint (length ``n_in``), ``basis`` is ``(n_in, n_pred)``, and
+    ``n_pred`` is the number of input predicates -- or ``None`` if the set is
+    not a flat per-coordinate box (e.g. an ImageStar, or a rotated/coupled
+    star).
+
+    ``n_pred`` may be SMALLER than ``n_in`` when some input dims are pinned
+    (``lb == ub``): ``Box.to_zono`` drops the zero-width generator, so a pinned
+    dim contributes an all-zero basis row (``x_i == center_i``) and no
+    predicate column. The canonical-box guard (every generator column scales
+    exactly one coordinate) rejects any input whose predicates are not the bare
+    input coordinates, so reading the output star predicate-wise stays sound."""
     if not isinstance(input_set, Star) or input_set.V.size == 0:
         return None
-    V = input_set.V
+    V = np.asarray(input_set.V, dtype=np.float64)
     n_in = V.shape[0]
-    if V.shape[1] != n_in + 1:
-        return None  # input predicates are not the bare input coordinates
-    return V[:, 0].astype(np.float64), V[:, 1:].astype(np.float64), n_in
+    n_pred = V.shape[1] - 1
+    if n_pred > n_in:
+        return None  # more predicates than dims -> not a plain coordinate box
+    basis = V[:, 1:]
+    if basis.size and not np.all((basis != 0).sum(axis=0) == 1):
+        return None  # a generator couples >1 coordinate -> not a box
+    return V[:, 0], basis, n_in, n_pred
 
 
 def verify_nonlinear_reach(reach_sets, input_set, result):
@@ -245,14 +288,18 @@ def verify_nonlinear_reach(reach_sets, input_set, result):
     assertions = result["assertions"]
     aff = _input_affine(input_set)
     if aff is None:
-        logger.debug("nonlinear verify: input set is not a flat Star -> unknown")
+        logger.debug("nonlinear verify: input set is not a flat box Star -> unknown")
         return "UNKNOWN"
-    in_center, in_basis, n_in = aff
+    in_center, in_basis, n_in, n_pred = aff
     in_plb = np.asarray(input_set.predicate_lb, dtype=np.float64).ravel()
     in_pub = np.asarray(input_set.predicate_ub, dtype=np.float64).ravel()
 
     if not reach_sets:
-        return "UNSAT"  # nothing reachable -> nothing unsafe
+        # An empty reach list is the sound kernels' representation of an empty
+        # (infeasible) reachable region -> nothing can violate -> UNSAT. Sound
+        # because n2v sound kernels return [] only for a provably-empty set; a
+        # failure raises (and is caught by the caller -> UNKNOWN), never [].
+        return "UNSAT"
 
     for out in reach_sets:
         if not isinstance(out, Star) or out.predicate_lb is None:
@@ -260,11 +307,17 @@ def verify_nonlinear_reach(reach_sets, input_set, result):
         nVar = out.nVar
         plb = np.asarray(out.predicate_lb, dtype=np.float64).ravel()
         pub = np.asarray(out.predicate_ub, dtype=np.float64).ravel()
-        # The input predicates must be the aligned prefix of this output
-        # star's predicates (append-only kernels); verify it before we rely
-        # on it, else conservatively bail to UNKNOWN.
-        if nVar < n_in or not (
-            np.allclose(plb[:n_in], in_plb) and np.allclose(pub[:n_in], in_pub)
+        # The input predicates must be the aligned prefix of this output star's
+        # predicates (append-only kernels). We can only check the NECESSARY
+        # condition that the first n_pred predicate BOUNDS still equal the
+        # input's: a kernel that REBUILT the basis (e.g. softmax via
+        # Star.from_bounds) produces different bounds and is rejected here.
+        # Column provenance is not tracked, so a hypothetical kernel minting
+        # fresh [-1,1] predicates in the prefix would slip through -- no such
+        # kernel exists in n2v; this is the residual assumption of the joint
+        # model. Anything off -> conservative UNKNOWN.
+        if nVar < n_pred or not (
+            np.allclose(plb[:n_pred], in_plb) and np.allclose(pub[:n_pred], in_pub)
         ):
             logger.debug("nonlinear verify: input-prefix mismatch -> unknown")
             return "UNKNOWN"
@@ -272,12 +325,16 @@ def verify_nonlinear_reach(reach_sets, input_set, result):
         out_center = out.V[:, 0].astype(np.float64)
         out_basis = out.V[:, 1:].astype(np.float64)
         in_basis_padded = np.zeros((n_in, nVar), dtype=np.float64)
-        in_basis_padded[:, :n_in] = in_basis
+        in_basis_padded[:, :n_pred] = in_basis
 
-        def var_aff(kind, idx, _oc=out_center, _ob=out_basis):
+        # Bind every per-star value as a default arg so the closure cannot pick
+        # up a later iteration's state (the closure is only called synchronously
+        # today, but the defensive binding keeps it correct if that changes).
+        def var_aff(kind, idx, _oc=out_center, _ob=out_basis,
+                    _ic=in_center, _ib=in_basis_padded, _plb=plb, _pub=pub):
             if kind == "in":
-                return _Aff.affine(in_center[idx], in_basis_padded[idx], plb, pub)
-            return _Aff.affine(_oc[idx], _ob[idx], plb, pub)
+                return _Aff.affine(_ic[idx], _ib[idx], _plb, _pub)
+            return _Aff.affine(_oc[idx], _ob[idx], _plb, _pub)
 
         # The unsafe region is the conjunction of all assertions. Provably
         # false over the predicate box => this star cannot witness it.
@@ -301,14 +358,14 @@ def falsify_nonlinear(model, lb, ub, result, input_shape, *,
     float64 vector) whose forward witnesses the nonlinear spec (per
     :func:`evaluate_nonlinear`), or ``None``.
 
-    ``forward`` is a callable ``flat_x -> flat_y`` used as the membership
-    oracle. Pass the SAME backend the verdict is graded against (VNN-COMP
-    2026 replays the witness through onnxruntime), so the search does not
-    miss a witness the grader would accept on a spec boundary where the
-    onnx2torch float32 forward and onnxruntime disagree. When ``forward``
-    is ``None`` it defaults to the torch ``model`` in float32 — fast, but
-    only a proposer that the caller must re-confirm on the grading
-    backend."""
+    ``forward`` is a BATCHED callable ``(N, d) -> (N, out)`` used as the
+    membership oracle. Pass the SAME backend the verdict is graded against
+    (VNN-COMP 2026 replays the witness through onnxruntime), so the search does
+    not miss a witness the grader would accept on a spec boundary where the
+    onnx2torch float32 forward and onnxruntime disagree. When ``forward`` is
+    ``None`` it defaults to the torch ``model`` in float32 -- fast, but only a
+    proposer that the caller must re-confirm on the grading backend. A
+    non-finite (NaN/Inf) forward output is never accepted as a witness."""
     lb = np.asarray(lb, dtype=np.float64).ravel()
     ub = np.asarray(ub, dtype=np.float64).ravel()
     rng = np.random.default_rng(seed)
@@ -316,10 +373,13 @@ def falsify_nonlinear(model, lb, ub, result, input_shape, *,
     if forward is None:
         import torch
 
-        def forward(x, _m=model, _s=input_shape):
-            xt = torch.from_numpy(np.asarray(x, np.float32).reshape(_s))
+        def forward(X, _m=model, _s=input_shape):
+            X = np.asarray(X, np.float32)
+            if X.ndim == 1:
+                X = X.reshape(1, -1)
+            xt = torch.from_numpy(X.reshape((X.shape[0],) + tuple(_s)))
             with torch.no_grad():
-                return _m(xt).detach().cpu().numpy().ravel()
+                return _m(xt).detach().cpu().numpy().reshape(X.shape[0], -1)
 
     # Box corners first (cheap, often decisive), then uniform interior draws.
     corners = []
@@ -330,8 +390,13 @@ def falsify_nonlinear(model, lb, ub, result, input_shape, *,
     interior = lb + (ub - lb) * rng.random((n_samples, lb.size))
     candidates = np.vstack(corners + [interior]) if corners else interior
 
-    for x in candidates:
-        y = np.asarray(forward(x), dtype=np.float64).ravel()
-        if evaluate_nonlinear(result, x, y):
-            return x
+    # One batched forward over all candidates (the backend batches in a single
+    # session call when the model's batch dim is dynamic).
+    Y = np.asarray(forward(candidates), dtype=np.float64)
+    if Y.ndim == 1:
+        Y = Y.reshape(candidates.shape[0], -1)
+    for i in range(candidates.shape[0]):
+        y = Y[i]
+        if np.all(np.isfinite(y)) and evaluate_nonlinear(result, candidates[i], y):
+            return candidates[i]
     return None

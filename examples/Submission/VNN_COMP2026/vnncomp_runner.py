@@ -57,7 +57,9 @@ from n2v.nn import NeuralNetwork  # noqa: E402
 from n2v.utils import load_vnnlib, falsify  # noqa: E402
 from n2v.utils.verify_specification import verify_specification  # noqa: E402
 from n2v.utils.model_loader import load_onnx  # noqa: E402
-from n2v.utils.onnx_validate import onnx_forward, in_unsafe_region  # noqa: E402
+from n2v.utils.onnx_validate import (  # noqa: E402
+    onnx_forward, in_unsafe_region, make_onnx_forward,
+)
 from n2v.utils.falsify import _extract_halfspace_groups  # noqa: E402
 from n2v.sets import Star  # noqa: E402
 from n2v.sets.image_star import ImageStar  # noqa: E402
@@ -198,7 +200,8 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
     # half-space `pairs`, so it has its own falsify -> sound-reach path.
     if prop.get("format") == "nonlinear":
         return verify_nonlinear_instance(model, onnx_path, prop, input_shape,
-                                         category, vnnlib_path, t0)
+                                         category, vnnlib_path, t0,
+                                         workers=workers)
 
     # Normalized (region, prop) pairs: a counterexample exists iff SOME
     # pair has an input in its region whose output satisfies that pair's
@@ -294,27 +297,15 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
             "counterexample": None}
 
 
-def _make_ort_forward(onnx_path):
-    """Build a reusable ``flat_x -> flat_y`` onnxruntime forward backed by a
-    single CPU ``InferenceSession`` (the backend VNN-COMP 2026 replays
-    against). Reused across the thousands of falsification-search forwards so
-    session construction is paid once, not per sample."""
-    import onnxruntime as ort
-    so = ort.SessionOptions()
-    so.intra_op_num_threads = 1
-    sess = ort.InferenceSession(onnx_path, so, providers=["CPUExecutionProvider"])
-    inp = sess.get_inputs()[0]
-    shape = [d if isinstance(d, int) and d > 0 else 1 for d in inp.shape]
-
-    def forward(x_flat):
-        x = np.asarray(x_flat, dtype=np.float32).reshape(shape)
-        return np.asarray(sess.run(None, {inp.name: x})[0], dtype=np.float64).ravel()
-
-    return forward
+# Falsification-sample floor for nonlinear specs. The shared DEFAULT_CONFIG
+# n_rand (100) is tuned for linear half-space falsification; the nonlinear
+# search relies on box corners + interior coverage near saturation boundaries,
+# so it needs more samples. A per-benchmark config value, if set, wins.
+_NONLINEAR_FALSIFY_SAMPLES = 2000
 
 
 def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
-                              vnnlib_path, t0):
+                              vnnlib_path, t0, workers=None):
     """Verify a ``format='nonlinear'`` single-network instance.
 
     Stage 1 (falsify): sample inputs in the box and test the resolved
@@ -324,10 +315,12 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
     CPU replay is authoritative for the output, input bounds at zero
     tolerance; :func:`evaluate_nonlinear` evaluates both the input
     constraints on the witness and the output constraints on the replayed
-    output exactly). Stage 2 (sound reach): propagate the box through the
-    network and evaluate the assertion conjunction over the reach set with
-    three-valued affine/interval arithmetic -> ``unsat`` when provably
-    violation-free, else ``unknown``.
+    output exactly). The replayed output is finite-checked first so a
+    NaN/Inf forward can never satisfy a ``!=`` conjunct and emit a spurious
+    ``sat``. Stage 2 (sound reach): propagate the box through the network and
+    evaluate the assertion conjunction over the reach set with three-valued
+    affine/interval arithmetic -> ``unsat`` when provably violation-free,
+    else ``unknown``.
     """
     from n2v.utils.verify_nonlinear import (
         verify_nonlinear_reach, falsify_nonlinear,
@@ -344,7 +337,10 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
                 "counterexample": None}
 
     cfg = get_config(category, onnx_path, vnnlib_path)
-    n2v.set_parallel(False)
+    # Use the machine the same way the linear path does (parallel LP across
+    # all cores, one instance at a time) -- the sound reach is the bottleneck.
+    workers = _resolve_workers(workers)
+    n2v.set_parallel(True, n_workers=workers)
     n2v.set_lp_solver("linprog")
 
     # Stage 1: falsification. A candidate is emitted only if its input,
@@ -356,29 +352,33 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
     # on it discards witnesses the official ONNX replay accepts (resolved.md
     # I-45) — e.g. acc instances whose output saturates on the spec boundary.
     try:
-        n_rand = max(int(cfg.get("n_rand", 100)), 2000)
-        # Search with the SAME backend the grader replays on (onnxruntime),
-        # so a witness on a spec boundary isn't missed because the onnx2torch
-        # float32 forward disagrees with onnxruntime there. Reuse ONE session
-        # across the thousands of search forwards (a fresh InferenceSession per
-        # sample, as ``onnx_forward`` builds, would dominate the time budget).
-        ort_forward = _make_ort_forward(onnx_path)
+        n_rand = max(int(cfg.get("n_rand", _NONLINEAR_FALSIFY_SAMPLES)),
+                     _NONLINEAR_FALSIFY_SAMPLES)
+        # Search with the SAME backend the grader replays on (onnxruntime), so
+        # a witness on a spec boundary isn't missed because the onnx2torch
+        # float32 forward disagrees with onnxruntime there. One reused session,
+        # batched, handles every search forward.
+        ort_forward = make_onnx_forward(onnx_path)
         x = falsify_nonlinear(model, lb, ub, prop, input_shape,
                               n_samples=n_rand, seed=42, forward=ort_forward)
         if x is not None:
             try:
-                y_ort = ort_forward(x)
-                if evaluate_nonlinear(prop, x.ravel(), y_ort):
+                y_ort = ort_forward(x.reshape(1, -1))[0]
+                if np.all(np.isfinite(y_ort)) and \
+                        evaluate_nonlinear(prop, x.ravel(), y_ort):
                     return {"result": RESULT_SAT, "time": time.time() - t0,
                             "counterexample": format_counterexample(x, y_ort)}
                 logger.warning("nonlinear CE rejected by onnxruntime re-check "
-                               "(onnx2torch divergence); not emitting sat")
+                               "(onnx2torch divergence / non-finite); not "
+                               "emitting sat")
             except Exception as e:  # noqa: BLE001
                 logger.warning("onnxruntime CE re-validation error: %s", e)
     except Exception as e:  # noqa: BLE001
         logger.debug("nonlinear falsification failed: %s", e)
 
-    # Stage 2: sound reachability.
+    # Stage 2: sound reachability. Each configured sound method is tried in
+    # turn; an op unsupported in one method (NotImplementedError) skips to the
+    # next rather than abandoning the rest (a later method may still prove it).
     net = NeuralNetwork(model)
     input_set = create_input_set(lb, ub, input_shape)
     for method, kwargs in cfg["reach_methods"]:
@@ -395,7 +395,7 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
                         "counterexample": None}
         except NotImplementedError as e:
             logger.warning("unsupported in %s: %s", method, e)
-            break
+            continue
         except Exception as e:  # noqa: BLE001
             logger.warning("error in %s: %s", method, e)
 

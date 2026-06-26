@@ -138,3 +138,64 @@ def test_falsify_returns_none_when_safe():
     )
     assert falsify_nonlinear(model, p["lb"], p["ub"], p, (1, 1),
                              n_samples=200, seed=0) is None
+
+
+def _write_spec(text: str) -> dict:
+    fd, path = tempfile.mkstemp(suffix=".vnnlib")
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    try:
+        return load_vnnlib(path)
+    finally:
+        os.remove(path)
+
+
+def test_appended_predicates_padding_and_coupling():
+    """Output star carries an extra relaxation predicate beyond the input
+    predicate, with a basis that differs from the input's (the real shape of a
+    post-ReLU reach set). Proving ``y - x >= 0.5`` UNSAT requires the joint
+    model to cancel the SHARED input predicate across the zero-padded input
+    basis and the wider output basis -- the decoupled output box (y in [0,2],
+    x in [1,2] -> y-x in [-2,1]) cannot."""
+    p = _spec(
+        "(assert (and (>= X[0,0] 1.0) (<= X[0,0] 2.0)))\n"
+        "(assert (>= (- Y[0,0] X[0,0]) 0.5))\n" + _DUMMY_NL
+    )
+    iset = Star.from_bounds(np.array([[1.0]]), np.array([[2.0]]))  # x = 1.5 + 0.5 a0
+    # y = 0.5 + 0.5 a0 + 1.0 a1, a0 in [-1,1], a1 in [0,1]  ->  y - x = -1 + a1
+    out = Star(V=np.array([[0.5, 0.5, 1.0]]), C=None, d=None,
+               pred_lb=np.array([-1.0, 0.0]), pred_ub=np.array([1.0, 1.0]))
+    assert out.nVar == 2 and iset.nVar == 1  # genuinely an appended predicate
+    assert verify_nonlinear_reach([out], iset, p) == "UNSAT"
+
+
+def test_pinned_input_dimension_still_decides():
+    """A pinned input dim (lb==ub) drops its generator so n_pred < n_in; the
+    verifier must still build the joint model (the pinned dim is constant) and
+    decide, not bail to UNKNOWN as it did before the fix."""
+    p = _write_spec(
+        "(vnnlib-version <2.0>)\n"
+        "(declare-network f (declare-input X real [1,2])"
+        " (declare-output Y real [1,2]))\n"
+        "(assert (and (>= X[0,0] 1.0) (<= X[0,0] 2.0)))\n"
+        "(assert (and (>= X[0,1] 5.0) (<= X[0,1] 5.0)))\n"
+        "(assert (>= Y[0,1] 10.0))\n"
+        "(assert (>= (* X[0,0] X[0,0]) 0.0))\n"
+    )
+    iset = Star.from_bounds(np.array([[1.0], [5.0]]), np.array([[2.0], [5.0]]))
+    assert iset.nVar == 1  # the pinned dim's generator was dropped
+    # identity reach: Y == X, so Y[0,1] == 5 < 10 -> provably safe.
+    assert verify_nonlinear_reach([iset], iset, p) == "UNSAT"
+
+
+def test_multi_star_requires_every_star_safe():
+    """UNSAT only when EVERY output star is provably violation-free; one star
+    that might violate -> UNKNOWN (the exact/branching reach returns a union)."""
+    p = _spec("(assert (>= Y[0,0] 5.0))\n" + _DUMMY_NL)  # unsafe: y >= 5
+    iset = Star.from_bounds(np.array([[1.0]]), np.array([[2.0]]))
+    safe = Star(V=np.array([[1.5, 0.5]]), C=None, d=None,   # y in [1, 2]
+                pred_lb=np.array([-1.0]), pred_ub=np.array([1.0]))
+    maybe = Star(V=np.array([[5.0, 1.0]]), C=None, d=None,  # y in [4, 6], straddles 5
+                 pred_lb=np.array([-1.0]), pred_ub=np.array([1.0]))
+    assert verify_nonlinear_reach([safe, safe], iset, p) == "UNSAT"
+    assert verify_nonlinear_reach([safe, maybe], iset, p) == "UNKNOWN"
