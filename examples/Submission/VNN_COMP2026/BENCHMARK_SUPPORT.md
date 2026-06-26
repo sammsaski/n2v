@@ -46,7 +46,7 @@ indicate per-benchmark tuning, not a hard limitation.
 | Benchmark | Note |
 |---|---|
 | acasxu_2023 | |
-| adaptive_cruise_control_non_linear_2026 | nonlinear spec; model is a plain MLP |
+| adaptive_cruise_control_non_linear_2026 | nonlinear output property (Pow/Mul over vars); plain MLP. Sound nonlinear verify path: three-valued affine/interval evaluation of the assertion AST over the reach set (`verify_nonlinear`) -> `unsat`/`unknown`. Falsification searches and gates with onnxruntime (the VNN-COMP 2026 grading backend: ONNX CPU replay output is authoritative, input bounds zero-tol), so emitted `sat` witnesses match the official CORRECT criterion. Outputs saturate on the strict-inequality spec boundary (the edge case the organizers deferred to next year), so pin onnxruntime to the competition version and run the witness check on the submission hardware. |
 | cersyve | |
 | cgan_2023 | ConvTranspose |
 | cgan2026 | ConvTranspose |
