@@ -193,6 +193,129 @@ def verify_bab(
                      clock() - t0, "all subdomains proven safe")
 
 
+def _seq_reach_relu(layers, input_star, splits, relax_factor, lp_solver):
+    """Reach an nn.Sequential of Linear/Flatten/ReLU with forced ReLU signs.
+
+    ``splits`` maps relu-layer index -> {neuron: +1 (active) | -1 (inactive)}.
+    Forced neurons are pinned by intersecting the pre-activation star with the
+    sign halfspace; LP ranges (which respect those constraints) are passed to the
+    triangle ReLU so a forced neuron is treated exactly (stable). Returns
+    (out_star, undecided_unstable_list, empty)."""
+    from n2v.nn.layer_ops.linear_reach import linear_star
+    from n2v.nn.layer_ops.relu_reach import relu_star_approx
+
+    s = input_star
+    relu_id = 0
+    unstable = []
+    for layer in layers:
+        name = type(layer).__name__
+        if name == "Linear":
+            s = linear_star(layer, [s])[0]
+        elif name == "Flatten":
+            pass
+        elif name == "ReLU":
+            dec = splits.get(relu_id, {})
+            if dec:
+                rows, gs = [], []
+                for n, sign in dec.items():
+                    r = np.zeros(s.dim)
+                    r[n] = -1.0 if sign > 0 else 1.0   # s_n>=0  or  s_n<=0
+                    rows.append(r); gs.append(0.0)
+                s = s.intersect_half_space(np.array(rows), np.array(gs))
+                if s.is_empty_set(lp_solver):
+                    return None, [], True              # infeasible -> vacuously safe
+            lb, ub = s.get_ranges(lp_solver=lp_solver)
+            lbf, ubf = lb.reshape(-1), ub.reshape(-1)
+            for n in range(s.dim):
+                if n not in dec and lbf[n] < -1e-9 and ubf[n] > 1e-9:
+                    unstable.append((relu_id, n, float(lbf[n]), float(ubf[n])))
+            s = relu_star_approx([s], relax_factor=relax_factor,
+                                 lp_solver=lp_solver, precomputed_bounds=(lb, ub))[0]
+            relu_id += 1
+        else:
+            raise NotImplementedError(f"verify_bab_relu: unsupported layer {name}")
+    return s, unstable, False
+
+
+def verify_bab_relu(
+    model,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    spec,
+    *,
+    falsify_method: Optional[str] = "random+pgd",
+    falsify_kwargs: Optional[dict] = None,
+    relax_factor: float = 0.5,
+    lp_solver: str = "default",
+    max_nodes: int = 1000,
+    timeout_s: Optional[float] = None,
+    verbose: bool = False,
+    _clock: Optional[Callable[[], float]] = None,
+) -> BaBResult:
+    """ReLU **neuron-split** branch-and-bound for an ``nn.Sequential`` of
+    Linear / Flatten / ReLU (the canonical complete-verification BaB, the right
+    split space for ReLU classifiers — unlike input splitting).
+
+    The input region is fixed; the search branches on unstable ReLU neurons
+    (forcing active/inactive), which exactly tile the parent, so it is sound and
+    complete-in-the-limit. Prunes a subdomain when the bound proves it safe or
+    the forced signs are infeasible; falsifies the (fixed) input box once.
+    """
+    from n2v.sets import Star
+    from n2v.utils.falsify import falsify as _falsify
+
+    clock = _clock or time.monotonic
+    t0 = clock()
+    layers = list(model)
+    lb0 = np.asarray(lb, dtype=np.float64).reshape(-1)
+    ub0 = np.asarray(ub, dtype=np.float64).reshape(-1)
+    input_star = Star.from_bounds(lb0, ub0)
+
+    # The input region is identical at every node, so falsify once up front.
+    if falsify_method is not None:
+        res, cex = _falsify(model, lb0, ub0, spec, method=falsify_method,
+                            **(falsify_kwargs or {}))
+        if res == 0 and cex is not None:
+            return BaBResult("FALSIFIED", np.asarray(cex[0]), 0, 0, 0,
+                             clock() - t0, "counterexample found")
+
+    stack = [{}]
+    nodes = splits = max_depth = 0
+    while stack:
+        if nodes >= max_nodes:
+            return BaBResult("UNKNOWN", None, nodes, splits, max_depth,
+                             clock() - t0, f"node budget {max_nodes} exhausted")
+        if timeout_s is not None and clock() - t0 > timeout_s:
+            return BaBResult("UNKNOWN", None, nodes, splits, max_depth,
+                             clock() - t0, f"timeout {timeout_s}s")
+        decisions = stack.pop()
+        depth = sum(len(v) for v in decisions.values())
+        max_depth = max(max_depth, depth)
+        nodes += 1
+        out, unstable, empty = _seq_reach_relu(
+            layers, input_star, decisions, relax_factor, lp_solver)
+        if empty:
+            continue                                   # infeasible split -> safe
+        if verify_specification([out], spec).verdict == "UNSAT":
+            continue                                   # subdomain proven safe
+        if not unstable:
+            return BaBResult("UNKNOWN", None, nodes, splits, max_depth,
+                             clock() - t0,
+                             "bound loose with no unstable ReLU left to split")
+        # branch the most balanced unstable neuron (largest min(|lb|, ub))
+        relu_id, n, nlb, nub = max(unstable, key=lambda t: min(-t[2], t[3]))
+        for sign in (1, -1):
+            child = {k: dict(v) for k, v in decisions.items()}
+            child.setdefault(relu_id, {})[n] = sign
+            stack.append(child)
+        splits += 1
+        if verbose:
+            print(f"  node {nodes} d{depth}: split relu{relu_id} neuron {n} "
+                  f"[{nlb:.3g},{nub:.3g}]", flush=True)
+    return BaBResult("VERIFIED", None, nodes, splits, max_depth,
+                     clock() - t0, "all subdomains proven safe")
+
+
 def verify_bab_model(
     model,
     lb: np.ndarray,

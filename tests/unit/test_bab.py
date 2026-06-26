@@ -16,7 +16,7 @@ from n2v.sets import Star
 from n2v.sets.halfspace import HalfSpace
 from n2v.nn.neural_network import NeuralNetwork
 from n2v.utils.verify_specification import verify_specification
-from n2v.nn.bab import verify_bab_model
+from n2v.nn.bab import verify_bab_model, verify_bab_relu
 
 LB = np.array([-1.0, -1.0])
 UB = np.array([1.0, 1.0])
@@ -104,6 +104,35 @@ def test_exact_relu_split_is_complete():
     exact = NeuralNetwork(m).reach(Star.from_bounds(LB, UB), method="exact")
     assert verify_specification(exact, spec).verdict == "UNSAT"
     assert len(exact) > 1                       # it actually split
+
+
+def test_bab_relu_neuron_split_verifies():
+    # Neuron-split BaB verifies the relaxation gap by forcing unstable ReLUs,
+    # pruning far below the 2^16 worst case.
+    m, tmax, smax = _gap_net()
+    spec = _spec_leq(tmax + 0.5 * (smax - tmax))
+    res = verify_bab_relu(m, LB, UB, spec, falsify_method="random", max_nodes=3000)
+    assert res.verdict == "VERIFIED", res
+    assert res.nodes < 3000
+
+
+def test_bab_relu_neuron_split_sound():
+    m, tmax, smax = _gap_net()
+    res = verify_bab_relu(m, LB, UB, _spec_leq(tmax + 0.5 * (smax - tmax)),
+                          falsify_method="random", max_nodes=3000)
+    assert res.verdict == "VERIFIED"
+    rng = np.random.default_rng(2)
+    xs = rng.uniform(-1, 1, size=(20000, 2)).astype(np.float32)
+    with torch.no_grad():
+        ys = m(torch.from_numpy(xs)).numpy().reshape(-1)
+    assert np.all(ys <= tmax + 0.5 * (smax - tmax) + 1e-5)
+
+
+def test_bab_relu_neuron_split_falsifies():
+    m, tmax, smax = _gap_net()
+    res = verify_bab_relu(m, LB, UB, _spec_leq(tmax - 0.2 * (smax - tmax)),
+                          falsify_method="random+pgd", max_nodes=3000)
+    assert res.verdict == "FALSIFIED", res
 
 
 def test_bab_budget_is_sound_unknown():
