@@ -39,6 +39,17 @@ from onnx2torch.node_converters.reduce import (
     OnnxReduceStaticAxes,
     OnnxReduceSumStaticAxes,
 )
+from n2v.nn.layer_ops.batchnorm_reach import _get_bn_params
+from n2v.nn.layer_ops.bilinear_matmul_reach import (
+    bilinear_matmul_star,
+    bilinear_matmul_zono,
+    bilinear_matmul_box,
+)
+from n2v.nn.layer_ops.softmax_attention_reach import (
+    softmax_attn_star,
+    softmax_attn_zono,
+    softmax_attn_box,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -476,7 +487,13 @@ def _handle_graphmodule(
                 shape_tensor = _get_parameter(graph_module, shape_node)
                 target_shape = tuple(shape_tensor.numpy().astype(int))
 
-                result_sets = _handle_reshape(input_sets_op, target_shape)
+                # Only materialize a 3-D target as an ImageStar when the result
+                # actually feeds a spatial (conv/pool) consumer; otherwise keep
+                # it flat (e.g. the transformer head-split reshape, which must
+                # not be reinterpreted as a (C, H, W) image).
+                force_flat = not _reshape_feeds_spatial(node, graph_module)
+                result_sets = _handle_reshape(
+                    input_sets_op, target_shape, force_flat=force_flat)
                 node_values[node.name] = result_sets
                 current_sets = result_sets
                 continue
@@ -484,7 +501,7 @@ def _handle_graphmodule(
             # Handle OnnxConcat
             if isinstance(module, OnnxConcat):
                 result_sets = _handle_onnx_concat(
-                    module, node, node_values, node_shapes)
+                    module, node, node_values, graph_module, node_shapes)
                 if result_sets is not None:
                     node_values[node.name] = result_sets
                     current_sets = result_sets
@@ -556,6 +573,31 @@ def _handle_graphmodule(
             if isinstance(module, (OnnxReduceStaticAxes,
                                    OnnxReduceSumStaticAxes)):
                 result_sets = _handle_onnx_reduce_flat(
+                    module, node, node_values, node_shapes)
+                if result_sets is not None:
+                    node_values[node.name] = result_sets
+                    current_sets = result_sets
+                    continue
+
+            # Shape-aware BatchNorm on flat (N, C, ...) sets: the per-channel
+            # affine must broadcast over the non-channel axes (e.g. the ViT
+            # per-token norm on (1, 48, 17)). ImageStar/plain dim==C cases
+            # return None and fall through to the channel-aware dispatcher.
+            if isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                result_sets = _handle_batchnorm_flat(
+                    module, node, node_values, node_shapes)
+                if result_sets is not None:
+                    node_values[node.name] = result_sets
+                    current_sets = result_sets
+                    continue
+
+            # Shape-aware Softmax on flat sets: the attention softmax is a
+            # batched (..., L, L) softmax over one axis, routed to the sound
+            # correlated row bound. ImageStar / global-(1,N) softmax fall
+            # through to the generic dispatcher.
+            if (isinstance(module, nn.Softmax)
+                    or module_type in ('OnnxSoftmaxV1V11', 'OnnxSoftmax')):
+                result_sets = _handle_softmax_flat(
                     module, node, node_values, node_shapes)
                 if result_sets is not None:
                     node_values[node.name] = result_sets
@@ -996,7 +1038,8 @@ def _const_eval(graph_module: fx.GraphModule, node: Any, memo: dict) -> torch.Te
     return result
 
 
-def _handle_reshape(input_sets: List, target_shape: tuple) -> List:
+def _handle_reshape(input_sets: List, target_shape: tuple,
+                    force_flat: bool = False) -> List:
     """
     Reshape sets to a new shape.
 
@@ -1006,6 +1049,11 @@ def _handle_reshape(input_sets: List, target_shape: tuple) -> List:
     Args:
         input_sets: List of input sets
         target_shape: Target shape tuple from ONNX (includes batch dim)
+        force_flat: keep an already-flat set flat even for a 3-D target
+            (non-image reshape, e.g. the transformer head-split). The caller
+            sets this when the reshape does not feed a spatial (conv/pool)
+            consumer; a reshape preserves ONNX row-major order, so staying
+            flat is exact and avoids the CHW->HWC image reinterpretation.
 
     Returns:
         List of reshaped sets
@@ -1024,9 +1072,9 @@ def _handle_reshape(input_sets: List, target_shape: tuple) -> List:
         elif isinstance(s, ImageZono):
             output_sets.append(_reshape_imagezono(s, spatial_shape))
         elif isinstance(s, Star):
-            output_sets.append(_reshape_star(s, spatial_shape))
+            output_sets.append(_reshape_star(s, spatial_shape, force_flat))
         elif isinstance(s, Zono):
-            output_sets.append(_reshape_zono(s, spatial_shape))
+            output_sets.append(_reshape_zono(s, spatial_shape, force_flat))
         elif isinstance(s, Box):
             output_sets.append(_reshape_box(s, spatial_shape))
         else:
@@ -1034,6 +1082,58 @@ def _handle_reshape(input_sets: List, target_shape: tuple) -> List:
             output_sets.append(s)
 
     return output_sets
+
+
+# Module types that consume a spatial (N, C, H, W) layout and therefore
+# require a reshape's flat output to be materialized as an ImageStar.
+_SPATIAL_CONSUMERS = frozenset({
+    'Conv1d', 'Conv2d', 'Conv3d', 'OnnxConv',
+    'MaxPool1d', 'MaxPool2d', 'MaxPool3d', 'OnnxMaxPool',
+    'AvgPool1d', 'AvgPool2d', 'AvgPool3d', 'OnnxAveragePool',
+    'AdaptiveAvgPool2d', 'OnnxGlobalAveragePool',
+})
+# Pass-through ops that preserve spatial layout and may sit between a reshape
+# and its spatial consumer (so the forward walk must look past them).
+_SPATIAL_PASSTHROUGH = frozenset({
+    'ReLU', 'ReLU6', 'LeakyReLU', 'Sigmoid', 'Tanh', 'GELU', 'ELU',
+    'BatchNorm1d', 'BatchNorm2d', 'BatchNorm3d', 'Dropout', 'Identity',
+    'OnnxBinaryMathOperation', 'OnnxClip', 'OnnxPad', 'OnnxPadDynamic',
+})
+
+
+def _reshape_feeds_spatial(node: Any, graph_module: fx.GraphModule) -> bool:
+    """True if a Reshape's output flows into a spatial op (conv/pool), so it
+    must be materialized as an ImageStar.
+
+    A forward walk over consumers looks past layout-preserving pass-throughs
+    (activations, batchnorm, elementwise). Reaching a conv/pool returns True;
+    a layout-defining op (MatMul/Transpose/Gemm/Linear/Reshape/Softmax/...)
+    ends that branch as non-spatial. Defaults to False (keep flat) -- the
+    ONNX-correct, transformer-safe behavior -- when no spatial consumer is
+    found; an actual conv reached with a flat set raises a clear error rather
+    than silently mis-laying out.
+    """
+    seen = set()
+    stack = list(node.users)
+    while stack:
+        u = stack.pop()
+        if u in seen:
+            continue
+        seen.add(u)
+        name = None
+        if u.op == 'call_module':
+            try:
+                name = type(graph_module.get_submodule(u.target)).__name__
+            except AttributeError:
+                name = None
+        if name in _SPATIAL_CONSUMERS:
+            return True
+        # Walk past pass-through layers and raw function/method nodes
+        # (flatten/getitem/etc.); stop at layout-defining modules.
+        if name in _SPATIAL_PASSTHROUGH or u.op in (
+                'call_function', 'call_method'):
+            stack.extend(u.users)
+    return False
 
 
 def _resolve_shape(shape: Tuple[int, ...], total_size: int) -> Tuple[int, ...]:
@@ -1115,7 +1215,8 @@ def _reshape_imagezono(zono: 'ImageZono', spatial_shape: Tuple[int, ...]) -> Uni
     return Zono(c_flat, V_flat)
 
 
-def _reshape_star(star: 'Star', spatial_shape: Tuple[int, ...]) -> Union['Star', 'ImageStar']:
+def _reshape_star(star: 'Star', spatial_shape: Tuple[int, ...],
+                  force_flat: bool = False) -> Union['Star', 'ImageStar']:
     """Reshape plain Star.
 
     Flat-Star rows are in ONNX (CHW-flattened) order — the invariant
@@ -1129,6 +1230,14 @@ def _reshape_star(star: 'Star', spatial_shape: Tuple[int, ...]) -> Union['Star',
     1-D targets are the identity on a flat vector (no-op). 2-D targets
     are reinterpretation-only and stay a validated no-op (no spatial
     consumer exists for 2-D star layouts).
+
+    ``force_flat`` keeps the set flat even for a 3-D target. This is for
+    non-image reshapes such as the transformer head-split
+    ``(tokens, heads, dim_head)``, which must NOT be reinterpreted as a
+    ``(C, H, W)`` image (the CHW->HWC permutation would corrupt the layout
+    for the downstream attention matmuls). The caller sets it when the
+    reshape does not feed a spatial (conv/pool) consumer; a reshape preserves
+    ONNX row-major order, so staying flat is exact.
     """
     total = star.dim
     resolved = _resolve_shape(spatial_shape, total)
@@ -1140,7 +1249,7 @@ def _reshape_star(star: 'Star', spatial_shape: Tuple[int, ...]) -> Union['Star',
             f"Cannot reshape Star of dim {total} to shape {resolved}"
         )
 
-    if len(resolved) == 3:
+    if len(resolved) == 3 and not force_flat:
         c_out, h_out, w_out = resolved
         n_cols = star.V.shape[1]
         V_chw = star.V.reshape(c_out, h_out, w_out, n_cols)
@@ -1159,9 +1268,12 @@ def _chw_to_hwc_perm(c: int, h: int, w: int) -> np.ndarray:
         np.arange(c * h * w).reshape(c, h, w), (1, 2, 0)).flatten()
 
 
-def _reshape_zono(zono: 'Zono', spatial_shape: Tuple[int, ...]) -> Union['Zono', 'ImageZono']:
+def _reshape_zono(zono: 'Zono', spatial_shape: Tuple[int, ...],
+                  force_flat: bool = False) -> Union['Zono', 'ImageZono']:
     """Reshape plain Zono. Same convention and exactness argument as
-    :func:`_reshape_star`; ImageZono stores flat HWC-ordered arrays."""
+    :func:`_reshape_star`; ImageZono stores flat HWC-ordered arrays.
+    ``force_flat`` keeps a 3-D target flat (non-image reshape, e.g. the
+    transformer head-split)."""
     total = zono.dim
     resolved = _resolve_shape(spatial_shape, total)
     product = 1
@@ -1172,7 +1284,7 @@ def _reshape_zono(zono: 'Zono', spatial_shape: Tuple[int, ...]) -> Union['Zono',
             f"Cannot reshape Zono of dim {total} to shape {resolved}"
         )
 
-    if len(resolved) == 3:
+    if len(resolved) == 3 and not force_flat:
         c_out, h_out, w_out = resolved
         perm = _chw_to_hwc_perm(c_out, h_out, w_out)
         return ImageZono(zono.c[perm, :], zono.V[perm, :],
@@ -1562,6 +1674,52 @@ def _handle_onnx_pow(
         f"Pow not supported for {type(first).__name__}")
 
 
+def _handle_bilinear_matmul(
+    left_node: Any,
+    right_node: Any,
+    node: Any,
+    node_values: Dict[str, List],
+    node_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
+) -> Optional[List]:
+    """Sound ``set @ set`` MatMul (the attention products ``Q@K^T`` and
+    ``A@V``) via the bilinear interval-matmul reach.
+
+    Both operands are computed sets, so the result is a sound
+    over-approximation, never the exact image. Standard batched-matmul
+    semantics apply (last two axes are the matrix dims, leading axes batch),
+    so the full ONNX tensor shapes are passed straight through. Returns
+    ``None`` if either operand is not a resolvable set.
+    """
+    if not (hasattr(left_node, 'name') and left_node.name in node_values
+            and hasattr(right_node, 'name')
+            and right_node.name in node_values):
+        return None
+    left_sets = node_values[left_node.name]
+    right_sets = node_values[right_node.name]
+    if not left_sets or not right_sets:
+        return None
+    left_shape = (node_shapes or {}).get(left_node.name)
+    right_shape = (node_shapes or {}).get(right_node.name)
+    if left_shape is None or right_shape is None:
+        raise NotImplementedError(
+            "set@set MatMul requires tensor-shape metadata (ShapeProp could "
+            f"not infer shapes for node {node.name!r})")
+    left_shape = tuple(int(s) for s in left_shape)
+    right_shape = tuple(int(s) for s in right_shape)
+    first = left_sets[0]
+    if isinstance(first, Star):
+        return bilinear_matmul_star(
+            left_sets, right_sets, left_shape, right_shape)
+    if isinstance(first, Zono):
+        return bilinear_matmul_zono(
+            left_sets, right_sets, left_shape, right_shape)
+    if isinstance(first, Box):
+        return bilinear_matmul_box(
+            left_sets, right_sets, left_shape, right_shape)
+    raise NotImplementedError(
+        f"set@set MatMul not supported for set type {type(first).__name__}")
+
+
 def _handle_onnx_matmul(
     module: Any,
     node: Any,
@@ -1592,7 +1750,12 @@ def _handle_onnx_matmul(
             param_side = 'left'
             first_input = second_input  # data node
         except Exception:  # noqa: BLE001
-            return None
+            # Neither operand is a constant: this is a set@set (bilinear)
+            # MatMul -- the attention products Q@K^T and A@V -- handled by the
+            # sound bilinear interval-matmul reach (a sound over-approximation,
+            # never the exact image).
+            return _handle_bilinear_matmul(
+                first_input, second_input, node, node_values, node_shapes)
 
     # Get the sets from the data input
     if not (hasattr(first_input, 'name')
@@ -2657,29 +2820,187 @@ def _concat_sets(set_lists: List[List], axis: int) -> List:
     return output_sets
 
 
+def _handle_batchnorm_flat(
+    module: Any,
+    node: Any,
+    node_values: Dict[str, List],
+    node_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
+) -> Optional[List]:
+    """Shape-aware BatchNorm (inference) for FLAT sets in ``(N, C, ...)`` layout.
+
+    BatchNorm normalizes over axis 1, and the flat set is the row-major
+    flattened tensor. When C spans only part of the tensor the plain C-sized
+    diagonal affine does not match the flat dim -- e.g. the ViT per-token norm
+    on ``(1, 48, 17)`` (48 channels x 17 tokens = 816 flat dims). Expand the
+    per-channel scale/shift to one value per flat element (broadcasting over the
+    non-channel axes) and apply the elementwise affine.
+
+    Returns ``None`` (defer to the channel-aware dispatcher) for
+    ImageStar/ImageZono, when no shape metadata is available, or for the plain
+    ``dim == num_features`` case the existing handler already covers.
+    """
+    if not isinstance(module, (nn.BatchNorm1d, nn.BatchNorm2d)):
+        return None
+    first_arg = node.args[0] if node.args else None
+    if not (hasattr(first_arg, 'name') and first_arg.name in node_values):
+        return None
+    input_sets = node_values[first_arg.name]
+    if not input_sets:
+        return None
+    first = input_sets[0]
+    if isinstance(first, (ImageStar, ImageZono)):
+        return None
+    shape = (node_shapes or {}).get(first_arg.name)
+    if shape is None:
+        return None
+    shape = tuple(int(s) for s in shape)
+    total = int(np.prod(shape))
+    C = int(module.num_features)
+    # Plain vector case (dim == C) is handled exactly by the generic path.
+    if len(shape) < 2 or total == C or shape[1] != C or total != first.dim:
+        return None
+    scale, shift = _get_bn_params(module)
+    bshape = [1] * len(shape)
+    bshape[1] = C
+    full_scale = np.broadcast_to(
+        np.asarray(scale, dtype=np.float64).reshape(bshape), shape).reshape(-1)
+    full_shift = np.broadcast_to(
+        np.asarray(shift, dtype=np.float64).reshape(bshape), shape).reshape(-1)
+    W = np.diag(full_scale)
+    b = full_shift.reshape(-1, 1)
+    return [s.affine_map(W, b) for s in input_sets]
+
+
+def _handle_softmax_flat(
+    module: Any,
+    node: Any,
+    node_values: Dict[str, List],
+    node_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
+) -> Optional[List]:
+    """Shape-aware Softmax for FLAT sets (the transformer attention softmax).
+
+    The generic ``softmax_star`` only handles softmax over the last axis of a
+    flat ``(1, N)`` tensor (one global softmax). The attention weights are a
+    batched ``(..., L, L)`` softmax over a single axis, so route to the sound
+    correlated row-softmax bound (``softmax_attn_*``) with the right shape and
+    axis. Handles both the opset<=11 ONNX semantics (softmax over the flattened
+    tail ``[axis, end)``) and the single-axis torch / opset>=13 semantics.
+
+    Returns ``None`` (defer to the generic dispatcher) for ImageStar/ImageZono,
+    LogSoftmax, or when shape metadata is unavailable.
+    """
+    cls = type(module).__name__
+    is_v1v11 = cls == 'OnnxSoftmaxV1V11'
+    if not (is_v1v11 or isinstance(module, nn.Softmax) or cls == 'OnnxSoftmax'):
+        return None
+    if getattr(module, 'is_log', False):
+        return None
+    first_arg = node.args[0] if node.args else None
+    if not (hasattr(first_arg, 'name') and first_arg.name in node_values):
+        return None
+    input_sets = node_values[first_arg.name]
+    if not input_sets:
+        return None
+    first = input_sets[0]
+    if isinstance(first, (ImageStar, ImageZono)):
+        return None
+    shape = (node_shapes or {}).get(first_arg.name)
+    if shape is None:
+        return None
+    shape = tuple(int(s) for s in shape)
+    axis = getattr(module, 'axis', None)
+    if axis is None:
+        axis = getattr(module, 'dim', -1)
+    if axis is None:
+        axis = -1
+    a = axis if axis >= 0 else axis + len(shape)
+    if not (0 <= a < len(shape)):
+        return None
+    if is_v1v11:
+        # opset<=11 Softmax(axis=a): coerce to 2D rows=[0,a), cols=[a,end) and
+        # softmax over the flattened columns. For the attention axis (the last
+        # one) this reduces to a per-row softmax over the key axis.
+        rows = int(np.prod(shape[:a])) if a > 0 else 1
+        cols = int(np.prod(shape[a:]))
+        sm_shape, sm_axis = (rows, cols), -1
+    else:
+        # torch / opset>=13 Softmax: single-axis.
+        sm_shape, sm_axis = shape, a
+    if isinstance(first, Star):
+        return softmax_attn_star(input_sets, sm_shape, axis=sm_axis)
+    if isinstance(first, Zono):
+        return softmax_attn_zono(input_sets, sm_shape, axis=sm_axis)
+    if isinstance(first, Box):
+        return softmax_attn_box(input_sets, sm_shape, axis=sm_axis)
+    return None
+
+
+def _const_set_like(template: Any, const_flat: np.ndarray) -> Any:
+    """A constant (zero-uncertainty) set matching ``template``'s type and
+    predicate system, centered at ``const_flat``.
+
+    Lets ONNX Concat bring a constant operand (e.g. the ViT cls token) into the
+    set algebra so it occupies real dimensions rather than being dropped. The
+    result shares the template's predicates with all-zero generators, so the
+    concatenation stays exact (no new uncertainty, no spurious correlation)."""
+    const_flat = np.asarray(const_flat, dtype=np.float64).reshape(-1)
+    d = const_flat.size
+    if isinstance(template, Star):
+        V = np.zeros((d, template.V.shape[1]))
+        V[:, 0] = const_flat
+        return Star(V, template.C, template.d,
+                    template.predicate_lb, template.predicate_ub)
+    if isinstance(template, Zono):
+        V = np.zeros((d, template.V.shape[1]))
+        return Zono(const_flat.reshape(-1, 1), V)
+    if isinstance(template, Box):
+        return Box(const_flat.copy(), const_flat.copy())
+    raise NotImplementedError(
+        f"Concat with a constant operand is not supported for set type "
+        f"{type(template).__name__}")
+
+
 def _handle_onnx_concat(
     module: Any,
     node: Any,
     node_values: Dict[str, List],
+    graph_module: fx.GraphModule,
     node_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
 ) -> Optional[List]:
     """
     Handle ONNX Concat operations.
 
     Collects sets from all input nodes, maps the ONNX axis (which includes
-    the batch dimension) to the set axis, and calls _concat_sets.
+    the batch dimension) to the set axis, and calls _concat_sets. Constant
+    operands (frozen initializers, e.g. the ViT cls token) are materialized
+    as zero-uncertainty sets so they occupy their dimensions instead of being
+    silently dropped.
 
     Args:
         module: OnnxConcat module (has .axis attribute)
         node: Graph node
         node_values: Dict mapping node names to lists of sets
+        graph_module: owning GraphModule (to resolve constant operands)
 
     Returns:
         List of concatenated output sets, or None if inputs not found
     """
     onnx_axis = module.axis
 
-    # Collect set lists from all input arguments
+    # A constant operand (e.g. the ViT cls token) is not in node_values. Find a
+    # real set first to use as the predicate-system template, then materialize
+    # any constant operands as zero-uncertainty sets. Dropping them would
+    # undersize the concat output (the vit_2023 `_0_concat_2` bug: the set
+    # stayed at 16 tokens while the shape said 17).
+    template = None
+    for arg in node.args:
+        if hasattr(arg, 'name') and arg.name in node_values:
+            sl = node_values[arg.name]
+            if sl:
+                template = sl[0]
+                break
+
+    # Collect set lists from all input arguments (in operand order)
     set_lists = []
     first_set = None
     shapes = []
@@ -2690,6 +3011,17 @@ def _handle_onnx_concat(
             shapes.append((node_shapes or {}).get(arg.name))
             if first_set is None and len(sl) > 0:
                 first_set = sl[0]
+        elif template is not None:
+            try:
+                const = _get_parameter(graph_module, arg)
+            except Exception:  # noqa: BLE001 - not a resolvable constant; skip
+                continue
+            const_np = np.asarray(
+                const.numpy() if hasattr(const, 'numpy') else const,
+                dtype=np.float64)
+            set_lists.append([_const_set_like(template, const_np.reshape(-1))])
+            shp = (node_shapes or {}).get(arg.name)
+            shapes.append(shp if shp is not None else tuple(const_np.shape))
 
     if not set_lists or first_set is None:
         return None
