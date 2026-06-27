@@ -73,8 +73,14 @@ from onnx2torch.node_converters.cast import OnnxCast
 from onnx2torch.node_converters.functions import OnnxFunction
 from onnx2torch.node_converters.transpose import OnnxTranspose
 from onnx2torch.node_converters.flatten import OnnxFlatten
-from onnx2torch.node_converters.squeeze import OnnxSqueezeStaticAxes
-from onnx2torch.node_converters.unsqueeze import OnnxUnsqueezeStaticAxes
+from onnx2torch.node_converters.squeeze import (
+    OnnxSqueezeStaticAxes,
+    OnnxSqueezeDynamicAxes,
+)
+from onnx2torch.node_converters.unsqueeze import (
+    OnnxUnsqueezeStaticAxes,
+    OnnxUnsqueezeDynamicAxes,
+)
 from onnx2torch.node_converters.dropout import OnnxDropoutDynamic
 
 _ONNX_GAP_TYPES = (nn.AdaptiveAvgPool2d, OnnxGlobalAveragePool, OnnxGlobalAveragePoolWithKnownInputShape)
@@ -86,8 +92,53 @@ _ONNX_CAST_TYPES = (OnnxCast,)
 _ONNX_FUNCTION_TYPES = (OnnxFunction,)
 _ONNX_TRANSPOSE_TYPES = (OnnxTranspose,)
 _ONNX_FLATTEN_TYPES = (nn.Flatten, OnnxFlatten)
-# Inserting/removing size-1 axes never reorders entries: flat identity.
-_SHAPE_IDENTITY_TYPES = (OnnxSqueezeStaticAxes, OnnxUnsqueezeStaticAxes)
+# Squeeze removes only size-1 axes and Unsqueeze inserts size-1 axes, so for a
+# FLAT set (Star/Zono/Box) the row-major ordering is unchanged: an exact
+# identity, for both static (compile-time attribute) and dynamic (runtime
+# tensor input) axes. ImageStar/ImageZono are the exception — see
+# ``_shape_identity_star`` / ``_shape_identity_zono`` below.
+_SHAPE_IDENTITY_TYPES = (
+    OnnxSqueezeStaticAxes, OnnxUnsqueezeStaticAxes,
+    OnnxSqueezeDynamicAxes, OnnxUnsqueezeDynamicAxes,
+)
+
+
+def _shape_identity_star(input_sets: List) -> List:
+    """Squeeze/Unsqueeze as a flat identity, guarding the ImageStar hazard.
+
+    For a flat Star the row-major order is unchanged, so returning the set is
+    exact. An ImageStar instead carries explicit (H, W, C) metadata that does
+    NOT record *which* logical axis the op removed/inserted; returning it
+    unchanged would leave that metadata describing the pre-op rank. A
+    *downstream* channel/spatial broadcast (e.g. a per-channel ``Mul``) keys off
+    that stale metadata and would silently pick the wrong axis — an
+    over-approximation that no longer contains the true output (unsound). Until
+    shape-tracked squeeze/unsqueeze lands we raise loudly rather than risk that;
+    flatten before the squeeze if a spatial reshape is intended.
+    """
+    for s in input_sets:
+        if isinstance(s, ImageStar):
+            raise NotImplementedError(
+                "Squeeze/Unsqueeze on a spatial ImageStar needs tensor-shape "
+                "tracking (its H,W,C metadata cannot encode the rank change); "
+                "flatten before the squeeze."
+            )
+    return input_sets
+
+
+def _shape_identity_zono(input_sets: List) -> List:
+    """Squeeze/Unsqueeze flat identity; raises for ImageZono (see
+    :func:`_shape_identity_star` for the soundness rationale)."""
+    for s in input_sets:
+        if isinstance(s, ImageZono):
+            raise NotImplementedError(
+                "Squeeze/Unsqueeze on a spatial ImageZono needs tensor-shape "
+                "tracking (its H,W,C metadata cannot encode the rank change); "
+                "flatten before the squeeze."
+            )
+    return input_sets
+
+
 # Layers that are the identity at inference time: a no-op for reachability.
 # OnnxDropoutDynamic.forward is F.dropout(..., training=self.training); the
 # model is in eval mode, so it passes its input through unchanged.
@@ -283,7 +334,7 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
         return sign_reach.sign_star(layer, input_sets, method, **kwargs)
 
     elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
-        return input_sets
+        return _shape_identity_star(input_sets)
 
     elif isinstance(layer, _PASSTHROUGH_TYPES):
         return input_sets
@@ -372,7 +423,7 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
         return sign_reach.sign_zono(input_sets)
 
     elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
-        return input_sets
+        return _shape_identity_zono(input_sets)
 
     elif isinstance(layer, _PASSTHROUGH_TYPES):
         return input_sets

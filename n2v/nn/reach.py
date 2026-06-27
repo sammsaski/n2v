@@ -2631,7 +2631,10 @@ def _mul_sets_by_constant(input_sets: List, scale: np.ndarray) -> List:
             h, w, c, n_cols = s.V.shape
             total = h * w * c
 
-            if scale.size == c:
+            if scale.size == 1:
+                # Scalar broadcast: multiply every element by the scalar.
+                scale_4d = scale.reshape(1, 1, 1, 1)
+            elif scale.size == c:
                 # Channel-wise scale: reshape to (1, 1, C, 1)
                 scale_4d = scale.reshape(1, 1, c, 1)
             elif scale.size == total:
@@ -2665,7 +2668,10 @@ def _mul_sets_by_constant(input_sets: List, scale: np.ndarray) -> List:
             h, w, c_ch = s.height, s.width, s.num_channels
             total = h * w * c_ch
 
-            if scale.size == c_ch:
+            if scale.size == 1:
+                # Scalar broadcast: multiply every element by the scalar.
+                scale_flat = scale.reshape(1, 1)
+            elif scale.size == c_ch:
                 # Channel-wise: tile to H*W*C in HWC order
                 scale_flat = np.tile(scale, h * w).reshape(-1, 1)
             elif scale.size == total:

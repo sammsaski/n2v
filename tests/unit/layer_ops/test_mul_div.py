@@ -212,6 +212,23 @@ class TestMulImageStar:
         scale_4d = scale.reshape(2, 2, 1, 1)
         assert np.allclose(out.V, scale_4d * istar.V)
 
+    def test_imagestar_mul_scalar_broadcast_multichannel(self):
+        """A size-1 scalar broadcasts to every element of a multi-channel
+        ImageStar. Regression: cGAN small_transformer multiplies a 256-channel
+        feature map by a scalar (e.g. attention 1/sqrt(d)), which previously
+        raised because only ``scale.size in {C, H*W*C}`` was handled."""
+        lb = np.zeros((2, 3, 4))
+        ub = np.ones((2, 3, 4))
+        istar = ImageStar.from_bounds(lb, ub, height=2, width=3, num_channels=4)
+
+        scale = np.array([0.25])  # single scalar, C = 4 > 1
+
+        out = _mul_sets_by_constant([istar], scale)[0]
+
+        assert isinstance(out, ImageStar)
+        assert out.num_channels == 4
+        assert np.allclose(out.V, 0.25 * istar.V)
+
 
 class TestMulZono:
     """Test Zono multiplication."""
@@ -288,6 +305,22 @@ class TestMulImageZono:
         scale_flat = np.tile(scale, 2).reshape(-1, 1)  # h*w=2, tile by 2
         assert np.allclose(out.c, scale_flat * c)
         assert np.allclose(out.V, scale_flat * V)
+
+    def test_imagezono_mul_scalar_broadcast_multichannel(self):
+        """A size-1 scalar broadcasts to every element of a multi-channel
+        ImageZono (sibling of the ImageStar scalar-broadcast regression)."""
+        c = np.array([[1.0], [2.0], [3.0], [4.0]])  # H*W*C = 2*1*2 = 4
+        V = np.array([[0.1, 0.0], [0.2, 0.0], [0.0, 0.1], [0.0, 0.2]])
+        iz = ImageZono(c, V, height=2, width=1, num_channels=2)
+
+        scale = np.array([0.5])  # single scalar, C = 2 > 1
+
+        out = _mul_sets_by_constant([iz], scale)[0]
+
+        assert isinstance(out, ImageZono)
+        assert out.num_channels == 2
+        assert np.allclose(out.c, 0.5 * c)
+        assert np.allclose(out.V, 0.5 * V)
 
 
 class TestMulBox:

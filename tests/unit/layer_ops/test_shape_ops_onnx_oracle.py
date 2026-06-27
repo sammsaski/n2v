@@ -164,6 +164,41 @@ class TestUnsqueezeOracle:
             _ort_point(sess, vals, [1, 2, 3]), atol=1e-6)
 
 
+class TestSqueezeOracle:
+    """opset-13 Squeeze takes axes as an input, so onnx2torch lowers it to
+    OnnxSqueezeDynamicAxes. Removing size-1 axes never reorders the flat data,
+    so reach is a flat identity (regression: the cGAN small_transformer's final
+    Squeeze previously raised NotImplementedError in the sound pipeline)."""
+
+    def test_squeeze_is_flat_identity(self, tmp_path):
+        init = helper.make_tensor("ax", TensorProto.INT64, [1], [2])
+        tmodel, sess, _ = _single_op_model(
+            tmp_path, "Squeeze", {}, [1, 2, 1, 3], [1, 2, 3],
+            extra_inits=[init])
+        # Confirm we actually exercise the dynamic-axes lowering.
+        assert any(type(m).__name__ == "OnnxSqueezeDynamicAxes"
+                   for m in tmodel.modules()), "expected dynamic-axes Squeeze"
+        vals = np.arange(6, dtype=np.float64)
+        np.testing.assert_allclose(
+            _reach_point(tmodel, vals, [1, 2, 1, 3]),
+            _ort_point(sess, vals, [1, 2, 1, 3]), atol=1e-6)
+
+    def test_squeeze_on_imagestar_raises(self):
+        """On an ImageStar the (H,W,C) metadata cannot record which axis the
+        squeeze removed, so a flat-identity pass-through would desync that
+        metadata and let a downstream channel/spatial broadcast pick the wrong
+        axis (a soundness violation). Reach must raise loudly instead."""
+        from onnx2torch.node_converters.squeeze import OnnxSqueezeDynamicAxes
+        from n2v.nn.layer_ops.dispatcher import reach_layer
+        from n2v.sets.image_star import ImageStar
+
+        istar = ImageStar.from_bounds(
+            np.zeros((2, 2, 4)), np.ones((2, 2, 4)),
+            height=2, width=2, num_channels=4)
+        with pytest.raises(NotImplementedError, match="tensor-shape tracking"):
+            reach_layer(OnnxSqueezeDynamicAxes(), [istar], "approx")
+
+
 def _multi_op_model(tmp_path, name, nodes, in_shape, out_shape,
                     extra_inits=()):
     """Build, save, and load a small multi-node ONNX model; return
