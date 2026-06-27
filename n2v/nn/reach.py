@@ -807,21 +807,33 @@ def _propagate_shapes(graph_module: fx.GraphModule, input_sets: List,
     """
     try:
         from torch.fx.passes.shape_prop import ShapeProp
+        # Candidate dummy shapes, tried in order. The batch-prefixed form is
+        # tried first (the common case: ``input_shape`` is batch-stripped, so
+        # the model wants the batch back). A rank-1-native model — e.g. one
+        # packing a flattened image plus spec params into a single vector and
+        # slicing axis 0 to split them — has NO batch dim, so the prefixed
+        # forward crashes; the un-prefixed candidate is the correct fallback.
         if input_shape is not None:
-            dummy_shape = (1, *tuple(int(d) for d in input_shape))
+            stripped = tuple(int(d) for d in input_shape)
+            candidates = [(1, *stripped), stripped]
         else:
             s0 = input_sets[0]
             if isinstance(s0, ImageStar):
-                dummy_shape = (1, s0.num_channels, s0.height, s0.width)
+                candidates = [(1, s0.num_channels, s0.height, s0.width)]
             else:
-                dummy_shape = (1, int(s0.dim))
-        ShapeProp(graph_module).propagate(torch.zeros(dummy_shape))
-        shapes = {}
-        for n in graph_module.graph.nodes:
-            tm = n.meta.get('tensor_meta')
-            if tm is not None and hasattr(tm, 'shape'):
-                shapes[n.name] = tuple(int(x) for x in tm.shape)
-        return shapes
+                candidates = [(1, int(s0.dim)), (int(s0.dim),)]
+        for dummy_shape in candidates:
+            try:
+                ShapeProp(graph_module).propagate(torch.zeros(dummy_shape))
+            except Exception:  # noqa: BLE001 — try the next candidate shape
+                continue
+            shapes = {}
+            for n in graph_module.graph.nodes:
+                tm = n.meta.get('tensor_meta')
+                if tm is not None and hasattr(tm, 'shape'):
+                    shapes[n.name] = tuple(int(x) for x in tm.shape)
+            return shapes
+        return {}
     except Exception:  # noqa: BLE001 — absence is handled loudly downstream
         return {}
 

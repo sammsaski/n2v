@@ -75,6 +75,7 @@ from onnx2torch.node_converters.transpose import OnnxTranspose
 from onnx2torch.node_converters.flatten import OnnxFlatten
 from onnx2torch.node_converters.squeeze import OnnxSqueezeStaticAxes
 from onnx2torch.node_converters.unsqueeze import OnnxUnsqueezeStaticAxes
+from onnx2torch.node_converters.dropout import OnnxDropoutDynamic
 
 _ONNX_GAP_TYPES = (nn.AdaptiveAvgPool2d, OnnxGlobalAveragePool, OnnxGlobalAveragePoolWithKnownInputShape)
 _ONNX_REDUCE_TYPES = (OnnxReduceStaticAxes, OnnxReduceSumStaticAxes)
@@ -87,6 +88,12 @@ _ONNX_TRANSPOSE_TYPES = (OnnxTranspose,)
 _ONNX_FLATTEN_TYPES = (nn.Flatten, OnnxFlatten)
 # Inserting/removing size-1 axes never reorders entries: flat identity.
 _SHAPE_IDENTITY_TYPES = (OnnxSqueezeStaticAxes, OnnxUnsqueezeStaticAxes)
+# Layers that are the identity at inference time: a no-op for reachability.
+# OnnxDropoutDynamic.forward is F.dropout(..., training=self.training); the
+# model is in eval mode, so it passes its input through unchanged.
+_PASSTHROUGH_TYPES = (
+    nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d, OnnxDropoutDynamic,
+)
 
 
 def reach_layer(
@@ -278,7 +285,7 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
         return input_sets
 
-    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
+    elif isinstance(layer, _PASSTHROUGH_TYPES):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):
@@ -367,7 +374,7 @@ def _reach_layer_zono(layer: nn.Module, input_sets: List, method: str, **kwargs)
     elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
         return input_sets
 
-    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
+    elif isinstance(layer, _PASSTHROUGH_TYPES):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):
@@ -436,7 +443,7 @@ def _reach_layer_box(layer: nn.Module, input_sets: List, method: str, **kwargs) 
     elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
         return input_sets
 
-    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
+    elif isinstance(layer, _PASSTHROUGH_TYPES):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):
@@ -482,7 +489,7 @@ def _reach_layer_hexatope(layer: nn.Module, input_sets: List, method: str, **kwa
     elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
         return input_sets
 
-    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
+    elif isinstance(layer, _PASSTHROUGH_TYPES):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):
@@ -528,7 +535,7 @@ def _reach_layer_octatope(layer: nn.Module, input_sets: List, method: str, **kwa
     elif isinstance(layer, _SHAPE_IDENTITY_TYPES):
         return input_sets
 
-    elif isinstance(layer, (nn.Identity, nn.Dropout, nn.Dropout2d, nn.Dropout3d)):
+    elif isinstance(layer, _PASSTHROUGH_TYPES):
         return input_sets
 
     elif isinstance(layer, nn.Sequential):
