@@ -12,6 +12,10 @@ from collections import OrderedDict
 import onnx
 from onnx2torch import convert
 
+# Registers QuantizeLinear/DequantizeLinear converters with onnx2torch (it
+# ships none), letting QDQ-quantized models convert. Import for side effect.
+from n2v.utils import quant_converters  # noqa: F401
+
 # Opset to upgrade old models to when onnx2torch lacks a converter for
 # their version (onnx2torch's converters target modern opsets, ~9-17).
 _ONNX2TORCH_TARGET_OPSET = 13
@@ -154,6 +158,13 @@ def load_onnx(
     # constant-fold away; onnx-simplifier does this. Gated on those ops
     # being present so ordinary models are untouched.
     onnx_model = _fold_shape_subgraph(onnx_model)
+
+    # QDQ-quantized models route int weights through DequantizeLinear before
+    # Conv/Gemm/MatMul; those consumers need real initializers, so fold the
+    # weight-side (all-constant) Q/DQ into float initializers. Activation-side
+    # Q/DQ are left for the runtime converters in quant_converters. No-op
+    # when the graph has no Q/DQ nodes.
+    onnx_model = quant_converters.fold_constant_qdq(onnx_model)
 
     # Convert to PyTorch. onnx2torch registers converters per opset
     # version; old models (e.g. vgg16-7 is opset 8, but onnx2torch's Gemm

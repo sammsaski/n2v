@@ -500,13 +500,19 @@ def _get_local_max_index_4d(
     max_lb_val = max(lbs)
     max_lb_idx = lbs.index(max_lb_val)
 
-    # Check which points could potentially be >= max_lb_val
-    candidates = [i for i, ub in enumerate(ubs) if ub >= max_lb_val]
+    # A pixel introduces genuine uncertainty about the window max only if it
+    # can STRICTLY exceed the best guaranteed value (max_lb_val): the max is
+    # provably at least max_lb_val (achieved by max_lb_idx), so any pixel with
+    # ub <= max_lb_val can never be the strict maximizer. Using >= here would
+    # flag every all-equal window (e.g. the many all-zero windows after ReLU)
+    # as uncertain, spawning a degenerate over-approx predicate per window —
+    # the dominant cost behind ImageNet-scale MaxPool OOM (issue #50).
+    contenders = [i for i, ub in enumerate(ubs) if ub > max_lb_val]
 
-    if len(candidates) == 1:
+    if not contenders:
+        # Output equals max_lb_val exactly — deterministic, no predicate.
         return [points[max_lb_idx]]
-    else:
-        return [points[i] for i in candidates]
+    return [points[i] for i in sorted(set(contenders) | {max_lb_idx})]
 
 
 def _get_local_bounds_4d(
