@@ -63,6 +63,7 @@ def verify_refine(
     layers=None,
     node_budget: int = 20000,
     collect_deltas: bool = False,
+    bound_mode: str = "box",
     lp_solver=LPSolver.DEFAULT,
 ) -> RefineResult:
     """
@@ -106,7 +107,7 @@ def verify_refine(
         nodes += 1
         max_depth = max(max_depth, node.depth)
 
-        S_out, meta = relaxed_reach(input_star, layers, node.fixed)
+        S_out, meta = relaxed_reach(input_star, layers, node.fixed, bound_mode=bound_mode)
 
         # --- shared prune / UNSAT test (faithful, tight over P) ---
         res = violation_lp(S_out, spec, include_Cd=True, lp_solver=lp_solver)

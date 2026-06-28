@@ -26,6 +26,7 @@ import numpy as np
 
 from n2v.sets.star import Star
 from n2v.refine.types import NeuronKey, NeuronMeta, Phase
+from n2v.refine.tighten import neuron_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,7 @@ def _relu_layer_relaxed(
     S: Star,
     layer_idx: int,
     fixed: Dict[NeuronKey, Phase],
+    bound_mode: str = "box",
 ) -> Tuple[Star, List[NeuronMeta]]:
     """
     Apply ReLU to star ``S`` at ReLU-layer index ``layer_idx``.
@@ -94,8 +96,19 @@ def _relu_layer_relaxed(
     zeroed (inactive), passed through (active), or triangle-relaxed (unstable),
     in which case a fresh predicate variable is appended and a ``NeuronMeta`` is
     recorded.
+
+    ``bound_mode`` selects how the pre-activation ranges are computed:
+    ``"box"`` (predicate-box interval, cheap, Phase-1), or ``"lp_cpu"`` /
+    ``"lp_gpu"`` (LP-over-P bound tightening, tighter, stabilises more neurons). ``box`` and
+    ``lp_cpu`` trust the interval/HiGHS optimum as the rest of n2v's sound path
+    does (``get_range``/``violation_lp``); ``lp_gpu`` is rigorously outward via
+    Neumaier-Shcherbina. Tighter ranges only ever reduce the crossing set, never
+    enlarge it.
     """
-    lb, ub = S.estimate_ranges()
+    if bound_mode == "box":
+        lb, ub = S.estimate_ranges()
+    else:
+        lb, ub = neuron_bounds(S, backend=bound_mode)
     lb = lb.flatten()
     ub = ub.flatten()
     dim = S.dim
@@ -238,10 +251,14 @@ def relaxed_reach(
     input_star: Star,
     layers: List[Layer],
     fixed: Optional[Dict[NeuronKey, Phase]] = None,
+    bound_mode: str = "box",
 ) -> Tuple[Star, List[NeuronMeta]]:
     """
     Forward-propagate ``input_star`` through ``layers`` with triangle ReLU
     relaxation and the given fixed neuron phases.
+
+    ``bound_mode`` ("box" | "lp_cpu" | "lp_gpu") selects Phase-1 box bounds or
+    LP-over-P bound tightening for neuron classification.
 
     Returns the output star and the list of ``NeuronMeta`` for every relaxed
     (unfixed, unstable) neuron across all layers, in creation order.
@@ -256,7 +273,7 @@ def relaxed_reach(
         if isinstance(layer, LinearLayer):
             S = S.affine_map(layer.W, layer.b)
         elif isinstance(layer, ReluLayer):
-            S, layer_meta = _relu_layer_relaxed(S, relu_idx, fixed)
+            S, layer_meta = _relu_layer_relaxed(S, relu_idx, fixed, bound_mode)
             meta.extend(layer_meta)
             relu_idx += 1
         else:
