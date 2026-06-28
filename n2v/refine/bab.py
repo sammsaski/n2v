@@ -19,6 +19,7 @@ realized -- hence UNSAT (worklist emptied with no SAT) is sound.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -64,6 +65,7 @@ def verify_refine(
     node_budget: int = 20000,
     collect_deltas: bool = False,
     bound_mode: str = "box",
+    time_budget: Optional[float] = None,
     lp_solver=LPSolver.DEFAULT,
 ) -> RefineResult:
     """
@@ -77,6 +79,10 @@ def verify_refine(
         selector: split-selection strategy (default: FaithfulSelector).
         layers: optional pre-extracted layer list (avoids re-extracting).
         node_budget: max nodes expanded before returning UNKNOWN.
+        bound_mode: neuron-range mode, "box" | "lp_cpu" | "lp_gpu" (LP-over-P
+            bound tightening); passed to the reach.
+        time_budget: optional wall-clock limit (seconds); returns UNKNOWN when
+            exceeded (checked between nodes).
         collect_deltas: if True, record per spurious node the divergence
             ``Delta = t_faithful - t_box`` and the node depth (kill-experiment
             diagnostics; costs one extra box LP per spurious node).
@@ -96,9 +102,11 @@ def verify_refine(
     inconclusive = False  # a branch was neither proven safe nor refined -> not UNSAT
     deltas: List[float] = []
     delta_depths: List[int] = []
+    start = time.perf_counter()
 
     while worklist:
-        if nodes >= node_budget:
+        timed_out = time_budget is not None and time.perf_counter() - start > time_budget
+        if nodes >= node_budget or timed_out:
             return RefineResult(
                 Status.UNKNOWN, nodes, max_depth,
                 deltas=deltas, delta_depths=delta_depths,
