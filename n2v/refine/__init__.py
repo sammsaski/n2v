@@ -15,6 +15,7 @@ from n2v.refine.types import (
     Status,
     Witness,
 )
+from n2v.refine.operations import refine, split, witness_phase
 from n2v.refine.bab import verify_refine
 from n2v.refine.selectors import (
     BoundWidthSelector,
@@ -33,6 +34,9 @@ __all__ = [
     "RefineResult",
     "Status",
     "Witness",
+    "refine",
+    "split",
+    "witness_phase",
     "verify_refine",
     "Selector",
     "FaithfulSelector",

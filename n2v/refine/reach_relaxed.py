@@ -278,4 +278,17 @@ def relaxed_reach(
             relu_idx += 1
         else:
             raise TypeError(f"Unknown layer type {type(layer).__name__}")
+
+    # Attach the relaxation metadata + search provenance to the output star so
+    # the refine set-operations (refine/split) are self-describing. ``relax_meta``
+    # is a declared Star field; ``fixed``/``bound_mode`` are refine-search
+    # provenance. The tuple return is preserved for existing callers.
+    if S is input_star:
+        # No layer transformed the star (e.g. empty/Flatten-only ``layers``): wrap
+        # a fresh Star so we attach provenance to it rather than mutating the
+        # caller's input set (which is reused across calls).
+        S = Star(S.V, S.C, S.d, S.predicate_lb, S.predicate_ub)
+    S.relax_meta = meta
+    S.fixed = dict(fixed)
+    S.bound_mode = bound_mode
     return S, meta

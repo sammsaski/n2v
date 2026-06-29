@@ -124,6 +124,19 @@ def make_witness(
     return Witness(alpha=alpha, t=t, binding_row=binding_row(S, spec, alpha), mode=mode)
 
 
+def preactivation(nm: NeuronMeta, alpha: np.ndarray) -> float:
+    """
+    The relaxed neuron's pre-activation read at the witness:
+    ``x_hat_j = preact_center + preact_gens . alpha[:k]`` (k = len(preact_gens)).
+
+    The read is over the predicate *prefix* at the neuron's layer; because affine
+    layers leave the predicate untouched and ReLU only appends variables, that
+    prefix is preserved verbatim in the final ``alpha``, so the slice is correct.
+    """
+    k = len(nm.preact_gens)
+    return nm.preact_center + float(nm.preact_gens @ alpha[:k])
+
+
 def epsilon_vector(alpha: np.ndarray, meta: List[NeuronMeta]) -> np.ndarray:
     """
     Per-neuron relaxation infidelity ``eps_j = alpha_j^r - max(0, x_hat_j)`` at
@@ -133,8 +146,7 @@ def epsilon_vector(alpha: np.ndarray, meta: List[NeuronMeta]) -> np.ndarray:
     """
     eps = np.empty(len(meta), dtype=np.float64)
     for i, nm in enumerate(meta):
-        k = len(nm.preact_gens)
-        x_hat = nm.preact_center + float(nm.preact_gens @ alpha[:k])
+        x_hat = preactivation(nm, alpha)
         alpha_r = float(alpha[nm.pred_col])
         eps[i] = alpha_r - max(0.0, x_hat)
     return eps

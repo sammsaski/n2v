@@ -1,58 +1,52 @@
 """
-Minimal star activation-split branch-and-bound (Phase 1).
+Thin branch-and-refine driver.
 
-The loop is a DFS worklist over ReLU activation splits. Crucially, the
-**prune/UNSAT decision and the real-counterexample check are identical across
-every selector** -- only the choice of *which neuron to split* varies. This
-isolates split-selection quality as the single experimental variable (the box
-arm is even handed the faithful CE check, a conservative bias toward the
-baseline).
+The two refinement *algorithms* live as set-operations in
+``n2v.refine.operations`` (``refine`` = bound tightening, ``split`` =
+witness-guided activation split); the *verdict* is decided by the project's
+canonical ``n2v.utils.verify_specification.verify_specification`` (the faithful
+LP-over-P disjointness test). This driver just runs the DFS worklist that
+composes them:
 
-Soundness sketch: a node is pruned only when its (sound over-approximate) output
-star provably does not intersect the unsafe region (faithful epigraph optimum
-``t* > PRUNE_TOL``, or an empty predicate polytope). A branch ends in SAT only on
-an *exact* forward pass landing in the unsafe region. Splitting is exhaustive
-down to fully-fixed (exact) stars, so any true counterexample is eventually
-realized -- hence UNSAT (worklist emptied with no SAT) is sound.
+    pop a star
+      -> verify_specification UNSAT?  prune (this branch is safe)
+      -> else solve the faithful witness (for the CE test + the split choice)
+      -> exact forward pass on the witness lands in the unsafe region?  SAT
+      -> else split the star and push the children
+
+Soundness: a branch is pruned only when ``verify_specification`` certifies the
+(sound over-approximate) output star disjoint from the unsafe region. SAT is
+returned only on an *exact* forward pass landing in the unsafe region. Splitting
+is exhaustive down to fully-fixed (exact) stars, so emptying the worklist with no
+SAT is a sound UNSAT -- unless some branch was neither proven safe nor refinable
+(an inconclusive exact star, or a selector that could not choose), in which case
+the verdict degrades to UNKNOWN rather than a possibly-false UNSAT.
+
+Only the *choice of which neuron to split* (the selector) varies across
+experiments; the prune/CE logic is identical for every selector.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import Dict, List, Optional
+from typing import List, Optional
 
-import numpy as np
-
+from n2v.sets import HalfSpace
 from n2v.sets.star import Star
 from n2v.utils.lp_solver_enum import LPSolver
+from n2v.utils.verify_specification import verify_specification
+from n2v.refine.operations import split
 from n2v.refine.reach_relaxed import extract_layers, relaxed_reach
 from n2v.refine.selectors import FaithfulSelector, Selector
-from n2v.refine.types import (
-    LinearSpec,
-    NeuronKey,
-    NeuronMeta,
-    Phase,
-    RefineNode,
-    RefineResult,
-    Status,
-)
+from n2v.refine.types import LinearSpec, RefineResult, Status
 from n2v.refine.witness import (
-    PRUNE_TOL,
     is_true_counterexample,
     make_witness,
     violation_lp,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _witness_phase(alpha: np.ndarray, nm: NeuronMeta) -> Phase:
-    """The phase the witness 'claims' for neuron ``nm`` (descend it first)."""
-    k = len(nm.preact_gens)
-    x_hat = nm.preact_center + float(nm.preact_gens @ alpha[:k])
-    # x_hat >= 0 -> ACTIVE, matching the ReLU's identity branch on the boundary.
-    return Phase.ACTIVE if x_hat >= 0.0 else Phase.INACTIVE
 
 
 def verify_refine(
@@ -70,22 +64,24 @@ def verify_refine(
 ) -> RefineResult:
     """
     Refine ``input_star`` through ``model`` until the property ``G y <= g`` is
-    decided (SAT/UNSAT) or ``node_budget`` is exhausted (UNKNOWN).
+    decided (SAT/UNSAT) or the ``node_budget`` / ``time_budget`` is exhausted
+    (UNKNOWN).
 
     Args:
         input_star: input set (a Star over the flattened input).
-        model: torch FC ReLU module (or pre-extracted ``layers``).
-        spec: unsafe region.
+        model: torch FC ReLU module (used for the exact counterexample check).
+        spec: unsafe region ``{y : G y <= g}``.
         selector: split-selection strategy (default: FaithfulSelector).
         layers: optional pre-extracted layer list (avoids re-extracting).
         node_budget: max nodes expanded before returning UNKNOWN.
-        bound_mode: neuron-range mode, "box" | "lp_cpu" | "lp_gpu" (LP-over-P
-            bound tightening); passed to the reach.
-        time_budget: optional wall-clock limit (seconds); returns UNKNOWN when
-            exceeded (checked between nodes).
+        bound_mode: neuron-range mode for the reach, "box" | "lp_cpu" | "lp_gpu";
+            "lp_cpu"/"lp_gpu" apply LP-over-P bound tightening (the ``refine``
+            operation, here applied globally to every node).
         collect_deltas: if True, record per spurious node the divergence
             ``Delta = t_faithful - t_box`` and the node depth (kill-experiment
             diagnostics; costs one extra box LP per spurious node).
+        time_budget: optional wall-clock limit (seconds); returns UNKNOWN when
+            exceeded (checked between nodes).
         lp_solver: LP backend.
 
     Returns:
@@ -96,7 +92,14 @@ def verify_refine(
     if layers is None:
         layers = extract_layers(model)
 
-    worklist: List[RefineNode] = [RefineNode()]
+    spec_hs = HalfSpace(spec.G, spec.g)
+
+    # The one loose star, tightened up-front when a bound-tightening mode is
+    # requested (global tightening == constructing the reach at that bound_mode;
+    # ``refine`` is the per-star form of the same operation).
+    root, _ = relaxed_reach(input_star, layers, {}, bound_mode=bound_mode)
+
+    worklist: List[Star] = [root]
     nodes = 0
     max_depth = 0
     inconclusive = False  # a branch was neither proven safe nor refined -> not UNSAT
@@ -111,19 +114,20 @@ def verify_refine(
                 Status.UNKNOWN, nodes, max_depth,
                 deltas=deltas, delta_depths=delta_depths,
             )
-        node = worklist.pop()
+        star = worklist.pop()
         nodes += 1
-        max_depth = max(max_depth, node.depth)
+        depth = len(star.fixed or {})
+        max_depth = max(max_depth, depth)
 
-        S_out, meta = relaxed_reach(input_star, layers, node.fixed, bound_mode=bound_mode)
+        # --- shared prune / UNSAT test: the canonical faithful disjointness check ---
+        if verify_specification([star], spec_hs).verdict == "UNSAT":
+            continue  # provably safe over this branch -> prune
 
-        # --- shared prune / UNSAT test (faithful, tight over P) ---
-        res = violation_lp(S_out, spec, include_Cd=True, lp_solver=lp_solver)
+        # --- faithful witness (over P): drives the CE test and the split choice ---
+        res = violation_lp(star, spec, include_Cd=True, lp_solver=lp_solver)
         if res is None:
             continue  # empty predicate polytope -> vacuously safe
         alpha_f, t_f = res
-        if t_f > PRUNE_TOL:
-            continue  # provably safe over this branch -> prune
 
         # --- shared real-counterexample check ---
         is_ce, x_in, _ = is_true_counterexample(alpha_f, input_star, model, spec)
@@ -133,40 +137,43 @@ def verify_refine(
                 deltas=deltas, delta_depths=delta_depths,
             )
 
+        meta = star.relax_meta or []
         if not meta:
             # Exact star (no relaxed neuron) feasible-in-unsafe yet not a real CE:
             # a numerical corner case Theorem 1 rules out in exact arithmetic. Do
-            # NOT prune it (that could hide a real CE) -- mark the whole search
-            # inconclusive and keep exploring other branches. The final verdict
-            # then degrades to UNKNOWN rather than a possibly-false UNSAT, while
-            # still being able to return SAT if another branch yields a real CE.
+            # NOT prune it (that could hide a real CE) -- mark the search
+            # inconclusive and keep exploring. The final verdict then degrades to
+            # UNKNOWN rather than a possibly-false UNSAT, while still able to
+            # return SAT if another branch yields a real CE.
             logger.warning("refine: feasible exact star without a real CE; inconclusive")
             inconclusive = True
             continue
 
         # --- diagnostics: box-vs-polytope divergence at this spurious node ---
         if collect_deltas:
-            box = violation_lp(S_out, spec, include_Cd=False, lp_solver=lp_solver)
+            box = violation_lp(star, spec, include_Cd=False, lp_solver=lp_solver)
             if box is not None:
                 deltas.append(t_f - box[1])
-                delta_depths.append(node.depth)
+                delta_depths.append(depth)
 
-        # --- split selection (THE experimental variable) ---
-        wit_f = make_witness(S_out, spec, alpha_f, t_f, "faithful")
-        key = selector.choose(S_out, spec, meta, wit_f, lp_solver)
-        nm = next((m for m in meta if m.key == key), None)
-        if nm is None:
-            # Selector returned None or a key absent from this node's meta:
-            # cannot refine here. Stay sound -- mark inconclusive and continue.
+        if nodes >= node_budget:
+            # No budget left to expand children -> cannot refine here. Stay sound.
             inconclusive = True
             continue
 
-        # Witness-phase-first child ordering (affects SAT fail-fast only; UNSAT
-        # node counts are order-independent). Same rule for every selector.
-        wphase = _witness_phase(alpha_f, nm)
-        other = Phase.INACTIVE if wphase == Phase.ACTIVE else Phase.ACTIVE
-        worklist.append(node.with_fixed(key, other))   # popped second
-        worklist.append(node.with_fixed(key, wphase))  # popped first
+        # --- split selection (THE experimental variable) ---
+        wit_f = make_witness(star, spec, alpha_f, t_f, "faithful")
+        children = split(star, input_star, layers, spec, selector, wit_f, lp_solver=lp_solver)
+        if children is None:
+            # Nothing to split / selector returned an absent key: stay sound.
+            inconclusive = True
+            continue
+
+        # Children are witness-phase-first (children[0] = witness phase); push so
+        # that child pops first (affects SAT fail-fast only; UNSAT node counts are
+        # order-independent).
+        for child in reversed(children):
+            worklist.append(child)
 
     # Worklist emptied: UNSAT only if every branch was provably pruned; if any
     # branch was inconclusive, the sound verdict is UNKNOWN (never false UNSAT).
