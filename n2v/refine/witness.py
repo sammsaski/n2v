@@ -57,19 +57,34 @@ def _big_M(S: Star, spec: LinearSpec) -> float:
     return float(np.max(base + spread)) + 1.0
 
 
-def violation_lp(
+def augmented_violation_lp(
     S: Star,
     spec: LinearSpec,
-    include_Cd: bool,
+    extra_A: Optional[np.ndarray] = None,
+    extra_b: Optional[np.ndarray] = None,
+    *,
+    include_Cd: bool = True,
     lp_solver=LPSolver.DEFAULT,
 ) -> Optional[Tuple[np.ndarray, float]]:
     """
-    Solve the epigraph violation LP. Returns ``(alpha, t)`` or ``None`` if the
-    feasible set is empty (predicate polytope infeasible).
+    Solve the epigraph violation LP over P, optionally intersected with extra
+    halfspaces ``extra_A @ alpha <= extra_b`` (each row over the ``nVar``
+    predicate variables, no ``t`` column). Returns ``(alpha, t)`` or ``None`` if
+    the feasible set is empty.
+
+    This is the single source of truth for the epigraph LP. ``violation_lp`` is
+    the no-extra-rows case; ``ExactStarSBSelector`` passes one split-cut row to
+    score a candidate's exact post-split bound *on the existing output star* --
+    no re-propagation (the cut is `c_i + V_i.alpha (>= | <=) 0` on the neuron's
+    pre-activation, the one halfspace a star split adds to the shared polytope).
     """
     nVar = S.nVar
     if nVar == 0:
-        # Degenerate star: a single point. t = worst margin at that point.
+        # Degenerate star: a single point. Any extra cut reduces to 0 <= extra_b;
+        # if some bound is negative the augmented set is empty (return None).
+        if extra_b is not None and np.size(extra_b) > 0:
+            if np.any(np.asarray(extra_b, dtype=np.float64).flatten() < 0.0):
+                return None
         y = S.V[:, 0]
         t = float(np.max(spec.margins(y)))
         return np.zeros(0), t
@@ -86,6 +101,15 @@ def violation_lp(
     if include_Cd and S.C.size > 0:
         A_rows.append(np.hstack([S.C, np.zeros((S.C.shape[0], 1))]))
         b_rows.append(S.d.flatten())
+    if extra_A is not None and np.size(extra_A) > 0:
+        extra_A = np.atleast_2d(np.asarray(extra_A, dtype=np.float64))
+        extra_b = np.asarray(extra_b, dtype=np.float64).flatten()
+        if extra_A.shape[1] != nVar:
+            raise ValueError(
+                f"extra_A has {extra_A.shape[1]} columns, expected nVar={nVar}"
+            )
+        A_rows.append(np.hstack([extra_A, np.zeros((extra_A.shape[0], 1))]))
+        b_rows.append(extra_b)
     A = np.vstack(A_rows)
     b = np.concatenate(b_rows)
 
@@ -104,6 +128,22 @@ def violation_lp(
 
     x = np.asarray(x, dtype=np.float64).flatten()
     return x[:nVar], float(x[nVar])
+
+
+def violation_lp(
+    S: Star,
+    spec: LinearSpec,
+    include_Cd: bool,
+    lp_solver=LPSolver.DEFAULT,
+) -> Optional[Tuple[np.ndarray, float]]:
+    """
+    Solve the epigraph violation LP. Returns ``(alpha, t)`` or ``None`` if the
+    feasible set is empty (predicate polytope infeasible). Thin wrapper over
+    ``augmented_violation_lp`` with no extra split-cut rows.
+    """
+    return augmented_violation_lp(
+        S, spec, include_Cd=include_Cd, lp_solver=lp_solver
+    )
 
 
 def binding_row(S: Star, spec: LinearSpec, alpha: np.ndarray) -> int:

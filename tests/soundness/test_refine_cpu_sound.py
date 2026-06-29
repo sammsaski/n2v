@@ -23,6 +23,7 @@ from n2v.utils.lpsolver import check_feasibility
 from n2v.refine import (
     BoundWidthSelector,
     BoxCornerSelector,
+    ExactStarSBSelector,
     FaithfulSelector,
     LinearSpec,
     RandomSelector,
@@ -71,6 +72,7 @@ ALL_SELECTORS = [
     FaithfulSelector,
     BoxCornerSelector,
     BoundWidthSelector,
+    ExactStarSBSelector,
     lambda: RandomSelector(seed=47),
 ]
 
@@ -129,6 +131,35 @@ def test_no_false_unsat_against_sampling(seed):
         res = verify_refine(S_in, net, spec, make(), node_budget=20000)
         assert res.status == Status.SAT, (
             f"false non-SAT ({res.status}) by {make().name} despite sampled CE (seed={seed})"
+        )
+
+
+@pytest.mark.parametrize("seed", range(8))
+@pytest.mark.parametrize("bound_mode", ["box", "lp_cpu"])
+def test_incremental_reach_matches_from_scratch(seed, bound_mode):
+    """
+    Incremental (shared-prefix) reach is a pure speedup: same verdict AND same
+    node count as from-scratch reach, for every selector and bound mode.
+    """
+    rng = np.random.default_rng(seed)
+    net = _rand_net(seed)
+    lb = rng.uniform(-1.0, -0.2, size=2)
+    ub = rng.uniform(0.2, 1.0, size=2)
+    S_in = Star.from_bounds(lb, ub)
+    out0 = reach_pytorch_model(net, S_in, method="exact")
+    mins = min(float(S.get_range(0)[0]) for S in out0)
+    maxs = max(float(S.get_range(0)[1]) for S in out0)
+    tau = mins + (maxs - mins) * (0.25 + 0.5 * rng.random())
+    spec = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([tau]))
+
+    for make in ALL_SELECTORS:
+        full = verify_refine(S_in, net, spec, make(), node_budget=20000,
+                             bound_mode=bound_mode, incremental=False)
+        incr = verify_refine(S_in, net, spec, make(), node_budget=20000,
+                             bound_mode=bound_mode, incremental=True)
+        assert incr.status == full.status, f"{make().name}: verdict differs (seed={seed})"
+        assert incr.nodes == full.nodes, (
+            f"{make().name}: node count {incr.nodes} != {full.nodes} (seed={seed})"
         )
 
 

@@ -105,6 +105,7 @@ class Star:
             self.relax_meta = None
             self.fixed = None
             self.bound_mode = None
+            self.checkpoints = None
             return
 
         # Convert to numpy arrays
@@ -179,6 +180,7 @@ class Star:
         self.relax_meta = relax_meta
         self.fixed = None
         self.bound_mode = None
+        self.checkpoints = None
 
     def __repr__(self) -> str:
         """Return string representation of the Star set."""

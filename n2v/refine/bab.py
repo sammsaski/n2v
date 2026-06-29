@@ -61,6 +61,7 @@ def verify_refine(
     bound_mode: str = "box",
     time_budget: Optional[float] = None,
     lp_solver=LPSolver.DEFAULT,
+    incremental: bool = True,
 ) -> RefineResult:
     """
     Refine ``input_star`` through ``model`` until the property ``G y <= g`` is
@@ -163,7 +164,8 @@ def verify_refine(
 
         # --- split selection (THE experimental variable) ---
         wit_f = make_witness(star, spec, alpha_f, t_f, "faithful")
-        children = split(star, input_star, layers, spec, selector, wit_f, lp_solver=lp_solver)
+        children = split(star, input_star, layers, spec, selector, wit_f,
+                         lp_solver=lp_solver, incremental=incremental)
         if children is None:
             # Nothing to split / selector returned an absent key: stay sound.
             inconclusive = True

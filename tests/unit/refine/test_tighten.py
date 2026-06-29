@@ -42,12 +42,51 @@ def _exact_outputs(net, lb, ub, n, seed=0):
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_lp_cpu_matches_get_range(seed):
+    """The full (prefilter=False) path LPs every dim and matches Star.get_range."""
     S, _, _, _ = _star_with_constraints(seed)
-    lb, ub = neuron_bounds(S, "lp_cpu")
+    lb, ub = neuron_bounds(S, "lp_cpu", prefilter=False)
     for i in range(S.dim):
         gmin, gmax = S.get_range(i)
         assert lb[i, 0] == pytest.approx(gmin, abs=1e-6)
         assert ub[i, 0] == pytest.approx(gmax, abs=1e-6)
+
+
+def _classify(l, u):
+    return "inactive" if u <= 0 else ("active" if l >= 0 else "crossing")
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_prefilter_reach_identical_to_full(seed):
+    """
+    The OBBT pre-filter is result-identical to LPing every dim: same ReLU
+    classification on every neuron, and identical [l,u] on every CROSSING
+    (relaxed) neuron -- which is all the reach output depends on. (Box-stable
+    neurons keep box values, but those never reach the output star.)
+    """
+    S, _, _, _ = _star_with_constraints(seed)
+    lb_pf, ub_pf = neuron_bounds(S, "lp_cpu", prefilter=True)
+    lb_full, ub_full = neuron_bounds(S, "lp_cpu", prefilter=False)
+    for i in range(S.dim):
+        cls_full = _classify(lb_full[i, 0], ub_full[i, 0])
+        assert _classify(lb_pf[i, 0], ub_pf[i, 0]) == cls_full
+        if cls_full == "crossing":
+            assert lb_pf[i, 0] == pytest.approx(lb_full[i, 0], abs=1e-6)
+            assert ub_pf[i, 0] == pytest.approx(ub_full[i, 0], abs=1e-6)
+
+
+def test_prefilter_skips_lp_when_all_box_stable():
+    """A star whose every dim is box-stable returns the box interval verbatim
+    (no LP solved) -- the best case for the pre-filter."""
+    # y = alpha in [1, 2] x [-3, -1]: dim 0 box-active, dim 1 box-inactive.
+    V = np.array([[1.5, 0.5, 0.0], [-2.0, 0.0, 1.0]])
+    S = Star(V, np.zeros((0, 2)), np.zeros((0, 1)),
+             np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
+    lb_box, ub_box = S.estimate_ranges()
+    lb, ub = neuron_bounds(S, "lp_cpu", prefilter=True)
+    assert np.allclose(lb, lb_box) and np.allclose(ub, ub_box)
+    # neither dim crosses zero -> both provably stable
+    assert ub[0, 0] >= 0 >= lb_box[0, 0] - 1 and lb[0, 0] >= 0  # dim0 active
+    assert ub[1, 0] <= 0                                         # dim1 inactive
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 3])
@@ -87,3 +126,26 @@ def test_lp_gpu_encloses_lp_cpu(seed):
     # outward enclosure: lb_gpu <= lb_cpu, ub_gpu >= ub_cpu (within tiny tol)
     assert np.all(lb_gpu <= lb_cpu + 1e-5)
     assert np.all(ub_gpu >= ub_cpu - 1e-5)
+
+
+@pytest.mark.skipif(
+    not __import__("n2v.utils.lpsolver_gpu", fromlist=["gpu_available"]).gpu_available(),
+    reason="no CUDA",
+)
+@pytest.mark.skipif(
+    not __import__("n2v.utils.lpsolver_gpu", fromlist=["gpu_available"]).gpu_available(),
+    reason="no CUDA",
+)
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_prefilter_gpu_stays_sound(seed):
+    """
+    The prefiltered lp_gpu path is a sound over-approximation: its bounds enclose
+    the EXACT range (so a neuron is never falsely stabilised). lp_gpu is not
+    bit-identical to full LP (batched PDHG is batch-composition-sensitive), but
+    soundness -- box-clipped NS still outward of the true range -- always holds.
+    """
+    S, _, _, _ = _star_with_constraints(seed)
+    lb_pf, ub_pf = neuron_bounds(S, "lp_gpu", prefilter=True)
+    lb_exact, ub_exact = neuron_bounds(S, "lp_cpu", prefilter=False)   # exact HiGHS range
+    assert np.all(lb_pf <= lb_exact + 1e-5), "GPU prefilter lb not outward of exact"
+    assert np.all(ub_pf >= ub_exact - 1e-5), "GPU prefilter ub not outward of exact"

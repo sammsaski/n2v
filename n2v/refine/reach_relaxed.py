@@ -247,6 +247,58 @@ def _relu_layer_relaxed(
     return Star(newV, newC, newd, plb, pub), meta
 
 
+def relu_positions(layers: List[Layer]) -> List[int]:
+    """Index into ``layers`` of each ``ReluLayer``, in order (relu_idx -> pos)."""
+    return [i for i, l in enumerate(layers) if isinstance(l, ReluLayer)]
+
+
+def _reach_from(
+    start_star: Star,
+    layers: List[Layer],
+    fixed: Dict[NeuronKey, Phase],
+    bound_mode: str,
+    start_pos: int,
+    start_relu_idx: int,
+) -> Tuple[Star, List[NeuronMeta], List[Star]]:
+    """
+    Propagate ``start_star`` through ``layers[start_pos:]``, beginning at ReLU
+    index ``start_relu_idx`` (the affine map preceding it is assumed already baked
+    into ``start_star``).
+
+    Returns ``(out_star, new_meta, new_checkpoints)`` where ``new_checkpoints[j]``
+    is the pre-ReLU star entering ReLU index ``start_relu_idx + j`` -- the shared
+    prefix a child splitting at that layer resumes from. This is the single reach
+    core: ``relaxed_reach`` is the ``start_pos=0, start_relu_idx=0`` case and
+    ``resume_reach`` restarts mid-network from a parent checkpoint.
+    """
+    S = start_star
+    meta: List[NeuronMeta] = []
+    checkpoints: List[Star] = []
+    relu_idx = start_relu_idx
+    for layer in layers[start_pos:]:
+        if isinstance(layer, LinearLayer):
+            S = S.affine_map(layer.W, layer.b)
+        elif isinstance(layer, ReluLayer):
+            checkpoints.append(S)  # pre-ReLU star entering this layer
+            S, layer_meta = _relu_layer_relaxed(S, relu_idx, fixed, bound_mode)
+            meta.extend(layer_meta)
+            relu_idx += 1
+        else:
+            raise TypeError(f"Unknown layer type {type(layer).__name__}")
+    return S, meta, checkpoints
+
+
+def _attach_provenance(S, meta, fixed, bound_mode, checkpoints):
+    """Attach the refine-search provenance fields to an output star (single
+    source of truth for both ``relaxed_reach`` and ``resume_reach``, so the two
+    paths can never drift)."""
+    S.relax_meta = meta
+    S.fixed = dict(fixed)
+    S.bound_mode = bound_mode
+    S.checkpoints = checkpoints
+    return S
+
+
 def relaxed_reach(
     input_star: Star,
     layers: List[Layer],
@@ -261,34 +313,84 @@ def relaxed_reach(
     LP-over-P bound tightening for neuron classification.
 
     Returns the output star and the list of ``NeuronMeta`` for every relaxed
-    (unfixed, unstable) neuron across all layers, in creation order.
+    (unfixed, unstable) neuron across all layers, in creation order. The output
+    star also carries ``checkpoints`` (pre-ReLU star per ReLU index), enabling
+    incremental shared-prefix reach for child nodes (see ``resume_reach``).
     """
     if fixed is None:
         fixed = {}
 
-    S = input_star
-    meta: List[NeuronMeta] = []
-    relu_idx = 0
-    for layer in layers:
-        if isinstance(layer, LinearLayer):
-            S = S.affine_map(layer.W, layer.b)
-        elif isinstance(layer, ReluLayer):
-            S, layer_meta = _relu_layer_relaxed(S, relu_idx, fixed, bound_mode)
-            meta.extend(layer_meta)
-            relu_idx += 1
-        else:
-            raise TypeError(f"Unknown layer type {type(layer).__name__}")
+    S, meta, checkpoints = _reach_from(input_star, layers, fixed, bound_mode, 0, 0)
 
     # Attach the relaxation metadata + search provenance to the output star so
     # the refine set-operations (refine/split) are self-describing. ``relax_meta``
-    # is a declared Star field; ``fixed``/``bound_mode`` are refine-search
-    # provenance. The tuple return is preserved for existing callers.
+    # is a declared Star field; ``fixed``/``bound_mode``/``checkpoints`` are
+    # refine-search provenance. The tuple return is preserved for existing callers.
     if S is input_star:
         # No layer transformed the star (e.g. empty/Flatten-only ``layers``): wrap
         # a fresh Star so we attach provenance to it rather than mutating the
         # caller's input set (which is reused across calls).
         S = Star(S.V, S.C, S.d, S.predicate_lb, S.predicate_ub)
-    S.relax_meta = meta
-    S.fixed = dict(fixed)
-    S.bound_mode = bound_mode
+    _attach_provenance(S, meta, fixed, bound_mode, checkpoints)
     return S, meta
+
+
+def resume_reach(
+    parent: Star,
+    layers: List[Layer],
+    child_fixed: Dict[NeuronKey, Phase],
+    bound_mode: str,
+    split_layer: int,
+) -> Star:
+    """
+    Incremental reach for a child that fixes one more neuron at ReLU index
+    ``split_layer`` (``L``). Resumes from the parent's pre-ReLU checkpoint at
+    ``L`` and reprocesses only layers ``>= L`` -- the prefix (affine maps and OBBT
+    bound LPs of layers ``< L``) is reused unchanged.
+
+    Correctness rests on the **shared-prefix precondition** (asserted below):
+    ``child_fixed`` and the parent's ``fixed`` agree on every neuron fixed at a
+    layer ``< L`` -- the bab ``split`` caller guarantees this (it only adds one
+    fix, at ``L``). Then the reach up to entering ReLU ``L`` is identical, so the
+    parent's checkpoint ``L`` is exactly the child's pre-ReLU star there; layers
+    ``< L`` also add the same predicate variables in the same order, so the
+    parent's layer-``<L`` meta (and ``pred_col`` indices) are valid verbatim.
+    Reprocessing layers ``>= L`` with the *full* ``child_fixed`` re-applies any
+    deeper fixes the parent already had, so non-monotonic split order is fine.
+    Returns a star equal to ``relaxed_reach(input, layers, child_fixed,
+    bound_mode)`` (see ``test_incremental_reach``); only provenance differs.
+
+    Memory: prefix checkpoints are shared with the parent by reference, so the
+    only new allocations are the layers actually recomputed. Live memory is
+    bounded by the DFS frontier x depth (not the whole tree), strictly more than
+    the old recompute-from-input path -- acceptable here, revisit if it spikes on
+    deep/wide nets.
+    """
+    if parent.checkpoints is None:
+        raise ValueError("parent star carries no checkpoints; run relaxed_reach first")
+    n_relu = len(parent.checkpoints)
+    if not (0 <= split_layer < n_relu):
+        raise ValueError(f"split_layer {split_layer} out of range [0, {n_relu})")
+    # Load-bearing precondition: layers < split_layer are reused from the parent,
+    # so child_fixed must not introduce/contradict a fix below the split layer
+    # (that fix would be silently dropped -> an unsound star).
+    parent_fixed = parent.fixed or {}
+    for k, ph in child_fixed.items():
+        if k.layer < split_layer and parent_fixed.get(k) != ph:
+            raise ValueError(
+                f"resume_reach: child_fixed disagrees with parent below split "
+                f"layer {split_layer} at {k}; shared-prefix reuse would be unsound"
+            )
+
+    start_pos = relu_positions(layers)[split_layer]
+    start_star = parent.checkpoints[split_layer]
+
+    S, new_meta, new_ckpts = _reach_from(
+        start_star, layers, child_fixed, bound_mode, start_pos, split_layer
+    )
+    prefix_meta = [m for m in (parent.relax_meta or []) if m.key.layer < split_layer]
+    _attach_provenance(
+        S, prefix_meta + new_meta, child_fixed, bound_mode,
+        parent.checkpoints[:split_layer] + new_ckpts,
+    )
+    return S

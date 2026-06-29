@@ -17,9 +17,11 @@ from n2v.refine.types import (
 )
 from n2v.refine.operations import refine, split, witness_phase
 from n2v.refine.bab import verify_refine
+from n2v.refine.input_split import verify_refine_input
 from n2v.refine.selectors import (
     BoundWidthSelector,
     BoxCornerSelector,
+    ExactStarSBSelector,
     FaithfulSelector,
     RandomSelector,
     Selector,
@@ -38,9 +40,11 @@ __all__ = [
     "split",
     "witness_phase",
     "verify_refine",
+    "verify_refine_input",
     "Selector",
     "FaithfulSelector",
     "BoxCornerSelector",
+    "ExactStarSBSelector",
     "RandomSelector",
     "BoundWidthSelector",
 ]

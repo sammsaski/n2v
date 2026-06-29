@@ -31,7 +31,7 @@ import numpy as np
 
 from n2v.sets.star import Star
 from n2v.utils.lp_solver_enum import LPSolver
-from n2v.refine.reach_relaxed import Layer, relaxed_reach
+from n2v.refine.reach_relaxed import Layer, relaxed_reach, resume_reach
 from n2v.refine.selectors import Selector
 from n2v.refine.types import LinearSpec, NeuronMeta, Phase, Witness
 from n2v.refine.witness import preactivation
@@ -75,6 +75,7 @@ def split(
     witness: Witness,
     *,
     lp_solver=LPSolver.DEFAULT,
+    incremental: bool = True,
 ) -> Optional[List[Star]]:
     """
     Witness-guided activation split: choose one unstable (triangle-relaxed) neuron
@@ -89,6 +90,13 @@ def split(
     ``witness`` is the faithful epigraph witness already solved by the caller (for
     the shared prune / counterexample test) -- reused here so no extra LP is
     spent for the split choice itself (the box-corner selector solves its own).
+
+    ``incremental`` (default True) builds each child by ``resume_reach`` from the
+    parent's shared-prefix checkpoint at the split layer -- reprocessing only
+    layers at/after the split, reusing the parent's affine maps and OBBT bound LPs
+    below it. Falls back to a full ``relaxed_reach`` if the parent carries no
+    checkpoints. The two paths are provably equivalent (see test_incremental_reach
+    / verdict-invariance), so this only changes cost, never the result.
     """
     meta: List[NeuronMeta] = star.relax_meta or []
     if not meta:
@@ -109,6 +117,9 @@ def split(
     children: List[Star] = []
     for phase in (wphase, other):
         child_fixed = {**fixed, key: phase}
-        child, _ = relaxed_reach(input_star, layers, child_fixed, bound_mode=bound_mode)
+        if incremental and star.checkpoints is not None:
+            child = resume_reach(star, layers, child_fixed, bound_mode, key.layer)
+        else:
+            child, _ = relaxed_reach(input_star, layers, child_fixed, bound_mode=bound_mode)
         children.append(child)
     return children
