@@ -87,6 +87,7 @@ def _relu_layer_relaxed(
     layer_idx: int,
     fixed: Dict[NeuronKey, Phase],
     bound_mode: str = "box",
+    zono_bounds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
 ) -> Tuple[Star, List[NeuronMeta]]:
     """
     Apply ReLU to star ``S`` at ReLU-layer index ``layer_idx``.
@@ -98,15 +99,33 @@ def _relu_layer_relaxed(
     recorded.
 
     ``bound_mode`` selects how the pre-activation ranges are computed:
-    ``"box"`` (predicate-box interval, cheap, Phase-1), or ``"lp_cpu"`` /
-    ``"lp_gpu"`` (LP-over-P bound tightening, tighter, stabilises more neurons). ``box`` and
-    ``lp_cpu`` trust the interval/HiGHS optimum as the rest of n2v's sound path
-    does (``get_range``/``violation_lp``); ``lp_gpu`` is rigorously outward via
-    Neumaier-Shcherbina. Tighter ranges only ever reduce the crossing set, never
-    enlarge it.
+    ``"box"`` (predicate-box interval, cheap, Phase-1); ``"lp_cpu"`` / ``"lp_gpu"``
+    (LP-over-P bound tightening, tighter, stabilises more neurons); ``"zono"``
+    (intersect the box interval with a DeepZ outer-zonotope bound -- ``zono_bounds``
+    -- which tracks correlations the predicate box loses, at propagation cost, no
+    LP); or ``"zono_lp"`` (the nnenum recipe: use the cheap zono bound to
+    pre-classify, then LP *only* the neurons zono leaves unstable). ``zono_lp`` is
+    **result-identical to ``lp_cpu``** -- a zono-stable neuron is LP-stable with the
+    same ReLU phase, and a stable neuron's bound value never reaches the output --
+    so it is a pure speedup whenever zono stabilises more neurons than the LP would
+    have to examine. All modes are sound; intersecting sound enclosures stays sound.
     """
-    if bound_mode == "box":
+    if bound_mode in ("box", "zono", "zono_lp"):
         lb, ub = S.estimate_ranges()
+        if bound_mode in ("zono", "zono_lp") and zono_bounds is not None:
+            zlb, zub = zono_bounds
+            lb = np.maximum(lb, zlb.reshape(lb.shape))
+            ub = np.minimum(ub, zub.reshape(ub.shape))
+        if bound_mode == "zono_lp":
+            from n2v.refine.tighten import _lp_ranges
+            lbf, ubf = lb.flatten(), ub.flatten()
+            unstable = np.flatnonzero((lbf < 0.0) & (ubf > 0.0))
+            if unstable.size > 0:
+                lo, hi = _lp_ranges(S, "lp_cpu", unstable)   # LP only the zono-unstable
+                lbf = lbf.copy(); ubf = ubf.copy()
+                lbf[unstable] = np.maximum(lo, lbf[unstable])
+                ubf[unstable] = np.minimum(hi, ubf[unstable])
+                lb, ub = lbf.reshape(-1, 1), ubf.reshape(-1, 1)
     else:
         lb, ub = neuron_bounds(S, backend=bound_mode)
     lb = lb.flatten()
@@ -259,6 +278,7 @@ def _reach_from(
     bound_mode: str,
     start_pos: int,
     start_relu_idx: int,
+    start_zono=None,
 ) -> Tuple[Star, List[NeuronMeta], List[Star]]:
     """
     Propagate ``start_star`` through ``layers[start_pos:]``, beginning at ReLU
@@ -270,17 +290,29 @@ def _reach_from(
     prefix a child splitting at that layer resumes from. This is the single reach
     core: ``relaxed_reach`` is the ``start_pos=0, start_relu_idx=0`` case and
     ``resume_reach`` restarts mid-network from a parent checkpoint.
+
+    For ``bound_mode == "zono"`` an outer zonotope ``start_zono`` is propagated in
+    lock-step (DeepZ ReLU overapprox) and its per-neuron pre-activation bounds
+    refine the star's classification at each ReLU layer.
     """
+    from n2v.nn.layer_ops.relu_reach import relu_zono_approx
+
     S = start_star
+    Z = start_zono
     meta: List[NeuronMeta] = []
     checkpoints: List[Star] = []
     relu_idx = start_relu_idx
     for layer in layers[start_pos:]:
         if isinstance(layer, LinearLayer):
             S = S.affine_map(layer.W, layer.b)
+            if Z is not None:
+                Z = Z.affine_map(layer.W, layer.b)
         elif isinstance(layer, ReluLayer):
             checkpoints.append(S)  # pre-ReLU star entering this layer
-            S, layer_meta = _relu_layer_relaxed(S, relu_idx, fixed, bound_mode)
+            zb = Z.get_bounds() if Z is not None else None
+            S, layer_meta = _relu_layer_relaxed(S, relu_idx, fixed, bound_mode, zono_bounds=zb)
+            if Z is not None:
+                Z = relu_zono_approx([Z])[0]
             meta.extend(layer_meta)
             relu_idx += 1
         else:
@@ -309,8 +341,10 @@ def relaxed_reach(
     Forward-propagate ``input_star`` through ``layers`` with triangle ReLU
     relaxation and the given fixed neuron phases.
 
-    ``bound_mode`` ("box" | "lp_cpu" | "lp_gpu") selects Phase-1 box bounds or
-    LP-over-P bound tightening for neuron classification.
+    ``bound_mode`` ("box" | "lp_cpu" | "lp_gpu" | "zono") selects Phase-1 box
+    bounds, LP-over-P bound tightening, or DeepZ outer-zonotope refinement (cheap
+    correlation-aware bounds; best with input splitting, where the shrinking input
+    box tightens the zonotope) for neuron classification.
 
     Returns the output star and the list of ``NeuronMeta`` for every relaxed
     (unfixed, unstable) neuron across all layers, in creation order. The output
@@ -320,7 +354,15 @@ def relaxed_reach(
     if fixed is None:
         fixed = {}
 
-    S, meta, checkpoints = _reach_from(input_star, layers, fixed, bound_mode, 0, 0)
+    start_zono = None
+    if bound_mode in ("zono", "zono_lp"):
+        from n2v.sets import Zono
+        ilb, iub = input_star.estimate_ranges()
+        start_zono = Zono.from_bounds(ilb.flatten(), iub.flatten())
+
+    S, meta, checkpoints = _reach_from(
+        input_star, layers, fixed, bound_mode, 0, 0, start_zono=start_zono
+    )
 
     # Attach the relaxation metadata + search provenance to the output star so
     # the refine set-operations (refine/split) are self-describing. ``relax_meta``

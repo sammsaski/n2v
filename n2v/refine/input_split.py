@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -73,6 +74,135 @@ def _pick_dim(
     return int(np.argmax(score))
 
 
+def _process_node(
+    S_in: Star, model, spec: LinearSpec, layers, spec_hs: HalfSpace,
+    bound_mode: str, n_in: int, min_width: float, heuristic: str, lp_solver,
+):
+    """
+    Reach + decide one input sub-box (the per-node work, side-effect-free so it is
+    safe to run concurrently across the frontier). Returns one of:
+      ("safe", None)            -- provably disjoint from the unsafe region (prune)
+      ("sat", x_in)             -- a real counterexample
+      ("split", (childA, childB))
+      ("stuck", None)           -- cannot refine further (-> UNKNOWN)
+    """
+    out_star, _ = relaxed_reach(S_in, layers, {}, bound_mode=bound_mode)
+    if verify_specification([out_star], spec_hs).verdict == "UNSAT":
+        return ("safe", None)
+    res = violation_lp(out_star, spec, include_Cd=True, lp_solver=lp_solver)
+    if res is None:
+        return ("safe", None)
+    alpha, _ = res
+    is_ce, x_in, _ = is_true_counterexample(alpha, S_in, model, spec)
+    if is_ce:
+        return ("sat", x_in)
+    d = _pick_dim(S_in, out_star, spec, alpha, n_in, min_width, heuristic)
+    if d is None:
+        return ("stuck", None)
+    return ("split", _bisect(S_in, d))
+
+
+def _reach_margin(S_in, model, spec, layers, spec_hs, bound_mode, lp_solver):
+    """
+    Reach one candidate input sub-box and return ``(margin, ce_x)``: the worst
+    spec-row margin over the (sound over-approximate) reach -- ``+inf`` if the box
+    is provably safe (disjoint from the unsafe region) -- and a concrete
+    counterexample input if the box's witness is a real CE, else ``None``. The
+    per-candidate work for exact input strong branching; side-effect-free, so the
+    candidates are scored concurrently.
+    """
+    out_star, _ = relaxed_reach(S_in, layers, {}, bound_mode=bound_mode)
+    if verify_specification([out_star], spec_hs).verdict == "UNSAT":
+        return (np.inf, None)
+    res = violation_lp(out_star, spec, include_Cd=True, lp_solver=lp_solver)
+    if res is None:
+        return (np.inf, None)
+    alpha, t = res
+    is_ce, x_in, _ = is_true_counterexample(alpha, S_in, model, spec)
+    return (t, x_in if is_ce else None)
+
+
+def verify_refine_input_sb(
+    input_star: Star,
+    model,
+    spec: LinearSpec,
+    *,
+    layers=None,
+    bound_mode: str = "box",
+    node_budget: int = 100000,
+    time_budget: Optional[float] = None,
+    min_width: float = 1e-6,
+    lp_solver=LPSolver.DEFAULT,
+    n_workers: int = 8,
+) -> RefineResult:
+    """
+    Input-space BaB with **exact strong branching**: at each node, score *every*
+    candidate input dimension by actually bisecting it and reaching both children,
+    then split the dimension whose worst child has the highest margin (FSB score
+    ``max_d min(margin(A_d), margin(B_d))`` -- the split that drives both halves
+    hardest toward safety, and decides the node outright if some dimension makes
+    both halves safe). Affordable only because the input dimension is tiny
+    (~5 for ACAS) and the candidate reaches are independent -> scored concurrently
+    in a thread pool. Same soundness contract as ``verify_refine_input``; any
+    candidate's real CE short-circuits to SAT.
+    """
+    if layers is None:
+        layers = extract_layers(model)
+    spec_hs = HalfSpace(spec.G, spec.g)
+    n_in = input_star.nVar
+
+    worklist: List[Tuple[Star, int]] = [(input_star, 0)]
+    nodes = 0
+    max_depth = 0
+    inconclusive = False
+    start = time.perf_counter()
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        while worklist:
+            timed_out = time_budget is not None and time.perf_counter() - start > time_budget
+            if nodes >= node_budget or timed_out:
+                return RefineResult(Status.UNKNOWN, nodes, max_depth)
+            S_in, depth = worklist.pop()
+            nodes += 1
+            max_depth = max(max_depth, depth)
+
+            # node's own verdict (prune / CE) before scoring splits
+            kind, payload = _process_node(
+                S_in, model, spec, layers, spec_hs, bound_mode, n_in, min_width,
+                heuristic="widest", lp_solver=lp_solver,
+            )
+            if kind == "sat":
+                return RefineResult(Status.SAT, nodes, max_depth, counterexample_x=payload)
+            if kind == "safe":
+                continue
+            if kind == "stuck":
+                inconclusive = True
+                continue
+
+            # exact strong branching: bisect every eligible dim, reach both
+            # children of each, score concurrently.
+            width = (S_in.predicate_ub.flatten()[:n_in] - S_in.predicate_lb.flatten()[:n_in])
+            cand = [d for d in range(n_in) if width[d] > min_width]
+            pairs = {d: _bisect(S_in, d) for d in cand}
+            tasks = [(d, child) for d in cand for child in pairs[d]]
+            margins = list(pool.map(
+                lambda c: _reach_margin(c, model, spec, layers, spec_hs, bound_mode, lp_solver),
+                [c for _, c in tasks],
+            ))
+            by_d: dict = {}
+            for (d, _), (margin, ce_x) in zip(tasks, margins):
+                if ce_x is not None:
+                    return RefineResult(Status.SAT, nodes, max_depth, counterexample_x=ce_x)
+                by_d.setdefault(d, []).append(margin)
+            d_star = max(cand, key=lambda d: min(by_d[d]))
+            A, B = pairs[d_star]
+            worklist.append((A, depth + 1))
+            worklist.append((B, depth + 1))
+
+    final = Status.UNKNOWN if inconclusive else Status.UNSAT
+    return RefineResult(final, nodes, max_depth)
+
+
 def verify_refine_input(
     input_star: Star,
     model,
@@ -87,7 +217,8 @@ def verify_refine_input(
     lp_solver=LPSolver.DEFAULT,
 ) -> RefineResult:
     """
-    Decide ``G y <= g`` over ``input_star`` by input-space branch-and-bound.
+    Decide ``G y <= g`` over ``input_star`` by (serial DFS) input-space
+    branch-and-bound.
 
     ``heuristic``: "smear" (sensitivity-weighted, default) or "widest" (largest
     remaining input range). ``min_width`` is the smallest input-predicate range a
@@ -111,30 +242,93 @@ def verify_refine_input(
         S_in, depth = worklist.pop()
         nodes += 1
         max_depth = max(max_depth, depth)
-
-        out_star, _ = relaxed_reach(S_in, layers, {}, bound_mode=bound_mode)
-        if verify_specification([out_star], spec_hs).verdict == "UNSAT":
-            continue  # this sub-box is provably safe
-
-        res = violation_lp(out_star, spec, include_Cd=True, lp_solver=lp_solver)
-        if res is None:
-            continue  # empty -> vacuously safe
-        alpha, _ = res
-
-        is_ce, x_in, _ = is_true_counterexample(alpha, S_in, model, spec)
-        if is_ce:
-            return RefineResult(Status.SAT, nodes, max_depth, counterexample_x=x_in)
-
-        if nodes >= node_budget:
+        kind, payload = _process_node(
+            S_in, model, spec, layers, spec_hs, bound_mode, n_in, min_width,
+            heuristic, lp_solver,
+        )
+        if kind == "sat":
+            return RefineResult(Status.SAT, nodes, max_depth, counterexample_x=payload)
+        if kind == "safe":
+            continue
+        if kind == "stuck":
             inconclusive = True
             continue
-        d = _pick_dim(S_in, out_star, spec, alpha, n_in, min_width, heuristic)
-        if d is None:
-            inconclusive = True  # cannot refine further -> stay sound (UNKNOWN)
-            continue
-        A, B = _bisect(S_in, d)
+        A, B = payload
         worklist.append((A, depth + 1))
         worklist.append((B, depth + 1))
+
+    final = Status.UNKNOWN if inconclusive else Status.UNSAT
+    return RefineResult(final, nodes, max_depth)
+
+
+def verify_refine_input_parallel(
+    input_star: Star,
+    model,
+    spec: LinearSpec,
+    *,
+    layers=None,
+    bound_mode: str = "box",
+    node_budget: int = 100000,
+    time_budget: Optional[float] = None,
+    min_width: float = 1e-6,
+    heuristic: str = "smear",
+    lp_solver=LPSolver.DEFAULT,
+    n_workers: int = 8,
+    batch: Optional[int] = None,
+) -> RefineResult:
+    """
+    Parallel-frontier input-space BaB: identical verdict to ``verify_refine_input``
+    (nodes are independent sub-problems), but each wave of up to ``batch`` frontier
+    nodes is reached + checked concurrently in a thread pool. The heavy per-node
+    work (numpy affine maps, HiGHS LP, torch forward) releases the GIL, so threads
+    give real multi-core speedup. ``batch`` defaults to ``4 * n_workers``.
+
+    Soundness is order-independent: any node's real CE -> SAT; the frontier
+    emptying with every node proven safe -> UNSAT; a node that cannot be refined,
+    or hitting the budget with a non-empty frontier -> UNKNOWN (never false UNSAT).
+    """
+    if layers is None:
+        layers = extract_layers(model)
+    spec_hs = HalfSpace(spec.G, spec.g)
+    n_in = input_star.nVar
+    if batch is None:
+        batch = 4 * n_workers
+
+    frontier: List[Tuple[Star, int]] = [(input_star, 0)]
+    nodes = 0
+    max_depth = 0
+    inconclusive = False
+    start = time.perf_counter()
+
+    def work(node):
+        return _process_node(
+            node[0], model, spec, layers, spec_hs, bound_mode, n_in, min_width,
+            heuristic, lp_solver,
+        )
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
+        while frontier:
+            timed_out = time_budget is not None and time.perf_counter() - start > time_budget
+            if nodes >= node_budget or timed_out:
+                return RefineResult(Status.UNKNOWN, nodes, max_depth)
+            wave = [frontier.pop() for _ in range(min(batch, len(frontier)))]
+            nodes += len(wave)
+            max_depth = max(max_depth, max(d for _, d in wave))
+            results = list(pool.map(work, wave))
+
+            children: List[Tuple[Star, int]] = []
+            for (S_in, depth), (kind, payload) in zip(wave, results):
+                if kind == "sat":
+                    return RefineResult(Status.SAT, nodes, max_depth, counterexample_x=payload)
+                if kind == "safe":
+                    continue
+                if kind == "stuck":
+                    inconclusive = True
+                    continue
+                A, B = payload
+                children.append((A, depth + 1))
+                children.append((B, depth + 1))
+            frontier.extend(children)
 
     final = Status.UNKNOWN if inconclusive else Status.UNSAT
     return RefineResult(final, nodes, max_depth)

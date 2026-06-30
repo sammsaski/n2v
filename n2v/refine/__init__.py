@@ -17,7 +17,8 @@ from n2v.refine.types import (
 )
 from n2v.refine.operations import refine, split, witness_phase
 from n2v.refine.bab import verify_refine
-from n2v.refine.input_split import verify_refine_input
+from n2v.refine.input_split import verify_refine_input, verify_refine_input_parallel, verify_refine_input_sb
+from n2v.refine.input_split_gpu import verify_refine_input_gpu
 from n2v.refine.selectors import (
     BoundWidthSelector,
     BoxCornerSelector,
@@ -41,6 +42,9 @@ __all__ = [
     "witness_phase",
     "verify_refine",
     "verify_refine_input",
+    "verify_refine_input_parallel",
+    "verify_refine_input_sb",
+    "verify_refine_input_gpu",
     "Selector",
     "FaithfulSelector",
     "BoxCornerSelector",

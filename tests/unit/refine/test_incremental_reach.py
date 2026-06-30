@@ -147,6 +147,47 @@ def test_checkpoint_prefix_is_shared_by_reference():
     _assert_meta_equal(pre_child, pre_parent)
 
 
+@pytest.mark.parametrize("seed", range(4))
+def test_zono_bounds_sound_and_tighter_than_box(seed):
+    """
+    The "zono" bound mode is a sound over-approximation (its output star encloses
+    every exact model output) and tighter-or-equal to the box mode (the DeepZ
+    zonotope tracks correlations the predicate box loses).
+    """
+    net = _net(seed, dims=(3, 8, 8, 8, 2))
+    layers = extract_layers(net)
+    S_in = Star.from_bounds(-np.ones(3), np.ones(3))
+    out_box, _ = relaxed_reach(S_in, layers, {}, bound_mode="box")
+    out_zono, _ = relaxed_reach(S_in, layers, {}, bound_mode="zono")
+    lbz, ubz = out_zono.estimate_ranges()
+    lbb, ubb = out_box.estimate_ranges()
+    # tighter-or-equal to box (intersecting box with the zonotope bound)
+    assert np.all(lbz >= lbb - 1e-9) and np.all(ubz <= ubb + 1e-9)
+    # sound: every exact output lies inside the zono-mode output bbox
+    rng = np.random.default_rng(seed)
+    X = rng.uniform(-1, 1, size=(20000, 3))
+    with torch.no_grad():
+        Y = net(torch.as_tensor(X, dtype=torch.float64)).numpy()
+    assert np.all(Y >= lbz.flatten() - 1e-6) and np.all(Y <= ubz.flatten() + 1e-6)
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_zono_lp_identical_to_lp_cpu(seed):
+    """
+    zono_lp (zono pre-classify, LP only the zono-unstable) is RESULT-IDENTICAL to
+    full lp_cpu: same output star V/C/d and same relaxed-neuron metadata. Only the
+    number of LPs solved differs (zono-stable neurons skip the LP). This is the
+    pure-speedup guarantee.
+    """
+    net = _net(seed, dims=(3, 7, 7, 7, 2))
+    layers = extract_layers(net)
+    S_in = Star.from_bounds(-np.ones(3), np.ones(3))
+    out_lp, meta_lp = relaxed_reach(S_in, layers, {}, bound_mode="lp_cpu")
+    out_zlp, meta_zlp = relaxed_reach(S_in, layers, {}, bound_mode="zono_lp")
+    _assert_star_equal(out_zlp, out_lp, tol=1e-6)
+    _assert_meta_equal(meta_zlp, meta_lp, tol=1e-6)
+
+
 def test_resume_does_less_work_than_scratch():
     """
     Resuming at L>0 actually REUSES the prefix rather than recomputing: the

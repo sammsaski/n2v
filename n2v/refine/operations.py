@@ -114,10 +114,16 @@ def split(
     wphase = witness_phase(witness.alpha, nm)
     other = Phase.INACTIVE if wphase == Phase.ACTIVE else Phase.ACTIVE
 
+    # Incremental resume reuses the parent's per-layer star checkpoints; the
+    # zono outer zonotope is not checkpointed, so for zono(-lp) bounds fall back to
+    # a full reach (keeps the result identical to a from-scratch zono reach).
+    use_incremental = (incremental and star.checkpoints is not None
+                       and bound_mode not in ("zono", "zono_lp"))
+
     children: List[Star] = []
     for phase in (wphase, other):
         child_fixed = {**fixed, key: phase}
-        if incremental and star.checkpoints is not None:
+        if use_incremental:
             child = resume_reach(star, layers, child_fixed, bound_mode, key.layer)
         else:
             child, _ = relaxed_reach(input_star, layers, child_fixed, bound_mode=bound_mode)
