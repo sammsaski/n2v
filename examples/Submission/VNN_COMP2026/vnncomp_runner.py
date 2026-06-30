@@ -104,6 +104,20 @@ def _on_alarm(signum, frame):
     raise _Timeout()
 
 
+def _arm_timeout(timeout):
+    """Self-enforce TIMEOUT via SIGALRM where available (POSIX competition host).
+    On platforms without setitimer/SIGALRM (e.g. Windows, for local testing) this
+    is a no-op and we rely on the harness's hard kill at TIMEOUT+60."""
+    if hasattr(signal, "SIGALRM") and hasattr(signal, "setitimer"):
+        signal.signal(signal.SIGALRM, _on_alarm)
+        signal.setitimer(signal.ITIMER_REAL, max(1.0, timeout))
+
+
+def _disarm_timeout():
+    if hasattr(signal, "setitimer"):
+        signal.setitimer(signal.ITIMER_REAL, 0)
+
+
 # ---------------------------------------------------------------------------
 # Model / input-set helpers
 # ---------------------------------------------------------------------------
@@ -208,6 +222,15 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
                     len(prop["input_tensors"]))
         return {"result": RESULT_UNKNOWN, "time": time.time() - t0,
                 "counterexample": None}
+
+    # ViT (transformer self-attention): onnx2torch cannot ingest the exported
+    # graph (Slice v1 + per-token BatchNorm), and a star+LP attention reach does
+    # not scale. Route to the LP-free CROWN attention verifier (method translated from NNV
+    # ViTCrown): reconstruct ViT_BN from the ONNX initializers, lower to the CROWN
+    # op DAG, and prove robustness with backward linear bounds + refinement + α.
+    if category and "vit" in category.lower():
+        return verify_vit_instance(onnx_path, prop, get_input_shape(onnx_path),
+                                   category, t0, workers=workers)
 
     model = load_onnx(onnx_path)
     input_shape = get_input_shape(onnx_path)
@@ -419,6 +442,96 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
             "counterexample": None}
 
 
+def _vit_pgd(md, lb, ub, group, rng, n_starts=8, steps=60):
+    """Gradient counterexample search on the reconstructed ViT (torch): drive the
+    worst OR-halfspace value ``min_k (G_k @ Y - g_k)`` <= 0 inside the box."""
+    import torch
+    G = torch.tensor(np.vstack([np.atleast_2d(h.G) for h in group]), dtype=torch.float64)
+    g = torch.tensor(np.concatenate([np.asarray(h.g).reshape(-1) for h in group]),
+                     dtype=torch.float64)
+    lo = torch.tensor(lb.reshape(3, 32, 32)); hi = torch.tensor(ub.reshape(3, 32, 32))
+    outs = []
+    for _ in range(n_starts):
+        x0 = lb + (ub - lb) * rng.random(lb.size)
+        x = torch.tensor(x0.reshape(3, 32, 32), dtype=torch.float64, requires_grad=True)
+        opt = torch.optim.Adam([x], lr=1e-2)
+        for _ in range(steps):
+            opt.zero_grad()
+            y = md(x.reshape(1, 3, 32, 32))[0]
+            (G @ y - g).min().backward()
+            opt.step()
+            with torch.no_grad():
+                x.clamp_(lo, hi)
+        outs.append(x.detach().reshape(-1).cpu().numpy())
+    return np.asarray(outs)
+
+
+def verify_vit_instance(onnx_path, prop, input_shape, category, t0, workers=None):
+    """Verify a ViT robustness instance LP-free (method translated from NNV ViTCrown, no NNV dep).
+
+    SAT iff a falsifier (random + ViT-gradient PGD), re-validated on the RAW ONNX
+    in onnxruntime at zero tolerance, lands in the unsafe region. UNSAT iff the
+    LP-free CROWN reach proves every (region, prop) pair disjoint from its unsafe
+    region (a pair is safe iff SOME OR-group is fully unreachable, i.e. CROWN
+    bounds ``G_k @ Y > g_k`` for every row). Else unknown (sound)."""
+    import torch
+    from n2v.nn.vit_crown import load_vit_onnx, to_ops, verify_halfspace_group_safe
+
+    try:
+        model = load_vit_onnx(onnx_path)
+        ops = to_ops(model)
+    except Exception as e:  # noqa: BLE001 — unfamiliar ViT graph: concede unknown
+        logger.warning("ViT reconstruction failed (%s); unknown", e)
+        return {"result": RESULT_UNKNOWN, "time": time.time() - t0, "counterexample": None}
+
+    pairs = prop["pairs"]
+    cfg = get_config(category, onnx_path, None)
+    n_rand = cfg.get("n_rand", 200)
+    rng = np.random.default_rng(42)
+    fwd = make_onnx_forward(onnx_path)
+
+    # Stage 1: falsification (counterexample search), grader-validated on raw ONNX.
+    for pair in pairs:
+        lb = np.asarray(pair["lb"], dtype=np.float64).reshape(-1)
+        ub = np.asarray(pair["ub"], dtype=np.float64).reshape(-1)
+        groups = _extract_halfspace_groups(pair["prop"])
+        X = lb + (ub - lb) * rng.random((n_rand, lb.size))
+        try:
+            X = np.vstack([X] + [_vit_pgd(model, lb, ub, gp, rng) for gp in groups])
+        except Exception as e:  # noqa: BLE001
+            logger.debug("ViT PGD failed: %s", e)
+        Y = fwd(X)
+        for i in range(X.shape[0]):
+            if in_unsafe_region(Y[i], groups, tol=0.0):
+                return {"result": RESULT_SAT, "time": time.time() - t0,
+                        "counterexample": format_counterexample(X[i], Y[i])}
+
+    # Stage 2: LP-free CROWN reach. UNSAT iff every pair is provably safe.
+    all_unsat = True
+    for pair in pairs:
+        lb = np.asarray(pair["lb"], dtype=np.float64).reshape(-1)
+        ub = np.asarray(pair["ub"], dtype=np.float64).reshape(-1)
+        groups = _extract_halfspace_groups(pair["prop"])
+        pair_safe = False
+        for group in groups:           # AND across groups: safe if ANY is unreachable
+            G = np.vstack([np.atleast_2d(h.G) for h in group])
+            g = np.concatenate([np.asarray(h.g).reshape(-1) for h in group])
+            try:
+                safe, _ = verify_halfspace_group_safe(
+                    ops, lb, ub, G, g, refine=True, refine_iters=2, alpha=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("CROWN reach error: %s", e)
+                safe = False
+            if safe:
+                pair_safe = True
+                break
+        if not pair_safe:
+            all_unsat = False
+    if all_unsat:
+        return {"result": RESULT_UNSAT, "time": time.time() - t0, "counterexample": None}
+    return {"result": RESULT_UNKNOWN, "time": time.time() - t0, "counterexample": None}
+
+
 def write_result(results_file, result_str, counterexample=None):
     with open(results_file, "w") as f:
         f.write(result_str)
@@ -524,8 +637,7 @@ def main():
     if onnx_arg.startswith('"') and onnx_arg.endswith('"'):
         onnx_arg = onnx_arg[1:-1]
     if onnx_arg.strip().startswith("["):
-        signal.signal(signal.SIGALRM, _on_alarm)
-        signal.setitimer(signal.ITIMER_REAL, max(1.0, timeout))
+        _arm_timeout(timeout)
         try:
             result = verify_relational_instance(onnx_arg, vnnlib_arg, category)
         except _Timeout:
@@ -534,7 +646,7 @@ def main():
             logger.error("relational verification error: %s", e)
             result = {"result": RESULT_UNKNOWN, "counterexample": None}
         finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
+            _disarm_timeout()
         write_result(results_file, result["result"],
                      result.get("counterexample"))
         print(result["result"])
@@ -545,8 +657,7 @@ def main():
     onnx_path, onnx_tmp = _maybe_decompress(onnx_arg)
     vnnlib_path, vnnlib_tmp = _maybe_decompress(vnnlib_arg)
 
-    signal.signal(signal.SIGALRM, _on_alarm)
-    signal.setitimer(signal.ITIMER_REAL, max(1.0, timeout))
+    _arm_timeout(timeout)
     try:
         result = verify_instance(onnx_path, vnnlib_path, category)
     except _Timeout:
@@ -555,7 +666,7 @@ def main():
         logger.error("verification error: %s", e)
         result = {"result": RESULT_UNKNOWN, "counterexample": None}
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
+        _disarm_timeout()
         if onnx_tmp and os.path.exists(onnx_path):
             os.remove(onnx_path)
         if vnnlib_tmp and os.path.exists(vnnlib_path):
