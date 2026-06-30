@@ -192,8 +192,24 @@ def _resolve_workers(workers):
 
 def verify_instance(onnx_path, vnnlib_path, category, workers=None):
     t0 = time.time()
-    model = load_onnx(onnx_path)
     prop = load_vnnlib(vnnlib_path)
+
+    # Multimodal / multi-input specs (e.g. smart_turn: X1 [1,80,800] + X2
+    # [1,3,32,112,112] -> a ~1.27M-dim joint input). The sound-reach path builds
+    # one input set over the CONCATENATED joint space, whose dense generator is
+    # infeasible (an n-by-n diagonal at n ~ 1.27M is 11.7 TiB); there is no
+    # multi-input set construction in the reach path. Concede `unknown` (sound,
+    # -150-safe) from the spec header BEFORE loading the (124 MB) model, instead
+    # of attempting -- and OOMing on -- the dense set. Mirrors NNV's header-level
+    # multimodal gate.
+    if len(prop.get("input_tensors", [])) > 1:
+        logger.info("multi-input/multimodal spec (%d input tensors): sound reach "
+                    "over the joint input is intractable; conceding unknown",
+                    len(prop["input_tensors"]))
+        return {"result": RESULT_UNKNOWN, "time": time.time() - t0,
+                "counterexample": None}
+
+    model = load_onnx(onnx_path)
     input_shape = get_input_shape(onnx_path)
 
     # Nonlinear output property (Pow/Mul over the variables): no linear

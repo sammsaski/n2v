@@ -16,7 +16,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from n2v.nn.reach import _handle_reshape
+from n2v.nn.reach import _handle_reshape, _reshape_feeds_spatial
 from n2v.nn.layer_ops.dispatcher import reach_layer
 from n2v.sets import Star
 from n2v.sets.image_star import ImageStar
@@ -125,3 +125,62 @@ class TestPipelineSoundness:
                             .unsqueeze(0)).numpy()
             y_hwc = y[0].transpose(1, 2, 0).flatten()
             assert np.all(y_hwc >= lo - 1e-5) and np.all(y_hwc <= hi + 1e-5)
+
+
+class TestReshapeFeedsConvTranspose:
+    """Regression for the cgan generators: a Reshape that feeds a transposed
+    conv (latent vector -> reshape -> ConvTranspose2d) must materialize as an
+    ImageStar. `_reshape_feeds_spatial` decides this; ConvTranspose was missing
+    from _SPATIAL_CONSUMERS, so the reshape stayed flat and ConvTranspose2d
+    rejected the flat Star (`ConvTranspose2D requires ImageStar input`)."""
+
+    @staticmethod
+    def _trace(module):
+        gm = torch.fx.symbolic_trace(module)
+        reshape = next(n for n in gm.graph.nodes
+                       if n.op == 'call_method' and n.target in ('reshape', 'view'))
+        return gm, reshape
+
+    def test_reshape_into_conv_transpose_is_spatial(self):
+        class M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(5, C * H * W)
+                self.deconv = nn.ConvTranspose2d(C, 3, kernel_size=2, stride=2)
+
+            def forward(self, x):
+                return self.deconv(self.fc(x).reshape(-1, C, H, W))
+
+        gm, reshape = self._trace(M())
+        assert _reshape_feeds_spatial(reshape, gm) is True
+
+    def test_reshape_into_conv_transpose_through_batchnorm(self):
+        """BatchNorm/ReLU between the reshape and the deconv is a layout
+        pass-through, so the walk must still reach ConvTranspose."""
+        class M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(5, C * H * W)
+                self.bn = nn.BatchNorm2d(C)
+                self.deconv = nn.ConvTranspose2d(C, 3, kernel_size=2, stride=2)
+
+            def forward(self, x):
+                return self.deconv(self.bn(self.fc(x).reshape(-1, C, H, W)))
+
+        gm, reshape = self._trace(M())
+        assert _reshape_feeds_spatial(reshape, gm) is True
+
+    def test_reshape_into_linear_stays_flat(self):
+        """Contrast: a reshape feeding a Linear (no spatial consumer) must
+        stay flat -- the ONNX-correct, transformer-safe default."""
+        class M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc1 = nn.Linear(5, C * H * W)
+                self.fc2 = nn.Linear(C * H * W, 2)
+
+            def forward(self, x):
+                return self.fc2(self.fc1(x).reshape(-1, C * H * W))
+
+        gm, reshape = self._trace(M())
+        assert _reshape_feeds_spatial(reshape, gm) is False
