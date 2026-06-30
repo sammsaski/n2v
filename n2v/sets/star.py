@@ -51,6 +51,12 @@ class Star:
         state_lb: Lower bounds of state variables
         state_ub: Upper bounds of state variables
         Z: Outer zonotope covering this star (optional)
+        relax_meta: Per-neuron triangle-relaxation metadata (optional; set by the
+            refinement reach, ``None`` otherwise). Pure data, no geometric effect.
+        fixed: Refinement-search provenance -- the fixed neuron phases that
+            produced this star (set by ``n2v.refine``; ``None`` otherwise).
+        bound_mode: Refinement-search provenance -- the bound mode the reach used
+            ("box"|"lp_cpu"|"lp_gpu"; set by ``n2v.refine``; ``None`` otherwise).
     """
 
     def __init__(
@@ -63,6 +69,7 @@ class Star:
         state_lb: Optional[np.ndarray] = None,
         state_ub: Optional[np.ndarray] = None,
         outer_zono: Optional['Zono'] = None,
+        relax_meta: Optional[list] = None,
     ):
         """
         Initialize a Star set.
@@ -76,6 +83,12 @@ class Star:
             state_lb: State variable lower bounds
             state_ub: State variable upper bounds
             outer_zono: Outer zonotope approximation
+            relax_meta: Optional per-neuron relaxation metadata describing this
+                star's own triangle-relaxed predicate variables (a list of
+                ``n2v.refine.types.NeuronMeta``). Set by the refinement reach so
+                the refine set-operations (split/tighten) are self-describing;
+                ``None`` for ordinary geometric stars. Pure data — it never
+                affects the geometry or any geometric operation.
         """
         if V is None:
             # Empty constructor
@@ -89,6 +102,10 @@ class Star:
             self.state_lb = None
             self.state_ub = None
             self.Z = None
+            self.relax_meta = None
+            self.fixed = None
+            self.bound_mode = None
+            self.checkpoints = None
             return
 
         # Convert to numpy arrays
@@ -157,6 +174,13 @@ class Star:
 
         # Outer zonotope
         self.Z = outer_zono
+
+        # Optional refinement metadata + search provenance (see Args). Pure data,
+        # no geometric effect; always present (None unless set by n2v.refine).
+        self.relax_meta = relax_meta
+        self.fixed = None
+        self.bound_mode = None
+        self.checkpoints = None
 
     def __repr__(self) -> str:
         """Return string representation of the Star set."""
