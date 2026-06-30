@@ -45,16 +45,18 @@ class TestGetConfig:
         assert methods[0] == ('approx', {'relax_factor': 0.8, 'relax_method': 'area'})
 
     def test_cgan_transformer(self):
+        # ZERO-RISK: transformer branch dropped probabilistic -> falsify-only.
         cfg = get_config('cgan_2023', onnx_path='cGAN_transformer_model.onnx')
-        assert cfg['reach_methods'] == [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})]
+        assert cfg['reach_methods'] == []
 
     def test_nn4sys_lindex(self):
         cfg = get_config('nn4sys', onnx_path='lindex_deep.onnx')
         assert cfg['reach_methods'] == [('approx', {})]
 
     def test_nn4sys_pensieve(self):
+        # ZERO-RISK: non-lindex default dropped probabilistic -> sound approx.
         cfg = get_config('nn4sys', onnx_path='pensieve_big_parallel.onnx')
-        assert cfg['reach_methods'] == [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})]
+        assert cfg['reach_methods'] == [('approx', {})]
 
     def test_dist_shift_exact_only(self):
         """NNV overwrite bug: only exact-star runs."""
@@ -123,32 +125,31 @@ class TestGetConfig:
         assert cfg['falsify_method'] == 'random+apgd'
         assert cfg['falsify_kwargs'] == {'n_restarts': 3, 'n_steps': 50}
 
-    def test_probabilistic_configs_have_kwargs(self):
-        """All probabilistic methods must specify m, epsilon, and surrogate."""
-        PROBABILISTIC_BENCHMARKS = [
-            'cersyve', 'cifar100_2024', 'soundnessbench', 'tinyimagenet_2024',
-            'collins_aerospace_benchmark', 'ml4acopf_2024', 'vggnet16_2022',
-            'vit_2023', 'yolo_2023',
-        ]
-        for category in PROBABILISTIC_BENCHMARKS:
-            cfg = get_config(category)
-            for method, kwargs in cfg['reach_methods']:
-                if method == 'probabilistic':
-                    assert 'm' in kwargs, f"{category} probabilistic missing 'm'"
-                    assert 'epsilon' in kwargs, f"{category} probabilistic missing 'epsilon'"
-                    assert 'surrogate' in kwargs, f"{category} probabilistic missing 'surrogate'"
-                    assert kwargs['m'] > 0
-                    assert 0 < kwargs['epsilon'] < 1
+    def test_no_probabilistic_anywhere(self):
+        """ZERO-RISK INVARIANT: no benchmark may use probabilistic reach -- its
+        'unsat' is unsound (a coverage set, not a proof) and a false unsat scores
+        -150. Every reach method must be sound (approx/exact)."""
+        for category, config in BENCHMARK_CONFIGS.items():
+            method_lists = [config.get('reach_methods', []),
+                            config.get('reach_methods_transformer', [])]
+            for key in ('reach_methods_by_prop', 'reach_methods_by_model'):
+                method_lists += list(config.get(key, {}).values())
+            for methods in method_lists:
+                for method, _ in methods:
+                    assert method != 'probabilistic', \
+                        f"{category} still has a probabilistic (unsound) reach method"
 
-    def test_nn4sys_probabilistic_has_kwargs(self):
-        cfg = get_config('nn4sys', onnx_path='pensieve_big_parallel.onnx')
-        kwargs = cfg['reach_methods'][0][1]
-        assert kwargs == {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'}
+    def test_sat_relu_uses_square(self):
+        """sat_relu: Boolean-SAT-encoded ReLU nets have flat gradients, so the
+        gradient-free Square falsifier finds CEs random/PGD miss (50/100 vs 35/100,
+        ORT-validated at tol=0)."""
+        cfg = get_config('sat_relu')
+        assert cfg['falsify_method'] == 'random+square'
+        assert cfg['falsify_kwargs'] == {'n_iters': 20000}
 
-    def test_cgan_transformer_probabilistic_has_kwargs(self):
-        cfg = get_config('cgan_2023', onnx_path='cGAN_transformer_model.onnx')
-        kwargs = cfg['reach_methods'][0][1]
-        assert kwargs == {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'}
+    def test_cersyve_is_sound(self):
+        cfg = get_config('cersyve')
+        assert all(m in ('approx', 'exact') for m, _ in cfg['reach_methods'])
 
     def test_all_configs_have_required_keys(self):
         """Every config must resolve to reach_methods, n_rand, and falsify_method."""

@@ -315,7 +315,31 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
                 reach_sets = net.reach(input_set, method=method, **extra)
                 verdict = verify_specification(reach_sets, pair["prop"])
                 if verdict.verdict == "SAT":
-                    return {"result": RESULT_SAT, "time": time.time() - t0,
+                    # Sound reach proved a counterexample EXISTS (only EXACT
+                    # reach can soundly return SAT; approx over-approx cannot).
+                    # A `sat` WITHOUT a witness is penalized -150 by the grader,
+                    # so emit the reach witness, re-validated on the raw ONNX at
+                    # zero output tolerance exactly like the falsification path.
+                    # If no witness can be validated, concede `unknown` (0, safe)
+                    # rather than a witness-less sat or an (unsound) unsat.
+                    cx = getattr(verdict, "counterexample_x", None)
+                    if cx is not None:
+                        try:
+                            cx = np.asarray(cx, dtype=np.float64).flatten()
+                            y_ort = onnx_forward(onnx_path, cx)
+                            groups = _extract_halfspace_groups(pair["prop"])
+                            if in_unsafe_region(y_ort, groups, tol=0.0):
+                                return {"result": RESULT_SAT,
+                                        "time": time.time() - t0,
+                                        "counterexample":
+                                            format_counterexample(cx, y_ort)}
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("reach-SAT witness ORT re-validation "
+                                           "error: %s", e)
+                    logger.warning("reach returned SAT without a validatable "
+                                   "witness; conceding unknown (sat-without-"
+                                   "witness is penalized)")
+                    return {"result": RESULT_UNKNOWN, "time": time.time() - t0,
                             "counterexample": None}
                 elif verdict.verdict == "UNSAT":
                     continue

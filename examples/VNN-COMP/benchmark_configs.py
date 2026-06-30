@@ -1,7 +1,14 @@
 """
-Per-benchmark verification strategies for VNN-COMP 2025.
+Per-benchmark verification strategies for VNN-COMP (2025 base, 2026 tuned).
 
-Mirrors NNV's load_vnncomp_network() from run_vnncomp_instance.m exactly,
+ZERO-RISK POLICY (competition): NO probabilistic reach. Probabilistic verification
+returns a coverage set, not a proof, so its 'unsat' is UNSOUND -- a false unsat
+scores -150 under the +10/0/-150 model. Every reach method here is sound (approx /
+exact star); benchmarks where sound reach can't finish concede to `unknown` (0)
+rather than gamble. SAT comes only from falsification, ORT-revalidated at zero
+output tolerance before emission.
+
+Mirrors NNV's load_vnncomp_network() from run_vnncomp_instance.m,
 including NNV's index-overwrite bugs (dist_shift, linearize, malbeware
 only run exact-star despite seemingly intending approx->exact).
 
@@ -43,11 +50,12 @@ BENCHMARK_CONFIGS = {
     },
 
     'cersyve': {
-        # NNV uses cp-star; n2v matched via falsification already.
-        # n_rand bumped 100->3000: validated to find more SOUND (CE-validated) sat
-        # (1->4) now that batched random sampling makes it cheap.
-        'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
-        'n_rand': 3000,
+        # ZERO-RISK: dropped probabilistic (a coverage-set 'unsat' is UNSOUND =
+        # -150 under the +10/0/-150 model). Sound approx/exact (small FC control
+        # nets; may prove holds, else unknown). n_rand 3000->5000 cracks
+        # pendulum_pretrain_con via random sampling (validated +1 sat).
+        'reach_methods': [('approx', {}), ('exact', {})],
+        'n_rand': 5000,
     },
 
     'cgan_2023': {
@@ -58,7 +66,9 @@ BENCHMARK_CONFIGS = {
             ('approx', {'relax_factor': 0.8, 'relax_method': 'area'}),
             ('approx', {}),
         ],
-        'reach_methods_transformer': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
+        # ZERO-RISK: dropped probabilistic transformer branch. Falsify-only
+        # (random finds the small_transformer CE; reach = attention frontier).
+        'reach_methods_transformer': [],
         'n_rand': 100,
     },
 
@@ -102,9 +112,11 @@ BENCHMARK_CONFIGS = {
         # reach them (curse of dimensionality). Use a BOUNDED gradient attack —
         # 'random+apgd' with 1 restart / 30 steps (~31 fwd + 30 bwd) — affordable
         # where the full default PGD (10x50=500 steps, ~220s) was not. Reach stays
-        # probabilistic (unchanged). Finding the CE in Stage-1 also pre-empts a
-        # probabilistic unsound 'unsat' on these gold-SAT instances.
-        'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
+        # ZERO-RISK: dropped probabilistic (ResNet sound reach can't finish in
+        # budget -> would only ever emit an UNSOUND 'unsat'). Falsify-only
+        # (random+apgd) for the tiny-eps adversarial CEs; holds concede to
+        # unknown (sound). Reach=[] saves the wasted reach time.
+        'reach_methods': [],
         'n_rand': 100,
         'falsify_method': 'random+apgd',
         'falsify_kwargs': {'n_restarts': 1, 'n_steps': 30},
@@ -165,7 +177,8 @@ BENCHMARK_CONFIGS = {
         # Resolved by get_config() using onnx_path
         'reach_methods_by_model': {
             'lindex': [('approx', {})],
-            '_default': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
+            # ZERO-RISK: was probabilistic. Sound approx (mscn/pensieve supported).
+            '_default': [('approx', {})],
         },
         'n_rand': 100,
     },
@@ -176,8 +189,14 @@ BENCHMARK_CONFIGS = {
     },
 
     'sat_relu': {
+        # Boolean-SAT-encoded ReLU nets have flat gradients: random/PGD find
+        # 35/100, gradient-free Square finds 50/100 (validated full corpus,
+        # ~0.1s each, strict superset -> no regression). +15 sat. Sound reach
+        # kept for the unsat instances.
         'reach_methods': [('approx', {}), ('exact', {})],
         'n_rand': 100,
+        'falsify_method': 'random+square',
+        'falsify_kwargs': {'n_iters': 20000},
     },
 
     'soundnessbench': {
@@ -204,8 +223,9 @@ BENCHMARK_CONFIGS = {
         # (10x50=500 grad steps, ~200s on a ResNet) -> the falsifier was likely
         # timing out before reach even ran. Switch to a BOUNDED 'random+apgd'
         # (1 restart / 30 steps): fixes the latent timeout AND upgrades to APGD's
-        # adaptive step schedule. Reach stays probabilistic (unchanged).
-        'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
+        # ZERO-RISK: dropped probabilistic (ResNet sound reach times out -> would
+        # only emit an unsound unsat). Falsify-only (random+apgd); holds -> unknown.
+        'reach_methods': [],
         'n_rand': 500,
         'falsify_method': 'random+apgd',
         'falsify_kwargs': {'n_restarts': 1, 'n_steps': 30},
@@ -253,7 +273,10 @@ BENCHMARK_CONFIGS = {
         # Independent of the reach decision (#36). (300_ieee base onnx stays uncrackable.)
         'falsify_method': 'random+apgd',
         'falsify_kwargs': {'n_restarts': 3, 'n_steps': 50},
-        'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
+        # ZERO-RISK: dropped probabilistic. Sound approx (14/118_ieee reach
+        # end-to-end via Pow/trig; returns unknown if it can't prove). random+apgd
+        # nr3/ns50 cracks the gold-sat 300_ieee_prop2 CE.
+        'reach_methods': [('approx', {})],
         'n_rand': 100,
     },
 
@@ -283,19 +306,25 @@ BENCHMARK_CONFIGS = {
     },
 
     'vggnet16_2022': {
-        'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
+        # ZERO-RISK: was probabilistic. 150k-dim ImageNet scale -> falsify-only.
+        'reach_methods': [],
         'n_rand': 100,
     },
 
     'vit_2023': {
-        'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
-        'n_rand': 100,
+        # The runner routes vit -> the LP-free CROWN verifier (verify_vit_instance),
+        # so this reach list is unused; cleaned to [] (was probabilistic). n_rand
+        # feeds the CROWN path's falsification sample count.
+        'reach_methods': [],
+        'n_rand': 200,
     },
 
     'yolo_2023': {
-        'reach_methods': [('probabilistic', {'m': 8000, 'epsilon': 0.001, 'surrogate': 'naive'})],
+        # ZERO-RISK: was probabilistic. Sound approx (TinyYOLO is small; may prove
+        # holds, else unknown). random falsify (PGD too slow for TinyYOLO).
+        'reach_methods': [('approx', {})],
         'n_rand': 100,
-        'falsify_method': 'random',  # PGD too slow for TinyYOLO (~233s for 500 gradient steps)
+        'falsify_method': 'random',
     },
 
     # =========================================================================
