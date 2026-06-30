@@ -1102,6 +1102,7 @@ def _handle_reshape(input_sets: List, target_shape: tuple,
 # require a reshape's flat output to be materialized as an ImageStar.
 _SPATIAL_CONSUMERS = frozenset({
     'Conv1d', 'Conv2d', 'Conv3d', 'OnnxConv',
+    'ConvTranspose1d', 'ConvTranspose2d', 'ConvTranspose3d',
     'MaxPool1d', 'MaxPool2d', 'MaxPool3d', 'OnnxMaxPool',
     'AvgPool1d', 'AvgPool2d', 'AvgPool3d', 'OnnxAveragePool',
     'AdaptiveAvgPool2d', 'OnnxGlobalAveragePool',
