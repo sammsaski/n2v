@@ -18,9 +18,8 @@ fi
 
 echo "Installing $TOOL_NAME dependencies"
 
-# Repo root is three levels up from this script
-#   (examples/Submission/VNN_COMP2026/ -> repo root).
-REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+# This script lives at the repo root, so the repo root is its own directory.
+REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 cd "$REPO_ROOT"
 echo "Repo root: $REPO_ROOT"
 

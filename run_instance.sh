@@ -20,6 +20,8 @@ TIMEOUT=$6
 
 echo "Running n2v on category '$CATEGORY' (onnx '$ONNX_FILE', vnnlib '$VNNLIB_FILE', results '$RESULTS_FILE', timeout '$TIMEOUT')"
 
+# This script lives at the repo root; the runner lives in the submission dir.
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUNNER="$DIR/examples/Submission/VNN_COMP2026/vnncomp_runner.py"
 
-python3 "$DIR/vnncomp_runner.py" "$CATEGORY" "$ONNX_FILE" "$VNNLIB_FILE" "$RESULTS_FILE" "$TIMEOUT"
+python3 "$RUNNER" "$CATEGORY" "$ONNX_FILE" "$VNNLIB_FILE" "$RESULTS_FILE" "$TIMEOUT"
