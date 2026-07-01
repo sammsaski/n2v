@@ -72,11 +72,27 @@ class TestMulTwoSetsBox:
         np.testing.assert_allclose(results[1].lb, np.array([[-1.0]]), atol=1e-10)
         np.testing.assert_allclose(results[1].ub, np.array([[1.0]]), atol=1e-10)
 
-    def test_mismatched_lengths_raises(self):
+    def test_true_mismatch_raises(self):
+        # A genuine N-vs-M mismatch (neither side a singleton) is still
+        # unsupported and raises.
         a = Box(np.array([[1.0]]), np.array([[2.0]]))
         b = Box(np.array([[1.0]]), np.array([[2.0]]))
         with pytest.raises(ValueError, match="different lengths"):
-            _mul_sets([a, a], [b])
+            _mul_sets([a, a], [b, b, b])
+
+    def test_singleton_broadcasts(self):
+        # A residual Mul where one branch split (N sets) and the other stayed
+        # a single set broadcasts the singleton across the split pieces
+        # (A_i * g per piece); the McCormick product stays sound.
+        a1 = Box(np.array([[1.0]]), np.array([[2.0]]))
+        a2 = Box(np.array([[0.0]]), np.array([[1.0]]))
+        b = Box(np.array([[3.0]]), np.array([[4.0]]))
+        results = _mul_sets([a1, a2], [b])
+        assert len(results) == 2
+        np.testing.assert_allclose(results[0].lb, np.array([[3.0]]), atol=1e-10)
+        np.testing.assert_allclose(results[0].ub, np.array([[8.0]]), atol=1e-10)
+        np.testing.assert_allclose(results[1].lb, np.array([[0.0]]), atol=1e-10)
+        np.testing.assert_allclose(results[1].ub, np.array([[4.0]]), atol=1e-10)
 
 
 class TestMulTwoSetsZono:

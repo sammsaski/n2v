@@ -2104,11 +2104,25 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
     Returns:
         List of output sets
     """
+    # Residual branches can carry different set counts: one branch may split
+    # (exact-star ReLU -> N sets partitioning the input) while the other stays
+    # affine (a single set over the whole input, same predicate variables).
+    # Broadcast the singleton across the split pieces: for input-region piece
+    # A_i, the output is A_i + g, and the per-pair add below stays sound (exact
+    # when the predicate systems match, Minkowski-join otherwise). This only
+    # triggers where the old code raised (so it cannot regress an instance that
+    # already reached without error). A genuine N-vs-M (both split) mismatch is
+    # still unsupported and raises.
     if len(sets_a) != len(sets_b):
-        raise ValueError(
-            f"Cannot {op_name} set lists of different lengths: "
-            f"{len(sets_a)} vs {len(sets_b)}"
-        )
+        if len(sets_a) == 1:
+            sets_a = sets_a * len(sets_b)
+        elif len(sets_b) == 1:
+            sets_b = sets_b * len(sets_a)
+        else:
+            raise ValueError(
+                f"Cannot {op_name} set lists of different lengths: "
+                f"{len(sets_a)} vs {len(sets_b)}"
+            )
 
     output_sets = []
 
@@ -2211,11 +2225,21 @@ def _mul_sets(sets_a: List, sets_b: List) -> List:
     Returns:
         List of output sets
     """
+    # Broadcast a singleton branch across a split branch (see _add_sets): a
+    # bilinear Mul(f, g) where f split into N input-region pieces and g stayed
+    # affine (1 set) is, per piece, A_i * g over A_i's constraints — the
+    # McCormick relaxation below stays sound. Only triggers where the old code
+    # raised, so it cannot regress an instance that already reached.
     if len(sets_a) != len(sets_b):
-        raise ValueError(
-            f"Cannot multiply set lists of different lengths: "
-            f"{len(sets_a)} vs {len(sets_b)}"
-        )
+        if len(sets_a) == 1:
+            sets_a = sets_a * len(sets_b)
+        elif len(sets_b) == 1:
+            sets_b = sets_b * len(sets_a)
+        else:
+            raise ValueError(
+                f"Cannot multiply set lists of different lengths: "
+                f"{len(sets_a)} vs {len(sets_b)}"
+            )
 
     output_sets = []
 

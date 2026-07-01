@@ -83,6 +83,12 @@ BENCHMARK_CONFIGS = {
             ('approx', {}),
         ],
         'n_rand': 100,
+        # The default random+pgd's 500-step PGD leg burns the budget on the
+        # UNSAT instances (the SAT ones are found instantly by the random leg,
+        # A/B-verified: same 3/3 SATs, 0 regressions), starving the slow cGAN-
+        # generator reach. Bounded random+apgd (1x30) frees that time for reach.
+        'falsify_method': 'random+apgd',
+        'falsify_kwargs': {'n_restarts': 1, 'n_steps': 30},
     },
 
     'challenging_certified_training_2026': {
@@ -105,6 +111,15 @@ BENCHMARK_CONFIGS = {
         # Mirror relusplitter (relax-area 1.0); avoids the exact-star timeout.
         'reach_methods': [('approx', {'relax_factor': 1.0, 'relax_method': 'area'})],
         'n_rand': 100,
+        # Default 'random+pgd' (500 grad steps on 784-dim) burned ~94s finding
+        # no CE on these safe MNIST specs, starving the fast (~30s) sound reach
+        # -> timeout. Mirror the extended relusplitter config's bounded
+        # 'random+apgd' (1 restart / 30 steps): stronger-per-step AND cheaper,
+        # so the reach gets to run and the reach-solvable instances certify.
+        # random+apgd was gold-validated to be a superset of random+pgd's CEs
+        # on relusplitter (+2, no loss), so this cannot drop a SAT.
+        'falsify_method': 'random+apgd',
+        'falsify_kwargs': {'n_restarts': 1, 'n_steps': 30},
     },
 
     'cifar100_2024': {
@@ -200,22 +215,29 @@ BENCHMARK_CONFIGS = {
     },
 
     'soundnessbench': {
-        # SAT instances — planted/binarized counterexamples. Gradient-free Square
-        # (the 'strong' ensemble) cracks the planted CEs that random+pgd miss
-        # (validated 0->3/10; full-pipeline LIFT +2, REGRESSION 0). Sat-only, so
-        # the sequential 'strong' budget cannot cost a holds.
+        # SAT instances — planted/binarized counterexamples. Square (gradient-free)
+        # is what actually cracks the planted CEs (gradients are flat on binarized
+        # nets, so APGD is useless here — same reason sat_relu uses random+square).
+        # The old 'strong' cascade ran random->APGD->Square, and APGD's default
+        # budget consumed the clock on these heavy (~137ms/forward) nets BEFORE
+        # Square ran, so the whole pipeline timed out. Drop APGD (random+square):
+        # A/B-verified this keeps every SAT 'strong' found (0 regressions) at
+        # ~2.5x the speed, so Square runs within budget. n_rand held at 5000 (no
+        # coverage cut); n_iters=20000 mirrors sat_relu.
         'reach_methods': [('approx', {}), ('exact', {})],
         'n_rand': 5000,
-        'falsify_method': 'strong',
+        'falsify_method': 'random+square',
+        'falsify_kwargs': {'n_iters': 20000},
     },
 
     'soundnessbench_2026': {
-        # 2026 variant (was falling to DEFAULT: n_rand=100, random+pgd -> near-zero
-        # falsification). Mirror the 2025 config: deterministic reach + high n_rand
-        # + gradient-free 'strong' for the planted/binarized CEs.
+        # 2026 variant. Same fix as soundnessbench: random+square (drop the
+        # budget-eating, gradient-useless APGD) so Square runs on the planted CEs.
+        # A/B-verified 0 regressions vs 'strong', ~2.5x faster.
         'reach_methods': [('approx', {}), ('exact', {})],
         'n_rand': 5000,
-        'falsify_method': 'strong',
+        'falsify_method': 'random+square',
+        'falsify_kwargs': {'n_iters': 20000},
     },
 
     'tinyimagenet_2024': {
