@@ -79,14 +79,59 @@ def _compute_bounds_ibp(
         return _ibp_sequential(model, lb, ub, spatial_shape)
 
 
+def _hwc_flat_to_chw_flat(v: np.ndarray, height: int, width: int,
+                          channels: int) -> np.ndarray:
+    """Reorder a spatial vector from the ImageStar/ImageZono HWC ravel to the
+    NCHW (channel-major) ravel the IBP forward pass assumes.
+
+    ImageStar/ImageZono store their data (H, W, C) and ``estimate_ranges`` /
+    ``get_bounds`` ravel it in that HWC order. The IBP conv/pool/batchnorm
+    helpers, however, ``reshape`` their flat input to ``(C, H, W)`` (torch's
+    NCHW layout). Feeding an HWC-flat vector into a ``(C, H, W)`` reshape
+    silently scrambles the image (channels read as rows), so multi-channel
+    CNNs produce wrong — and unsound — precomputed bounds. Reorder up front."""
+    return v.reshape(height, width, channels).transpose(2, 0, 1).reshape(-1)
+
+
+def _record_spatial_bounds(lb: np.ndarray, ub: np.ndarray,
+                           shape: Optional[tuple]) -> Tuple[np.ndarray, np.ndarray]:
+    """Package (lb, ub) for a nonlinear layer so their row order matches the
+    Star the reach consumer builds.
+
+    The IBP pass carries NCHW (channel-major) flat vectors. A spatial ReLU in
+    the reach path runs on an ImageStar, which ``to_star()`` flattens in HWC
+    order; the precomputed bounds are matched positionally against those rows,
+    so a spatial (rank-3 ``(C, H, W)``) layer's bounds must be reordered
+    CHW->HWC. Flat layers (``shape is None``, e.g. after a flatten/Linear)
+    already agree and are passed through unchanged."""
+    if shape is not None and len(shape) == 3:
+        c, h, w = shape
+        lb = lb.reshape(c, h, w).transpose(1, 2, 0).reshape(-1)
+        ub = ub.reshape(c, h, w).transpose(1, 2, 0).reshape(-1)
+    return lb.reshape(-1, 1), ub.reshape(-1, 1)
+
+
 def _extract_bounds(input_set: Union[Star, Zono, Box, ImageStar, ImageZono]) -> Tuple[np.ndarray, np.ndarray]:
-    """Extract (lb, ub) numpy arrays from any input set type."""
+    """Extract (lb, ub) numpy arrays from any input set type, in the NCHW
+    (channel-major) order the IBP forward pass reshapes to. Spatial sets store
+    HWC, so their ranges are reordered to CHW here (see
+    :func:`_hwc_flat_to_chw_flat`)."""
     if isinstance(input_set, Box):
         return input_set.lb.flatten(), input_set.ub.flatten()
-    elif isinstance(input_set, (Star, ImageStar)):
+    elif isinstance(input_set, ImageStar):
+        lb, ub = input_set.estimate_ranges()
+        h, w, c = input_set.height, input_set.width, input_set.num_channels
+        return (_hwc_flat_to_chw_flat(lb.flatten(), h, w, c),
+                _hwc_flat_to_chw_flat(ub.flatten(), h, w, c))
+    elif isinstance(input_set, Star):
         lb, ub = input_set.estimate_ranges()
         return lb.flatten(), ub.flatten()
-    elif isinstance(input_set, (Zono, ImageZono)):
+    elif isinstance(input_set, ImageZono):
+        lb, ub = input_set.get_bounds()
+        h, w, c = input_set.height, input_set.width, input_set.num_channels
+        return (_hwc_flat_to_chw_flat(lb.flatten(), h, w, c),
+                _hwc_flat_to_chw_flat(ub.flatten(), h, w, c))
+    elif isinstance(input_set, Zono):
         lb, ub = input_set.get_bounds()
         return lb.flatten(), ub.flatten()
     else:
@@ -242,9 +287,10 @@ def _ibp_sequential(
         layers = [model]
 
     for i, layer in enumerate(layers):
-        # Record bounds BEFORE nonlinear layers
+        # Record bounds BEFORE nonlinear layers (reordered CHW->HWC for a
+        # spatial layer so they line up with the reach set's row order).
         if isinstance(layer, NONLINEAR_TYPES):
-            layer_bounds[i] = (lb.reshape(-1, 1), ub.reshape(-1, 1))
+            layer_bounds[i] = _record_spatial_bounds(lb, ub, spatial_shape)
 
         # Propagate
         lb, ub, spatial_shape = _ibp_propagate_layer(layer, lb, ub, spatial_shape)
@@ -381,10 +427,12 @@ def _ibp_graphmodule(
                 in_name, (lb, ub, spatial_shape))
             cur_trusted = node_trusted.get(in_name, True)
 
-            # Record bounds before nonlinear layers (only if trusted).
+            # Record bounds before nonlinear layers (only if trusted),
+            # reordered CHW->HWC for a spatial layer so they line up with the
+            # reach set's row order (ImageStar.to_star() is HWC).
             if isinstance(module, NONLINEAR_TYPES) and cur_trusted:
-                layer_bounds[node.name] = (
-                    cur_lb.reshape(-1, 1), cur_ub.reshape(-1, 1))
+                layer_bounds[node.name] = _record_spatial_bounds(
+                    cur_lb.reshape(-1), cur_ub.reshape(-1), cur_shape)
 
             # Propagate. Try ONNX graph ops first, then standard layers.
             module_type = type(module).__name__

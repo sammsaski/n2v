@@ -36,6 +36,7 @@ import gzip
 import logging
 import multiprocessing
 import os
+import re
 import shutil
 import signal
 import sys
@@ -177,9 +178,62 @@ def create_input_set(lb, ub, input_shape):
     return Star.from_bounds(lb, ub)
 
 
-def format_counterexample(input_vec, output_vec):
+def _v2_ce_meta(vnnlib_path):
+    """Declared I/O tensors of a VNNLIB 2.0 spec, in declaration order, for the
+    section-5.3 textual counterexample format: a list of ``(name, dtype,
+    dims)``. Returns ``None`` for a 1.0 spec (no ``(vnnlib-version ...)``
+    header), so the caller falls back to the legacy s-expr. Mirrors NNV's
+    ``i_vnnlib2_ce_meta`` regex so our witnesses are byte-compatible with what
+    the official 2.0 checker (``counterexamples_v2.py``) accepts."""
+    if not vnnlib_path:
+        return None
+    try:
+        with open(vnnlib_path) as f:
+            txt = f.read()
+    except Exception:  # noqa: BLE001
+        return None
+    if not re.search(r"\(\s*vnnlib-version", txt):
+        return None
+    meta = []
+    for m in re.finditer(
+            r"\(\s*declare-(?:input|output)\s+(\S+)\s+(\S+)\s+\[([0-9,\s]*)\]",
+            txt):
+        dims = m.group(3).strip()
+        shape = [int(d) for d in dims.split(",") if d.strip()] if dims else []
+        meta.append((m.group(1), m.group(2), shape))
+    return meta or None
+
+
+def _format_ce_v2(meta, input_vec, output_vec):
+    """VNNLIB 2.0 section-5.3 textual witness: for each declared tensor, a
+    ``name dtype [d0,d1,...]`` header then its C-order values one per line, in
+    declaration order (Y* blocks drawn from the output witness, others from the
+    input witness). The 1.0 ``(X_i v)`` s-expr is scored ``malformed_ce`` for a
+    2.0 spec, which is why our 2.0-track SAT witnesses came back invalid."""
+    out = []
+    xi = yi = 0
+    for name, dtype, shape in meta:
+        n = int(np.prod(shape)) if shape else 1
+        dimstr = ",".join(str(d) for d in shape) if shape else "1"
+        out.append(f"{name} {dtype} [{dimstr}]")
+        if name.upper().startswith("Y"):
+            blk = output_vec[yi:yi + n]; yi += n
+        else:
+            blk = input_vec[xi:xi + n]; xi += n
+        out.extend(format(float(v), ".16g") for v in blk)
+    return "\n".join(out)
+
+
+def format_counterexample(input_vec, output_vec, vnnlib_path=None):
+    """Emit the SAT witness in the format the grader expects for this spec's
+    VNNLIB version: the section-5.3 textual assignment format for 2.0 specs,
+    else the legacy ``((X_i v)...(Y_j v))`` s-expr for 1.0. The official 2.0
+    checker rejects a 1.0-format witness as ``malformed_ce`` and vice-versa."""
     input_vec = np.asarray(input_vec).flatten()
     output_vec = np.asarray(output_vec).flatten()
+    meta = _v2_ce_meta(vnnlib_path)
+    if meta:
+        return _format_ce_v2(meta, input_vec, output_vec)
     lines = [f"(X_{i}  {v})" for i, v in enumerate(input_vec)]
     lines += [f"(Y_{i}  {v})" for i, v in enumerate(output_vec)]
     return "(" + "\n".join(lines) + ")"
@@ -230,7 +284,7 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
     # op DAG, and prove robustness with backward linear bounds + refinement + α.
     if category and "vit" in category.lower():
         return verify_vit_instance(onnx_path, prop, get_input_shape(onnx_path),
-                                   category, t0, workers=workers)
+                                   category, t0, vnnlib_path, workers=workers)
 
     model = load_onnx(onnx_path)
     input_shape = get_input_shape(onnx_path)
@@ -292,7 +346,8 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
                     groups = _extract_halfspace_groups(pair["prop"])
                     if in_unsafe_region(y_ort, groups, tol=0.0):
                         return {"result": RESULT_SAT, "time": time.time() - t0,
-                                "counterexample": format_counterexample(cex[0], y_ort)}
+                                "counterexample": format_counterexample(
+                                    cex[0], y_ort, vnnlib_path)}
                     logger.warning("falsify CE rejected by onnxruntime re-check "
                                    "(onnx2torch divergence); not emitting sat")
                 except Exception as e:  # noqa: BLE001
@@ -332,7 +387,8 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
                                 return {"result": RESULT_SAT,
                                         "time": time.time() - t0,
                                         "counterexample":
-                                            format_counterexample(cx, y_ort)}
+                                            format_counterexample(
+                                                cx, y_ort, vnnlib_path)}
                         except Exception as e:  # noqa: BLE001
                             logger.warning("reach-SAT witness ORT re-validation "
                                            "error: %s", e)
@@ -430,7 +486,8 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
                 if np.all(np.isfinite(y_ort)) and \
                         evaluate_nonlinear(prop, x.ravel(), y_ort):
                     return {"result": RESULT_SAT, "time": time.time() - t0,
-                            "counterexample": format_counterexample(x, y_ort)}
+                            "counterexample": format_counterexample(
+                                x, y_ort, vnnlib_path)}
                 logger.warning("nonlinear CE rejected by onnxruntime re-check "
                                "(onnx2torch divergence / non-finite); not "
                                "emitting sat")
@@ -490,7 +547,8 @@ def _vit_pgd(md, lb, ub, group, rng, n_starts=8, steps=60):
     return np.asarray(outs)
 
 
-def verify_vit_instance(onnx_path, prop, input_shape, category, t0, workers=None):
+def verify_vit_instance(onnx_path, prop, input_shape, category, t0,
+                        vnnlib_path=None, workers=None):
     """Verify a ViT robustness instance LP-free (method translated from NNV ViTCrown, no NNV dep).
 
     SAT iff a falsifier (random + ViT-gradient PGD), re-validated on the RAW ONNX
@@ -528,7 +586,8 @@ def verify_vit_instance(onnx_path, prop, input_shape, category, t0, workers=None
         for i in range(X.shape[0]):
             if in_unsafe_region(Y[i], groups, tol=0.0):
                 return {"result": RESULT_SAT, "time": time.time() - t0,
-                        "counterexample": format_counterexample(X[i], Y[i])}
+                        "counterexample": format_counterexample(
+                            X[i], Y[i], vnnlib_path)}
 
     # Stage 2: LP-free CROWN reach. UNSAT iff every pair is provably safe.
     all_unsat = True
