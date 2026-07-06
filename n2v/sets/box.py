@@ -68,21 +68,33 @@ class Box:
         # Compute center
         self.center = 0.5 * (self.lb + self.ub)
 
-        # Compute generators (zonotope representation)
-        # Generator matrix: diagonal with half-widths, zero columns removed
-        vec = 0.5 * (self.ub - self.lb)
+        # Zonotope generators are built lazily (see the ``generators``
+        # property). Constructing a Box therefore stays O(dim) in memory:
+        # eagerly materialising the dense (dim, dim) diagonal here would be
+        # prohibitive for very high-dimensional input boxes (e.g. a flattened
+        # image, where dim can be ~10^5 and the diagonal ~10^10 entries) and
+        # is never needed by the sampling / probabilistic-reach paths, which
+        # consume only lb/ub/dim.
+        self._generators: Optional[np.ndarray] = None
 
-        try:
-            # Fast method: create diagonal matrix and remove zero columns
-            G = np.diag(vec.flatten())
-            non_zero_cols = np.any(G != 0, axis=0)
-            self.generators = G[:, non_zero_cols]
-        except MemoryError:
-            # Memory-efficient method for large sparse perturbations
-            non_zero_indices = np.where(vec.flatten() != 0)[0]
-            self.generators = np.zeros((self.dim, len(non_zero_indices)))
-            for i, idx in enumerate(non_zero_indices):
-                self.generators[idx, i] = vec[idx]
+    @property
+    def generators(self) -> np.ndarray:
+        """Zonotope generator matrix (diagonal half-widths), built lazily.
+
+        Shape ``(dim, n_nonzero)`` — the diagonal of per-dimension half-widths
+        with zero-width columns dropped. Built on first access and cached, and
+        constructed by scatter (never via a dense ``(dim, dim)`` intermediate),
+        so a Box over a degenerate/sparse perturbation stays cheap and the
+        common probabilistic-reach path (which never reads ``generators``) pays
+        nothing for it.
+        """
+        if self._generators is None:
+            vec = 0.5 * (self.ub - self.lb).flatten()
+            nz = np.nonzero(vec)[0]
+            G = np.zeros((self.dim, nz.shape[0]))
+            G[nz, np.arange(nz.shape[0])] = vec[nz]
+            self._generators = G
+        return self._generators
 
     def __repr__(self) -> str:
         return f"Box(dim={self.dim}, lb_range=[{self.lb.min():.3f}, {self.lb.max():.3f}], " \

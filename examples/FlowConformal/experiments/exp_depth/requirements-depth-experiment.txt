@@ -1,0 +1,24 @@
+# ============================================================================
+#  EXPERIMENT-ONLY DEPENDENCIES  —  NOT part of n2v's runtime dependencies.
+# ============================================================================
+#
+#  These packages are required ONLY to run the depth-estimation robustness
+#  experiment under this directory (examples/FlowConformal/experiments/exp_depth).
+#  They load the HuggingFace monocular-depth transformers that are also verified
+#  in the external `depth-verification` repository. n2v itself does NOT depend on
+#  them — the flow / conformal / PCA machinery works on any numpy callable.
+#
+#  >>> REMOVE THESE AFTER THE EXPERIMENT <<<
+#      pip uninstall -y transformers datasets
+#
+#  Do NOT copy these lines into n2v's top-level requirements / pyproject.
+#
+#  Everything else the experiment needs (torch, numpy, scipy, matplotlib,
+#  mpmath, pillow, timm) is already present in the n2v conda env.
+#
+#  Install (into the n2v env):
+#      pip install -r requirements-depth-experiment.txt
+# ----------------------------------------------------------------------------
+
+transformers>=4.40   # AutoModelForDepthEstimation: DepthAnything-V2, DPT-Hybrid-MiDaS, DPT-SwinV2
+datasets>=2.19       # only for the later full NYU/KITTI corpus download (population G(eps)); cached .npz frames need nothing
