@@ -57,6 +57,36 @@ def _big_M(S: Star, spec: LinearSpec) -> float:
     return float(np.max(base + spread)) + 1.0
 
 
+def _epigraph_system(S: Star, spec: LinearSpec, include_Cd: bool = True):
+    """Assemble the epigraph violation LP over variables ``[alpha, t]``:
+    ``min t  s.t.  GV alpha - t <= rhs ; [C alpha <= d] ; box ; |t| <= big-M``.
+    Returns ``(A, b, lb, ub, f)``. Single source of truth for the exact solver
+    (``augmented_violation_lp``) and the GPU witness (``violation_witness_gpu``).
+    Requires ``S.nVar > 0`` and finite predicate bounds.
+    """
+    c_out = S.V[:, 0]
+    V_out = S.V[:, 1:]
+    GV = spec.G @ V_out                       # (R, nVar)
+    rhs = spec.g - spec.G @ c_out             # (R,)
+    R = GV.shape[0]
+
+    A_rows = [np.hstack([GV, -np.ones((R, 1))])]
+    b_rows = [rhs]
+    if include_Cd and S.C.size > 0:
+        A_rows.append(np.hstack([S.C, np.zeros((S.C.shape[0], 1))]))
+        b_rows.append(S.d.flatten())
+    A = np.vstack(A_rows)
+    b = np.concatenate(b_rows)
+
+    M = _big_M(S, spec)
+    lb = np.concatenate([S.predicate_lb.flatten(), [-M]])
+    ub = np.concatenate([S.predicate_ub.flatten(), [M]])
+
+    f = np.zeros(S.nVar + 1)
+    f[-1] = 1.0  # minimize t
+    return A, b, lb, ub, f
+
+
 def augmented_violation_lp(
     S: Star,
     spec: LinearSpec,
@@ -89,18 +119,7 @@ def augmented_violation_lp(
         t = float(np.max(spec.margins(y)))
         return np.zeros(0), t
 
-    c_out = S.V[:, 0]
-    V_out = S.V[:, 1:]
-    GV = spec.G @ V_out                       # (R, nVar)
-    rhs = spec.g - spec.G @ c_out             # (R,)
-    R = GV.shape[0]
-
-    # Variables: [alpha (nVar), t]. Margin rows: GV alpha - t <= rhs.
-    A_rows = [np.hstack([GV, -np.ones((R, 1))])]
-    b_rows = [rhs]
-    if include_Cd and S.C.size > 0:
-        A_rows.append(np.hstack([S.C, np.zeros((S.C.shape[0], 1))]))
-        b_rows.append(S.d.flatten())
+    A, b, lb, ub, f = _epigraph_system(S, spec, include_Cd=include_Cd)
     if extra_A is not None and np.size(extra_A) > 0:
         extra_A = np.atleast_2d(np.asarray(extra_A, dtype=np.float64))
         extra_b = np.asarray(extra_b, dtype=np.float64).flatten()
@@ -108,17 +127,8 @@ def augmented_violation_lp(
             raise ValueError(
                 f"extra_A has {extra_A.shape[1]} columns, expected nVar={nVar}"
             )
-        A_rows.append(np.hstack([extra_A, np.zeros((extra_A.shape[0], 1))]))
-        b_rows.append(extra_b)
-    A = np.vstack(A_rows)
-    b = np.concatenate(b_rows)
-
-    M = _big_M(S, spec)
-    lb = np.concatenate([S.predicate_lb.flatten(), [-M]])
-    ub = np.concatenate([S.predicate_ub.flatten(), [M]])
-
-    f = np.zeros(nVar + 1)
-    f[-1] = 1.0  # minimize t
+        A = np.vstack([A, np.hstack([extra_A, np.zeros((extra_A.shape[0], 1))])])
+        b = np.concatenate([b, extra_b])
 
     x, _, status, _ = solve_lp(
         f=f, A=A, b=b, lb=lb, ub=ub, lp_solver=lp_solver, minimize=True
@@ -144,6 +154,96 @@ def violation_lp(
     return augmented_violation_lp(
         S, spec, include_Cd=include_Cd, lp_solver=lp_solver
     )
+
+
+def certified_prune_wave(stars: List[Star], spec: LinearSpec,
+                         max_iters: int = 300) -> List[bool]:
+    """Batched :func:`certified_prune` over a frontier wave: one population
+    GPU call for every star's per-row margin bounds (heterogeneous shapes
+    zero-padded — padded rows/columns/variables are inert under NS). Same
+    soundness contract as the scalar form; ``False`` = "could not prune".
+    """
+    from n2v.utils.lpsolver_gpu import solve_lp_population_gpu
+
+    G = np.asarray(spec.G, dtype=np.float64)
+    g = np.asarray(spec.g, dtype=np.float64).flatten()
+    k = G.shape[0]
+    out = [False] * len(stars)
+
+    idxs, mats = [], []
+    for i, S in enumerate(stars):
+        if S.nVar == 0:
+            # degenerate point: disjoint iff some unsafe row is violated at it
+            out[i] = bool(np.any(G @ S.V[:, 0] > g))
+            continue
+        if S.predicate_lb is None or S.predicate_ub is None:
+            continue                        # no finite box -> cannot certify here
+        idxs.append(i)
+        mats.append((S.C, S.d.flatten(), S.predicate_lb.flatten(),
+                     S.predicate_ub.flatten(), (G @ S.V[:, 1:]).T,
+                     g - G @ S.V[:, 0]))
+    if not idxs:
+        return out
+
+    B = len(idxs)
+    m_max = max(A.shape[0] for A, *_ in mats) or 1
+    n_max = max(A.shape[1] if A.size else lbv.size
+                for A, _, lbv, *_ in mats)
+    Ap = np.zeros((B, m_max, n_max))
+    bp = np.zeros((B, m_max))
+    lbp = np.zeros((B, n_max))
+    ubp = np.zeros((B, n_max))
+    Cp = np.zeros((B, n_max, k))
+    for j, (A, b, lbv, ubv, obj, _) in enumerate(mats):
+        mi, ni = (A.shape if A.size else (0, lbv.size))
+        if A.size:
+            Ap[j, :mi, :ni] = A
+            bp[j, :mi] = b
+        lbp[j, :lbv.size] = lbv
+        ubp[j, :ubv.size] = ubv
+        Cp[j, :obj.shape[0], :] = obj
+    lows = solve_lp_population_gpu(Ap, bp, lbp, ubp, Cp,
+                                   minimize_flags=[True] * k,
+                                   max_iters=max_iters, backend="grad")
+    for j, i in enumerate(idxs):
+        rhs = mats[j][5]
+        out[i] = bool(np.any(lows[j] > rhs))
+    return out
+
+
+def violation_witness_gpu(
+    S: Star, spec: LinearSpec, max_iters: int = 400,
+    lp_solver=LPSolver.DEFAULT,
+) -> Optional[Tuple[np.ndarray, float]]:
+    """Approximate faithful witness via GPU PDHG on the same epigraph LP.
+
+    Drop-in for ``violation_lp(S, spec, include_Cd=True)`` on the BaB hot path.
+    The returned ``alpha`` is box-feasible by construction and satisfies the
+    ``C alpha <= d`` rows only up to the solver's primal residual (dual-informed,
+    unlike a box corner); ``t`` is the EXACT max spec-row margin evaluated at
+    ``alpha`` (not the LP objective), so ``t <= 0`` still means "this concrete
+    point of the relaxation is in the unsafe region".
+
+    Soundness is untouched: the witness only proposes counterexample candidates
+    (always re-validated by an exact forward pass WITH an input-set membership
+    check -- see ``is_true_counterexample``) and informs the split score. Two
+    behavioral deltas vs the exact LP, both safe: (1) it cannot detect an empty
+    predicate polytope (never returns ``None`` for infeasibility) -- an empty
+    subtree may be expanded until its exact leaves, where ``verify_refine``'s
+    exact backstop prunes it; (2) the split score reads slightly perturbed
+    epsilons -- selection quality, never correctness. Falls back to the exact
+    LP (on ``lp_solver``) for degenerate stars or unbounded predicate boxes.
+    """
+    if S.nVar == 0 or S.predicate_lb is None or S.predicate_ub is None:
+        return violation_lp(S, spec, include_Cd=True, lp_solver=lp_solver)
+    from n2v.utils.lpsolver_gpu import solve_lp_primal_gpu
+
+    A, b, lb, ub, f = _epigraph_system(S, spec, include_Cd=True)
+    x = solve_lp_primal_gpu(f, A, b, lb, ub, max_iters=max_iters)
+    alpha = x[:S.nVar]
+    y = S.V[:, 0] + S.V[:, 1:] @ alpha
+    t = float(np.max(spec.margins(y)))
+    return alpha, t
 
 
 def binding_row(S: Star, spec: LinearSpec, alpha: np.ndarray) -> int:
@@ -222,8 +322,14 @@ def is_true_counterexample(
     forward, and test membership in the unsafe region.
 
     Returns ``(is_ce, x_in, y)``. The input components are the predicate prefix
-    ``alpha[:input_star.nVar]`` (the shared prefix property), so ``x_in`` lies in
-    the input set whenever ``alpha`` is feasible in P.
+    ``alpha[:input_star.nVar]`` (the shared prefix property).
+
+    Membership is CHECKED, not assumed: approximate witnesses
+    (``violation_witness_gpu``) are only box-feasible, so a SAT claim
+    additionally requires ``alpha``'s input components to satisfy the input
+    star's own box AND ``C alpha <= d`` rows exactly (zero tolerance, matching
+    the output test) -- an out-of-set "counterexample" is an invalid witness
+    that VNN-COMP replay would reject. Exact-LP witnesses pass this trivially.
 
     ``tol`` defaults to 0.0: a SAT claim requires the exact output to lie inside
     the (closed) unsafe region ``{margin <= 0}``. A positive tol would accept
@@ -233,7 +339,15 @@ def is_true_counterexample(
     import torch
 
     n_in = input_star.nVar
-    x_in = input_star.V[:, 0] + input_star.V[:, 1:] @ alpha[:n_in]
+    a_in = alpha[:n_in]
+    in_set = True
+    if input_star.predicate_lb is not None:
+        in_set &= bool(np.all(a_in >= input_star.predicate_lb.flatten()))
+    if input_star.predicate_ub is not None:
+        in_set &= bool(np.all(a_in <= input_star.predicate_ub.flatten()))
+    if input_star.C.size > 0:
+        in_set &= bool(np.all(input_star.C @ a_in <= input_star.d.flatten()))
+    x_in = input_star.V[:, 0] + input_star.V[:, 1:] @ a_in
     # Feed a batched (1, n_in) input so models with a leading nn.Flatten
     # (start_dim=1) forward correctly; squeeze the batch dim back off.
     with torch.no_grad():
@@ -243,4 +357,27 @@ def is_true_counterexample(
             .numpy()
             .flatten()
         )
-    return spec.is_unsafe(y, tol=tol), x_in, y
+    return in_set and spec.is_unsafe(y, tol=tol), x_in, y
+
+
+def certified_prune(S: Star, spec: LinearSpec, max_iters: int = 300) -> bool:
+    """Sound GPU prune: certify ``[[S]] ∩ {G y <= g} = ∅`` without an exact LP.
+
+    For each spec row ``i``, a Neumaier-Shcherbina-certified *lower* bound on
+    ``min_{alpha in P} G_i (c + V alpha)`` (the same NS-dual gradient engine as
+    ``bound_mode="dual_gpu"``) exceeding ``g_i`` proves every point of ``[[S]]``
+    violates row ``i``, so the unsafe conjunction is unsatisfiable -> prune.
+
+    Sound by construction (the certified bound is outward, so a prune implies
+    the exact LP would also prove emptiness). For single-row specs -- the whole
+    robustness family -- this is the exact emptiness condition up to bound
+    tightness; for multi-row specs it is sufficient-only (the box/polytope may
+    satisfy every row separately but not jointly), so a False here means
+    "could not prune", never "intersects". Falls back to False (no prune) when
+    the predicate box is unbounded (NS needs finite bounds) -- the caller's
+    exact machinery still applies downstream.
+
+    Thin wrapper over :func:`certified_prune_wave` (ONE implementation, so the
+    scalar and wave paths cannot drift -- degenerate/point stars included).
+    """
+    return certified_prune_wave([S], spec, max_iters=max_iters)[0]

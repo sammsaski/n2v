@@ -118,11 +118,12 @@ def test_nvar_zero_returns_center():
     reason="no CUDA",
 )
 @pytest.mark.parametrize("seed", [0, 1, 2])
-def test_lp_gpu_encloses_lp_cpu(seed):
+@pytest.mark.parametrize("backend", ["lp_gpu", "dual_gpu"])
+def test_gpu_backends_enclose_lp_cpu(seed, backend):
     """NS-certified GPU bounds must be OUTWARD of the exact CPU LP bounds."""
     S, _, _, _ = _star_with_constraints(seed)
     lb_cpu, ub_cpu = neuron_bounds(S, "lp_cpu")
-    lb_gpu, ub_gpu = neuron_bounds(S, "lp_gpu")
+    lb_gpu, ub_gpu = neuron_bounds(S, backend)
     # outward enclosure: lb_gpu <= lb_cpu, ub_gpu >= ub_cpu (within tiny tol)
     assert np.all(lb_gpu <= lb_cpu + 1e-5)
     assert np.all(ub_gpu >= ub_cpu - 1e-5)
@@ -137,15 +138,16 @@ def test_lp_gpu_encloses_lp_cpu(seed):
     reason="no CUDA",
 )
 @pytest.mark.parametrize("seed", [0, 1, 2])
-def test_prefilter_gpu_stays_sound(seed):
+@pytest.mark.parametrize("backend", ["lp_gpu", "dual_gpu"])
+def test_prefilter_gpu_stays_sound(seed, backend):
     """
-    The prefiltered lp_gpu path is a sound over-approximation: its bounds enclose
-    the EXACT range (so a neuron is never falsely stabilised). lp_gpu is not
-    bit-identical to full LP (batched PDHG is batch-composition-sensitive), but
-    soundness -- box-clipped NS still outward of the true range -- always holds.
+    The prefiltered GPU paths are a sound over-approximation: their bounds enclose
+    the EXACT range (so a neuron is never falsely stabilised). Neither is
+    bit-identical to full LP (first-order duals are batch-composition-sensitive),
+    but soundness -- box-clipped NS still outward of the true range -- always holds.
     """
     S, _, _, _ = _star_with_constraints(seed)
-    lb_pf, ub_pf = neuron_bounds(S, "lp_gpu", prefilter=True)
+    lb_pf, ub_pf = neuron_bounds(S, backend, prefilter=True)
     lb_exact, ub_exact = neuron_bounds(S, "lp_cpu", prefilter=False)   # exact HiGHS range
     assert np.all(lb_pf <= lb_exact + 1e-5), "GPU prefilter lb not outward of exact"
     assert np.all(ub_pf >= ub_exact - 1e-5), "GPU prefilter ub not outward of exact"

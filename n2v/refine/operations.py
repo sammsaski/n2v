@@ -31,7 +31,8 @@ import numpy as np
 
 from n2v.sets.star import Star
 from n2v.utils.lp_solver_enum import LPSolver
-from n2v.refine.reach_relaxed import Layer, relaxed_reach, resume_reach
+from n2v.refine.reach_relaxed import (Layer, relaxed_reach, resume_reach,
+                                      resume_reach_pair)
 from n2v.refine.selectors import Selector
 from n2v.refine.types import LinearSpec, NeuronMeta, Phase, Witness
 from n2v.refine.witness import preactivation
@@ -120,9 +121,13 @@ def split(
     use_incremental = (incremental and star.checkpoints is not None
                        and bound_mode not in ("zono", "zono_lp"))
 
+    fixed_pair = [{**fixed, key: phase} for phase in (wphase, other)]
+    if use_incremental and bound_mode == "dual_gpu":
+        # lockstep siblings: both children's per-layer OBBT batches merge into
+        # one population GPU call (sound; verdict-equivalent, see the docstring)
+        return resume_reach_pair(star, layers, fixed_pair, bound_mode, key.layer)
     children: List[Star] = []
-    for phase in (wphase, other):
-        child_fixed = {**fixed, key: phase}
+    for child_fixed in fixed_pair:
         if use_incremental:
             child = resume_reach(star, layers, child_fixed, bound_mode, key.layer)
         else:

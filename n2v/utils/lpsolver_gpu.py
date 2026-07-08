@@ -98,7 +98,9 @@ def solve_lp_batch_gpu(
     backend: str = "pdhg",
     max_iters: int = 2000,
     tol: float = 1e-6,
-) -> List[float]:
+    warm_duals: Optional[Sequence[Optional[np.ndarray]]] = None,
+    return_duals: bool = False,
+):
     """Solve a batch of LPs sharing ``A,b,lb,ub`` and return *certified* bounds.
 
     Same contract as :func:`n2v.utils.lpsolver.solve_lp_batch`: one bound per
@@ -112,9 +114,18 @@ def solve_lp_batch_gpu(
         lb, ub: Shared finite box bounds, length ``n``.
         minimize_flags: ``k`` booleans (True => minimize). Default all-minimize,
             matching ``solve_lp_batch``.
-        backend: ``"pdhg"`` (GPU first-order) or ``"cpu_ns"`` (HiGHS + NS, no GPU).
-        max_iters: PDHG iteration cap (``pdhg`` only).
+        backend: ``"pdhg"`` (GPU first-order saddle point), ``"grad"`` (GPU
+            projected-Adam descent on the NS dual itself, best-iterate kept), or
+            ``"cpu_ns"`` (HiGHS + NS, no GPU).
+        max_iters: iteration cap (``pdhg``/``grad``).
         tol: PDHG relative KKT-residual early-stop tolerance (``pdhg`` only).
+        warm_duals: optional per-objective dual warm starts (``grad`` only) —
+            length-``k`` sequence of arrays covering a PREFIX of the constraint
+            rows (zero-padded to ``m``; ``None`` entries start cold). Sound for
+            any values (clamped ``>= 0``); affects iterations-to-tightness only.
+        return_duals: if True return ``(bounds, duals)`` where ``duals`` is the
+            per-objective row-dual list actually certified — for caching and
+            warm-starting descendant solves.
 
     Returns:
         ``list[float]`` of certified bounds.
@@ -156,12 +167,25 @@ def solve_lp_batch_gpu(
                 objs, A_np, b_np, lb_np, ub_np, minimize_flags,
                 max_iters=max_iters, tol=tol,
             )
+        elif backend == "grad":
+            Y0 = None
+            if warm_duals is not None:
+                Y0 = np.zeros((m, k))
+                for i, w in enumerate(warm_duals):
+                    if w is not None and w.size > 0:
+                        r = min(w.size, m)
+                        Y0[:r, i] = np.clip(w[:r], 0.0, None)
+            duals = _grad_duals_gpu(
+                objs, A_np, b_np, lb_np, ub_np, minimize_flags,
+                max_iters=max_iters, Y0=Y0,
+            )
         elif backend == "cpu_ns":
             duals = _highs_duals_cpu(
                 objs, A_np, b_np, lb_np, ub_np, minimize_flags,
             )
         else:
-            raise ValueError(f"unknown backend {backend!r}; expected 'pdhg'|'cpu_ns'")
+            raise ValueError(
+                f"unknown backend {backend!r}; expected 'pdhg'|'grad'|'cpu_ns'")
 
     # Certify on CPU with the single audited float64 NS implementation. The dual
     # is small (k x m); the transfer/loop is negligible vs the PDHG iterations.
@@ -171,6 +195,8 @@ def solve_lp_batch_gpu(
         bd = ns_bound(objs[i], duals[i], A=A_np, b=b_np, lb=lb_np, ub=ub_np,
                       minimize=minimize_flags[i])
         out.append(float(bd))
+    if return_duals:
+        return out, duals
     return out
 
 
@@ -225,7 +251,8 @@ def _highs_duals_cpu(
 # --------------------------------------------------------------------------- #
 def _pdhg_duals_gpu(
     objs, A, b, lb, ub, minimize_flags, max_iters: int, tol: float,
-) -> List[np.ndarray]:
+    return_primal: bool = False,
+):
     """Batched primal-dual hybrid gradient -> approximate row duals (one per obj).
 
     Solves, for every objective at once, the minimization saddle point of
@@ -284,8 +311,90 @@ def _pdhg_duals_gpu(
 
         set_meta(pdhg_iters=it + 1, spectral_norm=float(L))
         Y_host = Y.double().cpu().numpy()                       # (m, k) float64
+        X_host = X.double().cpu().numpy() if return_primal else None  # (n, k)
 
-    return [Y_host[:, i] for i in range(k)]
+    duals = [Y_host[:, i] for i in range(k)]
+    if return_primal:
+        # box-feasible by construction (clamped every iteration); the A x <= b
+        # rows hold only up to the primal residual -- heuristic use only
+        return duals, X_host
+    return duals
+
+
+def solve_lp_primal_gpu(
+    f: np.ndarray,
+    A: np.ndarray,
+    b: np.ndarray,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    max_iters: int = 400,
+) -> np.ndarray:
+    """Approximate PRIMAL minimizer of ``min f^T x s.t. A x <= b, lb <= x <= ub``.
+
+    Single-objective PDHG (float32); returns the final primal iterate as
+    float64. The point is box-feasible **by construction** (clamped every
+    iteration) but satisfies ``A x <= b`` only up to the solver's primal
+    residual. NOT certified and never used for a verification decision -- this
+    exists for *witness/heuristic* consumers (counterexample candidates are
+    re-validated by an exact forward pass; split scores tolerate approximate
+    points). Every certified value in n2v still goes through the NS path.
+    Thin wrapper over :func:`_pdhg_duals_gpu` (``return_primal=True``) -- one
+    PDHG implementation, and the witness path keeps the early-stop check.
+    """
+    _, X = _pdhg_duals_gpu(
+        [np.asarray(f, dtype=np.float64)], np.asarray(A, dtype=np.float64),
+        np.asarray(b, dtype=np.float64).flatten(),
+        np.asarray(lb, dtype=np.float64).flatten(),
+        np.asarray(ub, dtype=np.float64).flatten(),
+        [True], max_iters=max_iters, tol=1e-6, return_primal=True,
+    )
+    return X[:, 0]
+
+
+# --------------------------------------------------------------------------- #
+# Backend: projected-Adam descent on the NS dual (best-iterate). float32 solve.
+# --------------------------------------------------------------------------- #
+def _grad_duals_gpu(
+    objs, A, b, lb, ub, minimize_flags, max_iters: int,
+    lrs=(1.0, 0.1, 0.01), lr_decay: float = 0.997,
+    Y0: Optional[np.ndarray] = None,
+):
+    """Batched projected-Adam descent on the NS dual -> best-iterate row duals.
+
+    The NS certificate value *is* the Lagrangian dual function of the
+    box-constrained LP: ``g(y) = b^T y + sum_j max(r_j lb_j, r_j ub_j)`` with
+    ``r = g_max - A^T y`` -- convex piecewise-linear in ``y >= 0`` with the
+    closed-form subgradient ``b - A x*(y)`` (``x*`` the box argmax of ``r``).
+    Descending ``g`` therefore optimizes the certified bound *directly*, and
+    because ``g`` is evaluated as a byproduct of the subgradient computation,
+    the per-column **best iterate** is tracked and returned -- a monotone
+    anytime bound, immune to the last-iterate oscillation that makes truncated
+    PDHG duals unreliable (T1a: PDHG last-iterate recovered as little as 0.7%
+    of the box->exact gap where this method recovered >= 93%).
+
+    A small learning-rate grid is folded into the batch axis (columns tiled
+    per lr); the best (lr, iterate) pair is selected per objective at the end.
+
+    ``Y0`` (optional, ``(m, k)``, clamped to ``>= 0``) warm-starts the descent —
+    e.g. a parent BaB node's duals on the shared constraint-row prefix. Any
+    ``Y0`` is sound (weak duality holds for every nonnegative dual); a good one
+    starts the certified bound near the parent's and saves iterations.
+
+    Thin wrapper over :func:`_grad_population_duals_gpu` with ``B = 1`` — ONE
+    optimizer implementation, so the shared-``A`` and population paths cannot
+    drift numerically.
+    """
+    C = np.stack([np.asarray(c, dtype=np.float64) for c in objs], axis=1)
+    Y = _grad_population_duals_gpu(
+        np.asarray(A, dtype=np.float64)[None],
+        np.asarray(b, dtype=np.float64).reshape(1, -1),
+        np.asarray(lb, dtype=np.float64).reshape(1, -1),
+        np.asarray(ub, dtype=np.float64).reshape(1, -1),
+        C[None], minimize_flags, max_iters=max_iters, lrs=lrs,
+        lr_decay=lr_decay,
+        Y0=None if Y0 is None else np.asarray(Y0, dtype=np.float64)[None],
+    )[0]
+    return [Y[:, i] for i in range(C.shape[1])]
 
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +409,10 @@ def solve_lp_population_gpu(
     minimize_flags: Sequence[bool],
     max_iters: int = 2000,
     tol: float = 1e-6,
-) -> np.ndarray:
+    backend: str = "pdhg",
+    Y0: Optional[np.ndarray] = None,
+    return_duals: bool = False,
+):
     """Certified bounds for a *population* of LPs, each with its own constraints.
 
     Solves ``B`` stars' bound LPs in a single 3D batched PDHG (one ``bmm`` per
@@ -315,9 +427,14 @@ def solve_lp_population_gpu(
         lb, ub: ``(B, n)`` per-star finite box bounds.
         C: ``(B, n, k)`` per-star objective coefficients.
         minimize_flags: length-``k`` booleans, shared across stars.
+        backend: ``"pdhg"`` (saddle-point, last-iterate dual) or ``"grad"``
+            (projected-Adam descent on the NS dual, best-iterate — preferred:
+            immune to PDHG's last-iterate oscillation).
+        Y0: optional ``(B, m, k)`` dual warm start (``grad`` only; clamped >= 0).
+        return_duals: if True return ``(bounds, Y)`` for caching/warm-starting.
 
     Returns:
-        ``(B, k)`` array of NS-certified bounds.
+        ``(B, k)`` array of NS-certified bounds (or ``(bounds, Y)``).
     """
     A = np.asarray(A, dtype=np.float64)
     b = np.asarray(b, dtype=np.float64)
@@ -327,11 +444,100 @@ def solve_lp_population_gpu(
     B, m, n = A.shape
     k = C.shape[2]
 
-    Y = _pdhg_population_duals_gpu(
-        A, b, lb, ub, C, minimize_flags, max_iters=max_iters, tol=tol,
-    )
+    if backend == "grad":
+        Y = _grad_population_duals_gpu(
+            A, b, lb, ub, C, minimize_flags, max_iters=max_iters, Y0=Y0,
+        )
+    elif backend == "pdhg":
+        Y = _pdhg_population_duals_gpu(
+            A, b, lb, ub, C, minimize_flags, max_iters=max_iters, tol=tol,
+        )
+    else:
+        raise ValueError(f"unknown backend {backend!r}; expected 'pdhg'|'grad'")
     count("n_gpu_lp_solves", B * k)
-    return ns_bounds_population(C, Y, A, b, lb, ub, minimize_flags)
+    bounds = ns_bounds_population(C, Y, A, b, lb, ub, minimize_flags)
+    if return_duals:
+        return bounds, Y
+    return bounds
+
+
+def _grad_population_duals_gpu(
+    A, b, lb, ub, C, minimize_flags, max_iters: int,
+    lrs=(1.0, 0.1, 0.01), lr_decay: float = 0.997,
+    Y0: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Population form of :func:`_grad_duals_gpu`: projected-Adam descent on the
+    per-(star, objective) NS dual, best iterate kept, lr grid folded into the
+    objective axis. Padded rows (zero ``A`` row, zero ``b``) and padded
+    objective columns (zero ``C`` column) are inert. Returns ``(B, m, k)``.
+    """
+    torch = _torch_mod()
+    dev = torch.device("cuda")
+    f32 = torch.float32
+    B, m, n = A.shape
+    k = C.shape[2]
+    L = len(lrs)
+
+    sign = np.where(np.asarray(minimize_flags, dtype=bool), -1.0, 1.0)
+    G = (C * sign[None, None, :]).astype(np.float32)             # (B, n, k) max-sense
+
+    with region("grad_population_solve", n_stars=B, n_objectives=k,
+                n_constraints=m, n_vars=n), _cuda_timed():
+        At = torch.tensor(A, dtype=f32, device=dev)              # (B, m, n)
+        AtT = At.transpose(1, 2).contiguous()                    # (B, n, m)
+        bt = torch.tensor(b, dtype=f32, device=dev)              # (B, m)
+        lbt = torch.tensor(lb, dtype=f32, device=dev).unsqueeze(2)  # (B, n, 1)
+        ubt = torch.tensor(ub, dtype=f32, device=dev).unsqueeze(2)
+        # upload once, expand the lr grid ON DEVICE (no host-side tile / extra
+        # PCIe traffic for byte-identical slots)
+        Gt = torch.tensor(G, device=dev).repeat(1, 1, L)         # (B, n, kL)
+        lr = torch.tensor(np.repeat(np.asarray(lrs, np.float64), k),
+                          dtype=f32, device=dev)                 # (kL,)
+
+        if Y0 is None:
+            Y = torch.zeros((B, m, k * L), dtype=f32, device=dev)
+        else:
+            Y = (torch.tensor(np.asarray(Y0, dtype=np.float32), device=dev)
+                 .clamp_min(0.0).repeat(1, 1, L))
+        mom = torch.zeros_like(Y)
+        vel = torch.zeros_like(Y)
+        best_f = torch.full((B, k * L), float("inf"), dtype=f32, device=dev)
+        best_Y = Y.clone()
+        b1, b2, eps = 0.9, 0.999, 1e-8
+
+        def value_and_xstar(Y):
+            R = Gt - torch.bmm(AtT, Y)                           # (B, n, kL)
+            Xs = torch.where(R > 0, ubt, lbt)
+            f = torch.einsum("bm,bmk->bk", bt, Y) + (R * Xs).sum(1)
+            return f, Xs
+
+        for t in range(max_iters):
+            f, Xs = value_and_xstar(Y)
+            imp = f < best_f                                     # (B, kL)
+            best_f = torch.where(imp, f, best_f)
+            mask = imp.unsqueeze(1)                              # (B, 1, kL)
+            best_Y = torch.where(mask, Y, best_Y)
+            grad = bt.unsqueeze(2) - torch.bmm(At, Xs)           # (B, m, kL)
+            mom = b1 * mom + (1 - b1) * grad
+            vel = b2 * vel + (1 - b2) * grad * grad
+            step = (mom / (1 - b1 ** (t + 1))) / (
+                (vel / (1 - b2 ** (t + 1))).sqrt() + eps)
+            Y = (Y - lr * (lr_decay ** t) * step).clamp_min(0.0)
+
+        f, _ = value_and_xstar(Y)
+        imp = f < best_f
+        best_f = torch.where(imp, f, best_f)
+        best_Y = torch.where(imp.unsqueeze(1), Y, best_Y)
+
+        pick = best_f.view(B, L, k).argmin(1)                    # (B, k)
+        idx = pick * k + torch.arange(k, device=dev).unsqueeze(0)  # (B, k)
+        Yb = torch.gather(best_Y, 2, idx.unsqueeze(1).expand(B, m, k))
+        set_meta(grad_iters=max_iters, lr_grid=L)
+        # transfer float32 (half the D2H bytes); the NS certificate casts to
+        # float64 on the host itself, so precision of the BOUND is unaffected
+        # (any dual is valid -- dtype only perturbs which dual we certify)
+        Y_host = Yb.cpu().numpy()                                # (B, m, k) f32
+    return Y_host
 
 
 def _pdhg_population_duals_gpu(
@@ -420,4 +626,5 @@ def _spectral_norm(At, torch, iters: int = 30) -> float:
     return float(torch.sqrt(s).item())
 
 
-__all__ = ["solve_lp_batch_gpu", "solve_lp_population_gpu", "gpu_available"]
+__all__ = ["solve_lp_batch_gpu", "solve_lp_population_gpu", "solve_lp_primal_gpu",
+           "gpu_available"]
