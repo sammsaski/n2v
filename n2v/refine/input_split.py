@@ -332,3 +332,157 @@ def verify_refine_input_parallel(
 
     final = Status.UNKNOWN if inconclusive else Status.UNSAT
     return RefineResult(final, nodes, max_depth)
+
+
+def verify_refine_input_crown(
+    input_star: Star,
+    model,
+    spec: LinearSpec,
+    *,
+    layers=None,
+    node_budget: int = 2_000_000,
+    time_budget: Optional[float] = None,
+    min_width: float = 1e-6,
+    wave: int = 1024,
+    device: str = "cpu",
+    row_rule: str = "argmax",
+) -> RefineResult:
+    """Input-space BaB with batched-CROWN bounds — the cheap-bounds-in-bulk
+    recipe the low-input-dimension regime rewards (what alpha-beta-CROWN runs
+    below ~20 inputs), natively in this engine.
+
+    Per iteration a WAVE of input sub-boxes is processed with no LPs at all:
+    one batched CROWN pass bounds every box's spec margins in closed form with
+    last-layer elision (prune), every box's driving-row vertex is checked by
+    one batched EXACT forward pass (SAT), and survivors bisect on the
+    CROWN-smear dimension (vectorized; children pushed as one chunk).
+
+    Soundness mirrors the other drivers: a box is pruned only when a sound
+    (CROWN, float64) bound proves every point violates some unsafe-region row;
+    SAT requires an exact forward pass into the closed unsafe region at a
+    point verified to be an EXACT member of the input star (zero tolerance,
+    box AND C/d — solver-tolerance membership is not accepted; candidates on
+    non-invertible input maps are discarded rather than trusted); a box that
+    cannot be split further degrades the verdict to UNKNOWN, never a false
+    UNSAT. The search runs over the input star's bounding box, which
+    over-approximates constrained input sets (sound on the UNSAT side; the
+    LP-grade drivers may be needed to DECIDE genuinely constrained inputs).
+
+    ``time_budget`` is checked per wave: wall clock can overshoot by at most
+    one wave's processing (~fraction of a second at default sizes);
+    ``node_budget`` is exact (waves shrink to the remaining budget).
+    """
+    import torch
+
+    from n2v.refine.crown_bounds import CrownBatch, prepare_layers
+
+    if layers is None:
+        layers = extract_layers(model)
+    prepared = prepare_layers(layers, device=device)
+    model_device = next(model.parameters()).device
+
+    G = np.asarray(spec.G, dtype=np.float64)
+    g = np.asarray(spec.g, dtype=np.float64).flatten()
+    lb0, ub0 = (b.flatten() for b in input_star.estimate_ranges())
+    n_in = lb0.size
+
+    # exact zero-tolerance membership (SAT gate): recover alpha for diagonal
+    # input maps (Star.from_bounds and friends); non-diagonal maps cannot be
+    # inverted pointwise, so their candidates are discarded (stay sound).
+    c_in = input_star.V[:, 0]
+    V_in = input_star.V[:, 1:]
+    diag = np.diag(V_in).copy() if V_in.shape[0] == V_in.shape[1] else None
+    if diag is not None and not np.array_equal(V_in, np.diag(diag)):
+        diag = None
+
+    def _exact_member(x: np.ndarray) -> bool:
+        if diag is None:
+            return False
+        alpha = np.zeros(n_in)
+        nz = diag != 0.0
+        alpha[nz] = (x[nz] - c_in[nz]) / diag[nz]
+        if np.any(x[~nz] != c_in[~nz]):
+            return False
+        if input_star.predicate_lb is not None and np.any(
+                alpha < input_star.predicate_lb.flatten()):
+            return False
+        if input_star.predicate_ub is not None and np.any(
+                alpha > input_star.predicate_ub.flatten()):
+            return False
+        if input_star.C.size > 0 and np.any(
+                input_star.C @ alpha > input_star.d.flatten()):
+            return False
+        return True
+
+    # chunked frontier: [(LB (K, n), UB (K, n), depth (K,))] — one chunk per
+    # producing wave; avoids per-node tuple objects at ~10^6-node scale
+    chunks: List[Tuple[np.ndarray, np.ndarray, np.ndarray]] = [
+        (lb0[None, :], ub0[None, :], np.zeros(1, dtype=np.int64))]
+    n_pending = 1
+    nodes = 0
+    max_depth = 0
+    inconclusive = False
+    start = time.perf_counter()
+
+    while n_pending:
+        if nodes >= node_budget or (
+                time_budget is not None
+                and time.perf_counter() - start > time_budget):
+            return RefineResult(Status.UNKNOWN, nodes, max_depth)
+        take = min(wave, n_pending, node_budget - nodes)
+        got, parts = 0, []
+        while got < take:
+            LBc, UBc, Dc = chunks.pop()
+            if LBc.shape[0] > take - got:
+                keep = LBc.shape[0] - (take - got)
+                chunks.append((LBc[:keep], UBc[:keep], Dc[:keep]))
+                LBc, UBc, Dc = LBc[keep:], UBc[keep:], Dc[keep:]
+            parts.append((LBc, UBc, Dc))
+            got += LBc.shape[0]
+        LB = np.concatenate([p[0] for p in parts])
+        UB = np.concatenate([p[1] for p in parts])
+        DEPTH = np.concatenate([p[2] for p in parts])
+        n_pending -= got
+        nodes += got
+        max_depth = max(max_depth, int(DEPTH.max()))
+
+        cb = CrownBatch(prepared, LB, UB, device=device)
+        margin_lo, vertices, smear = cb.margin_report(G, g, row_rule=row_rule)
+        undecided = np.flatnonzero(~(margin_lo > 0.0).any(axis=1))
+
+        if undecided.size:
+            # batched EXACT forward on every undecided box's candidate vertex
+            X = vertices[undecided]
+            with torch.no_grad():
+                Y = model(torch.as_tensor(X, dtype=torch.float64)
+                          .to(model_device)).cpu().numpy()
+            hits = np.flatnonzero((G @ Y.T - g[:, None] <= 0.0).all(axis=0))
+            for h in hits:
+                x = X[int(h)]
+                if _exact_member(x):
+                    return RefineResult(Status.SAT, nodes, max_depth,
+                                        counterexample_x=x)
+
+            # vectorized bisection of every undecided box on its smear dim
+            lb_u, ub_u = LB[undecided], UB[undecided]
+            width = ub_u - lb_u
+            eligible = width > min_width
+            splittable = eligible.any(axis=1)
+            if not splittable.all():
+                inconclusive = True          # sliver boxes: stay sound
+            if splittable.any():
+                lb_s, ub_s = lb_u[splittable], ub_u[splittable]
+                d = np.where(eligible[splittable], smear[undecided][splittable],
+                             -np.inf).argmax(axis=1)
+                rows = np.arange(d.size)
+                mid = 0.5 * (lb_s[rows, d] + ub_s[rows, d])
+                ub_a = ub_s.copy(); ub_a[rows, d] = mid
+                lb_b = lb_s.copy(); lb_b[rows, d] = mid
+                child_depth = DEPTH[undecided][splittable] + 1
+                chunks.append((np.concatenate([lb_s, lb_b]),
+                               np.concatenate([ub_a, ub_s]),
+                               np.concatenate([child_depth, child_depth])))
+                n_pending += 2 * d.size
+
+    final = Status.UNKNOWN if inconclusive else Status.UNSAT
+    return RefineResult(final, nodes, max_depth)
