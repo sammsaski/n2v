@@ -3,11 +3,11 @@ Plot FairN2V Results
 Generates figures and LaTeX tables from verification CSV results.
 Outputs:
     (1) LaTeX table for counterfactual fairness
-    (2) Combined individual fairness area plot (smooth lines with filled regions)
+    (2) Combined individual fairness stacked area plot
     (3) LaTeX table for timing results (separated by fairness type)
 
-This script can be run standalone or called from run_fairn2v.py.
-Standalone: looks in the most recent results/<ts>/subdir.
+This script can be run standalone or called from run_individual_fairness.py.
+Standalone: looks in the most recent results/individual_fairness/<ts>/ subdir.
 Runner-driven: uses `config.output_dir` from caller workspace.
 """
 
@@ -15,6 +15,8 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')  # headless: write files, no display
 import matplotlib.pyplot as plt
 
 
@@ -39,15 +41,14 @@ def _print_table(headers, rows):
 
 
 def main(config=None):
-    ## Setup
     if config is None:
-        # Standalone: pick the most recent results/<ts>/ subdir if present.
-        script_dir = Path(__file__).resolve().parent
-        results_root = script_dir / 'results'
+        # Standalone: pick the most recent results/individual_fairness/<ts>/ subdir.
+        # results/ lives in the FairN2V dir, one level up from this script.
+        results_root = Path(__file__).resolve().parent.parent / 'results' / 'individual_fairness'
         subdirs = [d for d in results_root.iterdir() if d.is_dir()]
         if not subdirs:
             raise FileNotFoundError(
-                f"No results subdir found under {results_root}. Run adult_verify.py first.")
+                f"No results subdir found under {results_root}. Run verify_individual.py first.")
         config = {
             'output_dir': max(subdirs, key=lambda d: d.stat().st_mtime),
             'save_png': True,
@@ -56,17 +57,15 @@ def main(config=None):
 
     results_dir = config['output_dir']
 
-    # Find the CSV files in the results directory
     counterfactual_files = list(results_dir.glob('counterfactual_*.csv'))
     individual_files = list(results_dir.glob('individual_*.csv'))
     timing_files = list(results_dir.glob('timing_*.csv'))
 
-    # Check if files exist
     if not counterfactual_files or not individual_files or not timing_files:
         raise FileNotFoundError(
-            f"CSV files not found in {results_dir}. Please run adult_verify.py first.")
+            f"CSV files not found in {results_dir}. Please run verify_individual.py first.")
 
-    # Get the most recent file of each family (sorted by modification time)
+    # Most recent file of each family
     csv_counterfactual = max(counterfactual_files, key=lambda p: p.stat().st_mtime)
     csv_individual = max(individual_files, key=lambda p: p.stat().st_mtime)
     csv_timing = max(timing_files, key=lambda p: p.stat().st_mtime)
@@ -76,31 +75,34 @@ def main(config=None):
     print(f"  {csv_individual}")
     print(f"  {csv_timing}")
 
-    ## Load CSV Data
-    # Counterfactual fairness data
     counterfactual_data = pd.read_csv(csv_counterfactual)
-
-    # Individual fairness data
     individual_data = pd.read_csv(csv_individual)
-
-    # Timing data
     timing_data = pd.read_csv(csv_timing)
 
-    ## Figure Settings
-    # Professional color scheme
     color_fair = '#2ecc71'
     color_unfair = '#e74c3c'
 
-    # Get unique models
     models = sorted(individual_data['Model'].unique())
 
-    # Model display names (fuller titles for figures/tables)
-    # Based on actual architectures:
-    # AC-1: 13→16→8→2 (~350 params) - Small
-    # AC-3: 13→50→2 (~750 params) - Medium
+    # Fuller titles for figures/tables, one per model across every dataset
+    # profile; models not listed fall back to their raw id. ACD-* are the
+    # debiased counterparts of the same-numbered AC-* nets.
     model_display_names = {
         'AC-1': 'Adult Census - Small Model',
         'AC-3': 'Adult Census - Medium Model',
+        'AC-4': 'Adult Census - Large Model',
+        'ACD-1': 'Adult Census (Debiased) - Small Model',
+        'ACD-3': 'Adult Census (Debiased) - Medium Model',
+        'ACD-4': 'Adult Census (Debiased) - Large Model',
+        'GC-1': 'German Credit - Model 1',
+        'GC-2': 'German Credit - Model 2',
+        'GC-3': 'German Credit - Model 3',
+        'BM-5': 'Bank Marketing - Model 5',
+        'BM-6': 'Bank Marketing - Model 6',
+        'BM-7': 'Bank Marketing - Model 7',
+        'FT-1': 'Folktables Income - Model 1',
+        'FT-2': 'Folktables Income - Model 2',
+        'FT-3': 'Folktables Income - Model 3',
     }
 
     ## LaTeX Table 1: Counterfactual Fairness (with timing)
@@ -120,9 +122,7 @@ def main(config=None):
 
         for _, row in counterfactual_data.iterrows():
             model_name = row['Model']
-            # Use display name if available
             display_name = model_display_names.get(model_name, model_name)
-            # Find corresponding timing (epsilon = 0)
             timing_idx = (timing_data['Model'] == model_name) & (timing_data['Epsilon'] == 0)
             if timing_idx.any():
                 avg_time = timing_data.loc[timing_idx, 'AvgTimePerSample'].iloc[0]
@@ -150,7 +150,7 @@ def main(config=None):
     print(" ")
     print(f"Saved: {latex_cf_filename}")
 
-    ## Figure: Combined Individual Fairness (Stacked Area Plot - Professional Style)
+    ## Figure: Combined Individual Fairness (stacked area plot)
     n_models = len(models)
     fig, axes = plt.subplots(1, n_models, figsize=(6 * n_models, 5),
                              num='Individual Fairness - All Models')
@@ -161,85 +161,66 @@ def main(config=None):
     for m, model_name in enumerate(models):
         ax = axes[m]
 
-        # Filter data for this model
         model_data = individual_data[individual_data['Model'] == model_name]
-
-        # Sort by epsilon
         model_data = model_data.sort_values('Epsilon')
 
-        # Extract values
         epsilons = model_data['Epsilon'].values
         fair_pct = model_data['FairPercent'].values
         unfair_pct = model_data['UnfairPercent'].values
-        n_eps = len(epsilons)
 
         # Position points at their true epsilon values (proportional x-axis),
         # so horizontal gaps reflect the real perturbation-size differences.
         x = np.asarray(epsilons, dtype=float)
 
-        # Stacked area layers (bottom to top: fair, then unfair)
-        y1 = fair_pct         # Bottom layer: Fair
-        y2 = y1 + unfair_pct  # Top layer: Unfair (should sum to 100)
+        # Stacked area layers, bottom to top: fair, then unfair. Any unknown
+        # share (post-timeout samples) is the unfilled gap up to 100.
+        y1 = fair_pct
+        y2 = y1 + unfair_pct
 
-        # Fill area for Fair (bottom, from 0 to y1)
         ax.fill_between(x, 0, y1, color=color_fair, alpha=0.9, edgecolor='none',
                         label='Fair')
-
-        # Fill area for Unfair (top, from y1 to y2)
         ax.fill_between(x, y1, y2, color=color_unfair, alpha=0.9, edgecolor='none',
                         label='Unfair')
+        ax.plot(x, y1, 'w-', linewidth=1.5)  # white edge between the areas
 
-        # Add white edge line between areas for clarity
-        ax.plot(x, y1, 'w-', linewidth=1.5)
-
-        # Labels and formatting with bold fonts and larger size
         ax.set_xlabel(r'Perturbation Level ($\epsilon$)', fontweight='bold', fontsize=12)
         ax.set_ylabel('Percentage (%)', fontweight='bold', fontsize=12)
-
-        # Use full display name for title
         display_title = model_display_names.get(model_name, model_name)
         ax.set_title(display_title, fontweight='bold', fontsize=14)
 
-        # Tick at each true epsilon value
         ax.set_xticks(x)
         eps_labels = [f'{e:.2f}' for e in epsilons]
         ax.set_xticklabels(eps_labels)
 
-        # Axis limits: small proportional padding so end points aren't on the spines
+        # Small proportional padding so end points aren't on the spines
         ax.set_ylim(0, 100)
         pad = (x.max() - x.min()) * 0.03 if x.max() > x.min() else 0.01
         ax.set_xlim(x.min() - pad, x.max() + pad)
 
-        # Professional grid styling
         ax.grid(True, linestyle='--', alpha=0.3)
-        ax.set_axisbelow(False)  # Grid on top
+        ax.set_axisbelow(False)  # grid on top
 
-        # Add legend only to the last subplot
-        if m == n_models - 1:
-            # Labels come from the fills (Fair drawn first, then Unfair)
+        if m == n_models - 1:  # legend only on the last subplot
             ax.legend(loc='upper right', prop={'weight': 'bold'}, frameon=True)
 
-    # Adjust layout
     fig.tight_layout()
     fig.patch.set_facecolor('white')
 
-    # Save combined figure with high resolution
     if config['save_png']:
         fig.savefig(results_dir / 'individual_fairness_combined.png',
                     dpi=300, facecolor='white')
     if config['save_pdf']:
         fig.savefig(results_dir / 'individual_fairness_combined.pdf',
                     bbox_inches='tight', facecolor='white')
+    plt.close(fig)
     print("Saved: individual_fairness_combined.png/pdf")
-    
-    ## LaTeX Table 2: Individual Fairness Timing (Horizontal Layout)
-    # Epsilon values as columns, models as rows
+
+    ## LaTeX Table 2: Individual Fairness Timing (epsilon as columns, models as rows)
     print(" ")
     print("======= INDIVIDUAL FAIRNESS TIMING (seconds per sample) ==========")
 
     latex_timing_filename = results_dir / 'timing_table.tex'
     with open(latex_timing_filename, 'w', encoding='utf-8') as file:
-        # Get unique epsilon values for individual fairness (epsilon > 0)
         individual_timing = timing_data[timing_data['Epsilon'] > 0]
         epsilons_unique = np.unique(individual_timing['Epsilon'].values)
         n_eps = len(epsilons_unique)
@@ -249,31 +230,26 @@ def main(config=None):
         file.write(r'\caption{Individual Fairness Verification Timing (seconds per sample)}' + '\n')
         file.write(r'\label{tab:individual_timing}' + '\n')
 
-        # Create column format with spacing: l for model, then c with padding for each epsilon
+        # Column format: l for model, then a padded c per epsilon
         col_format = 'l'
         for _ in range(n_eps):
             col_format += r'@{\hskip 8pt}c'
         file.write(r'\begin{tabular}{' + col_format + '}' + '\n')
         file.write(r'\toprule' + '\n')
 
-        # Two-row header: first row spans epsilon columns with label
+        # Two-row header: epsilon-spanning label, then the epsilon values
         file.write(rf' & \multicolumn{{{n_eps}}}{{c}}{{Perturbation Level ($\epsilon$)}} \\' + '\n')
         file.write(rf'\cmidrule(l){{2-{n_eps + 1}}}' + '\n')
-
-        # Second header row with just epsilon values
         header = 'Model'
         for eps_val in epsilons_unique:
             header += f' & {eps_val:.2f}'
         file.write(header + r' \\' + '\n')
         file.write(r'\midrule' + '\n')
 
-        # Data rows (one per model) with full display names
         for model_name in models:
             display_name = model_display_names.get(model_name, model_name)
             line = display_name
-
             for eps_val in epsilons_unique:
-                # Find timing for this model and epsilon
                 idx = ((individual_timing['Model'] == model_name)
                        & (individual_timing['Epsilon'] == eps_val))
                 if idx.any():
@@ -281,7 +257,6 @@ def main(config=None):
                     line += f' & {avg_time:.4f}'
                 else:
                     line += ' & --'
-
             file.write(line + r' \\' + '\n')
 
         file.write(r'\bottomrule' + '\n')
@@ -306,9 +281,8 @@ def main(config=None):
     print(" ")
     print(f"Saved: {latex_timing_filename}")
 
-    ## Summary
     print(" ")
-    print("======= FairNNV PLOTTING COMPLETE ==========")
+    print("======= FairN2V PLOTTING COMPLETE ==========")
     print(f"Generated outputs in {results_dir}:")
     print("  1. counterfactual_table.tex (LaTeX table)")
     print("  2. individual_fairness_combined.png/pdf (Area plot)")
