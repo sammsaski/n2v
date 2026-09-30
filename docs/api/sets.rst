@@ -52,6 +52,13 @@ Octatope
    :members:
    :show-inheritance:
 
+GraphStar
+---------
+
+.. autoclass:: n2v.sets.GraphStar
+   :members:
+   :show-inheritance:
+
 HalfSpace
 ---------
 

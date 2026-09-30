@@ -16,14 +16,14 @@ API Reference
       :class-card: sd-border-0 sd-shadow-sm
 
       Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope,
-      HalfSpace, ProbabilisticBox
+      GraphStar, HalfSpace, ProbabilisticBox
 
    .. grid-item-card:: Neural Network
       :link: neural-network
       :link-type: doc
       :class-card: sd-border-0 sd-shadow-sm
 
-      ``NeuralNetwork`` class for reachability analysis
+      ``NeuralNetwork`` and ``GraphNeuralNetwork`` for reachability analysis
 
    .. grid-item-card:: Layer Operations
       :link: layer-ops

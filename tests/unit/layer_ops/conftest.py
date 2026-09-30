@@ -4,7 +4,7 @@ import pytest
 import numpy as np
 import torch
 import torch.nn as nn
-from n2v.sets import Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope
+from n2v.sets import Star, Zono, Box, ImageStar, ImageZono, Hexatope, Octatope, GraphStar
 
 
 # ============================================================================
@@ -57,6 +57,23 @@ def simple_octatope():
     lb = np.array([[0.0], [0.0], [0.0]])
     ub = np.array([[1.0], [1.0], [1.0]])
     return Octatope.from_bounds(lb, ub)
+
+
+@pytest.fixture
+def simple_graph_star():
+    """Create a small 4-node, 3-feature GraphStar with a unit perturbation."""
+    rng = np.random.default_rng(0)
+    center = rng.uniform(-1.0, 1.0, size=(4, 3))
+    eps = 0.1
+    adjacency = np.array(
+        [
+            [1.0, 1.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+        ]
+    )
+    return GraphStar.from_bounds(center - eps, center + eps, adjacency=adjacency)
 
 
 @pytest.fixture

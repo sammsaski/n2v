@@ -6,6 +6,10 @@ This directory contains the complete test suite for the N2V (Neural Network Veri
 
 The test suite is organized into two categories:
 
+GNN tests use trimmed IEEE power-flow checkpoints and NNV reference bounds
+bundled in `fixtures/gnn/` (see `fixtures/gnn/make_fixtures.py`).  Set
+`N2V_GNN_CHECKPOINTS` to a full checkpoint directory to test the untrimmed models.
+
 ### 1. Unit Tests (`unit/`)
 
 **~620 tests** that verify correct implementation and edge case handling.
@@ -17,10 +21,10 @@ These tests check that:
 - Integration between components works as expected
 
 **Subdirectories:**
-- `sets/` - Tests for Star, Zono, Box, ImageStar, Hexatope, Octatope, ProbabilisticBox
-- `layer_ops/` - Tests for layer operations (Linear, ReLU, Conv2D, MaxPool2D, AvgPool2D, Flatten)
+- `sets/` - Tests for Star, Zono, Box, ImageStar, Hexatope, Octatope, ProbabilisticBox, GraphStar
+- `layer_ops/` - Tests for layer operations (Linear, ReLU, Conv2D, MaxPool2D, AvgPool2D, Flatten, GCN/SAGE/GINE graph convolutions, graph pooling)
 - `core/` - Tests for dispatcher and parallel processing
-- `utils/` - Tests for VNN-LIB parsing and differentiable solvers
+- `utils/` - Tests for VNN-LIB parsing, differentiable solvers, and GNN verify/falsify/subgraph helpers
 - `probabilistic/` - Tests for probabilistic verification (conformal inference, surrogates, conformal_reach); includes `probabilistic/flow/` for flow-matching reach (AMLS, importance sampling, calibration, scenario verification)
 - `integration/` - Integration tests for complete workflows
 - `experiments/` - Tests for paper-experiment runners
