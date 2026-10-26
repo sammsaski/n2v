@@ -26,6 +26,8 @@ from tests.differential.test_parser_differential import (
     _resolve, _subset, needs_corpus,
 )
 
+pytestmark = pytest.mark.corpus
+
 GOLDEN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                       "golden_specs.txt")
 
@@ -45,13 +47,16 @@ def _load_golden():
 def test_parser_matches_golden_snapshot():
     golden = _load_golden()
     mismatches = []
+    missing_golden = []
     checked = 0
     for rel in _subset():
         if rel not in golden:
-            continue  # new corpus file: flagged by full mode / update flow
-        path = _resolve(rel)
-        if path is None:
+            # A subset file with no golden hash has never been validated:
+            # that is a gap to bless deliberately, not a file to pass over.
+            missing_golden.append(rel)
             continue
+        path = _resolve(rel)
+        assert path is not None, rel
         try:
             cases = canon.parse_ours(path)
             h = hashlib.sha256(
@@ -61,6 +66,9 @@ def test_parser_matches_golden_snapshot():
         checked += 1
         if h != golden[rel]:
             mismatches.append(f"{rel}: {golden[rel][:12]} -> {h[:12]}")
+    assert not missing_golden, (
+        "subset files with no entry in golden_specs.txt (validate, then bless "
+        f"with update_golden.py): {missing_golden}")
     assert checked > 0
     assert not mismatches, (
         f"parser behavior changed vs golden snapshot on {len(mismatches)} "

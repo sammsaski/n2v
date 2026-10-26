@@ -15,14 +15,16 @@ spec matrix ``G`` itself rather than projecting identity output forms through
 ``G`` afterwards — provably never looser (sign cancellation across output
 neurons is kept) and strictly tighter in practice.
 
-Soundness: standard CROWN inequalities evaluated in float64 round-to-nearest —
-the same arithmetic contract as the existing zono / IBP-precompute intersection
-modes in this package (not bit-level rigorous like the NS-certified LP path;
-per-op error ~1e-16 relative on 50-wide nets). Verdicts additionally pass
-through the engine's exact CE checks (SAT) and, where used, exact LP prunes.
-The ReLU relaxation coefficients mirror ``n2v/nn/crown_reach.py`` (the op-DAG
-CROWN); the tie at ``u == -l`` picks slope 1 here vs 0 there — both sound,
-equal-area choices.
+Soundness: CROWN inequalities evaluated in float64, with every concretized
+bound (pre-activation bounds and spec margins) widened outward by an
+a-posteriori Higham bound on the rounding of the whole backward pass, computed
+from the same pass run on magnitudes; the chord intercept of each crossing
+ReLU is widened for its own rounding too. This is the same standard as
+``n2v.utils.ns_certificate.outward_interval_slack``, so a prune on
+``margin_lo > 0`` is rigorous in floating point. SAT verdicts additionally
+pass through the engine's exact counterexample checks. The ReLU relaxation
+coefficients mirror ``n2v/nn/crown_reach.py`` (the op-DAG CROWN); the tie at
+``u == -l`` picks slope 1 here vs 0 there — both sound, equal-area choices.
 """
 
 from __future__ import annotations
@@ -33,6 +35,9 @@ import numpy as np
 import torch
 
 from n2v.refine.reach_relaxed import Layer, LinearLayer, ReluLayer
+# Rigorous rounding bounds: Higham's gamma_k = k u / (1 - k u) and a safety
+# factor absorbing the second-order terms of the first-order bound.
+from n2v.utils.ns_certificate import _SAFETY, _gamma
 
 
 def prepare_layers(layers: List[Layer], device: str = "cpu") -> list:
@@ -78,6 +83,12 @@ def _relu_relax(l: torch.Tensor, u: torch.Tensor):
     su = torch.where(pos, torch.ones_like(l),
                      torch.where(neg, torch.zeros_like(l), u / denom))
     bu = torch.where(cross, -u * l / denom, torch.zeros_like(l))
+    # SOUNDNESS: su and bu are rounded, so the chord can dip a few ulps below
+    # relu at z = l or z = u; raising the intercept by the rounding bound of
+    # su * max|z| + bu keeps su * z + bu >= relu(z) on [l, u].
+    pad = _SAFETY * _gamma(3) * (su * torch.maximum(l.abs(), u.abs())
+                                 + bu.abs())
+    bu = torch.where(cross, bu + pad, bu)
     return sl, su, bu
 
 
@@ -90,13 +101,18 @@ def _backward(prepared: list, upto: int,
     ``C`` is ``(B, rows, n_upto)``. Returns lower and upper linear forms in the
     INPUT: ``(Al, bl, Au, bu)`` with ``Al/Au (B, rows, n_in)``, ``bl/bu
     (B, rows)``, such that for every x in the box,
-    ``Al x + bl <= C * z_upto(x) <= Au x + bu``.
+    ``Al x + bl <= C * z_upto(x) <= Au x + bu`` (in exact arithmetic), plus
+    the magnitude chain ``(M, mb)``: the same pass run on absolute values,
+    which dominates every rounded partial product of the pass
+    (``_rounding_slack``).
     """
     B, rows, _ = C.shape
     Al = C
     Au = C
     bl = C.new_zeros((B, rows))
     bu = C.new_zeros((B, rows))
+    M = C.abs()
+    mb = C.new_zeros((B, rows))
     zero = C.new_zeros(())
     for idx in range(upto - 1, -1, -1):
         entry = prepared[idx]
@@ -106,6 +122,8 @@ def _backward(prepared: list, upto: int,
             bu = bu + Au @ b
             Al = Al @ W
             Au = Au @ W
+            mb = mb + M @ b.abs()
+            M = M @ W.abs()
         else:                                          # ReLU layer
             sl, su, sb = relax[idx]                    # (B, n) each
             sl_ = sl.unsqueeze(1)                      # (B, 1, n)
@@ -118,7 +136,32 @@ def _backward(prepared: list, upto: int,
             bu = bu + (torch.maximum(Au, zero) * sb_).sum(-1)
             Al = Al * torch.where(Al >= 0, sl_, su_)
             Au = Au * torch.where(Au >= 0, su_, sl_)
-    return Al, bl, Au, bu
+            mb = mb + (M * sb_).sum(-1)
+            M = M * torch.maximum(sl_, su_)
+    return Al, bl, Au, bu, M, mb
+
+
+def _n_ops(prepared, upto, n_in):
+    """Upper bound on the longest chain of rounded operations behind a bound
+    concretized at layer ``upto``. The backward pass contracts each Linear
+    step over the layer's OUTPUT width (``Al @ W`` and ``Al @ b`` with ``W``
+    of shape (out, in)), plus a bias add; each ReLU step is a slope product
+    plus an intercept sum over its width; the concretization is an
+    (n_in + 1)-term sum."""
+    n = n_in + 2
+    for idx in range(upto):
+        e = prepared[idx]
+        n += ((e[0].shape[0] + 2) if e is not None
+              else (prepared[idx - 1][0].shape[0] + 2))
+    return n
+
+
+def _rounding_slack(M, mb, lb, ub, n_ops, extra=0.0):
+    """Rigorous bound on |computed - exact| of every concretized row: the
+    magnitude chain (same pass on |.|) bounds every rounded partial product,
+    so the float64 error is at most gamma_{n_ops} times its value at |x|max."""
+    xabs = torch.maximum(lb.abs(), ub.abs()).unsqueeze(1)
+    return _SAFETY * _gamma(n_ops) * (mb + (M * xabs).sum(-1) + extra)
 
 
 def _lower_concretize(A, b, lb, ub):
@@ -145,6 +188,7 @@ class CrownBatch:
         self.lb = torch.as_tensor(lb, dtype=dt, device=device)   # (B, n_in)
         self.ub = torch.as_tensor(ub, dtype=dt, device=device)
         B = self.lb.shape[0]
+        n_in = self.lb.shape[1]
 
         self._relax: List[Optional[Tuple]] = [None] * len(prepared)
         self.pre_bounds: List[Tuple[torch.Tensor, torch.Tensor]] = []
@@ -153,9 +197,12 @@ class CrownBatch:
                 continue                                # Linear: nothing to do
             n = prepared[idx - 1][0].shape[0]           # preceding Linear width
             C = torch.eye(n, dtype=dt, device=device).expand(B, n, n)
-            Al, bl_, Au, bu_ = _backward(prepared, idx, self._relax, C)
-            lo = _lower_concretize(Al, bl_, self.lb, self.ub)
-            hi = -_lower_concretize(-Au, -bu_, self.lb, self.ub)
+            Al, bl_, Au, bu_, M, mb = _backward(prepared, idx, self._relax, C)
+            # outward by the rounding of the whole backward pass
+            e = _rounding_slack(M, mb, self.lb, self.ub,
+                                _n_ops(prepared, idx, n_in))
+            lo = _lower_concretize(Al, bl_, self.lb, self.ub) - e
+            hi = -_lower_concretize(-Au, -bu_, self.lb, self.ub) + e
             self.pre_bounds.append((lo, hi))
             self._relax[idx] = _relu_relax(lo, hi)
 
@@ -166,8 +213,9 @@ class CrownBatch:
 
         Returns ``(margin_lo, vertices, smear)`` as numpy arrays:
           * ``margin_lo (B, R)`` — sound lower bound of each row margin
-            ``G_r y - g_r`` over the box; a row with ``margin_lo > 0`` is
-            violated everywhere -> the box is provably SAFE (prunable).
+            ``G_r y - g_r`` over the box, rigorous in floating point (outward
+            by the rounding slack); a row with ``margin_lo > 0`` is violated
+            everywhere -> the box is provably SAFE (prunable).
           * ``vertices (B, n_in)`` — the box vertex minimizing the driving
             row's lower linear form: a cheap counterexample candidate for the
             caller's exact checks.
@@ -183,9 +231,14 @@ class CrownBatch:
         gt = torch.as_tensor(np.asarray(g).flatten(), dtype=self.lb.dtype,
                              device=self.lb.device)
         C = Gt.expand(B, *Gt.shape)
-        Al, bl, _, _ = _backward(self.prepared, len(self.prepared),
-                                 self._relax, C)
-        margin_lo = _lower_concretize(Al, bl, self.lb, self.ub) - gt
+        Al, bl, _, _, M, mb = _backward(self.prepared, len(self.prepared),
+                                        self._relax, C)
+        # outward by the rounding of the backward pass and of the "- g" step
+        e = _rounding_slack(M, mb, self.lb, self.ub,
+                            _n_ops(self.prepared, len(self.prepared),
+                                   self.lb.shape[1]) + 1,
+                            extra=gt.abs())
+        margin_lo = _lower_concretize(Al, bl, self.lb, self.ub) - gt - e
 
         r_star = (margin_lo.argmax(dim=1) if row_rule == "argmax"
                   else margin_lo.argmin(dim=1))
@@ -197,10 +250,11 @@ class CrownBatch:
 
     def output_forms(self):
         """Identity-seeded output linear forms ``(Al, bl, Au, bu)`` — for
-        enclosure tests and callers needing raw output bounds."""
+        enclosure tests and callers needing raw output bounds (the forms
+        themselves; no rounding slack is applied to them)."""
         n_out = next(e[0].shape[0] for e in reversed(self.prepared)
                      if e is not None)
         B = self.lb.shape[0]
         C = torch.eye(n_out, dtype=self.lb.dtype,
                       device=self.lb.device).expand(B, n_out, n_out)
-        return _backward(self.prepared, len(self.prepared), self._relax, C)
+        return _backward(self.prepared, len(self.prepared), self._relax, C)[:4]

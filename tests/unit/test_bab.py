@@ -46,13 +46,23 @@ def _spec_leq(thresh):  # unsafe {Y >= thresh} == {-Y <= -thresh}
 
 
 def _gap_net():
-    """Pick a seed whose approx-star bound is meaningfully looser than truth."""
+    """Pick a seed whose approx-star bound is meaningfully looser than truth.
+
+    Every seed tried must satisfy ``smax >= tmax``: ``tmax`` is a float32 grid
+    maximum, a lower bound on the true maximum, so an approx-star bound below
+    it (beyond float32 forward rounding) is an unsound reach. Finding no gap
+    is a failure, not a skip: the tests below exist for exactly that regime.
+    """
     for seed in range(20):
         m = _net(seed)
         tmax, smax = _true_max(m), _star_max(m)
+        assert smax >= tmax - 1e-5, (
+            f"approx-star bound {smax} is below the sampled true maximum "
+            f"{tmax} (seed {seed}): the relaxation is unsound")
         if smax - tmax > 0.05:
             return m, tmax, smax
-    pytest.skip("no relaxation gap found")
+    pytest.fail("no seed in range(20) gives a relaxation gap above 0.05; the "
+                "BaB tests need one (pin a seed that does)")
 
 
 def test_bab_verifies_what_single_shot_cannot():

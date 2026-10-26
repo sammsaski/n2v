@@ -443,8 +443,8 @@ class TestZono:
 
         # Box bounds should match zonotope bounds
         zono_lb, zono_ub = zono.get_bounds()
-        np.testing.assert_array_equal(box.lb, zono_lb)
-        np.testing.assert_array_equal(box.ub, zono_ub)
+        np.testing.assert_allclose(box.lb, zono_lb, atol=1e-12)
+        np.testing.assert_allclose(box.ub, zono_ub, atol=1e-12)
 
     def test_get_bounds_basic(self):
         """Test bounds computation with known result."""
@@ -458,8 +458,9 @@ class TestZono:
         # ub[0] = 0 + |1.0| + |0.5| = 1.5
         # lb[1] = 0 - |0.5| - |1.0| = -1.5
         # ub[1] = 0 + |0.5| + |1.0| = 1.5
-        np.testing.assert_array_equal(lb, [[-1.5], [-1.5]])
-        np.testing.assert_array_equal(ub, [[1.5], [1.5]])
+        # outward-rounded enclosure: equal up to a few ulps
+        np.testing.assert_allclose(lb, [[-1.5], [-1.5]], atol=1e-12)
+        np.testing.assert_allclose(ub, [[1.5], [1.5]], atol=1e-12)
 
     def test_get_ranges(self):
         """Test get_ranges (should match get_box bounds)."""

@@ -185,6 +185,30 @@ class TestStarVolumeExact:
         assert v.mean == 0.0
 
 
+class TestStarVolumeUnusedPredicates:
+    """A predicate variable that no basis vector and no constraint row uses
+    leaves the set unchanged, so its box must not scale the volume.
+    Star.fresh_from_bounds leads with such a variable (box [0, t], t in
+    (1, 2)), which made the volume t times too large."""
+
+    @pytest.mark.parametrize('method', ['mc', 'exact'])
+    def test_fresh_from_bounds_matches_from_bounds(self, method):
+        lb, ub = np.zeros(2), np.array([1.0, 2.0])
+        s = Star.fresh_from_bounds(lb, ub)
+        assert float(s.predicate_ub[0, 0]) > 1.0
+        v = star_volume(s, method=method, n_samples=2_000, seed=0)
+        np.testing.assert_allclose(v.mean, 2.0, rtol=1e-9)
+
+    @pytest.mark.parametrize('method', ['mc', 'exact'])
+    def test_zero_width_unused_variable(self, method):
+        s = _axis_aligned_star([0.0, 0.0], [1.0, 2.0])
+        V = np.hstack([s.V, np.zeros((2, 1))])
+        s = Star(V=V, C=None, d=None, pred_lb=np.array([-1.0, -1.0, 3.0]),
+                 pred_ub=np.array([1.0, 1.0, 3.0]))
+        v = star_volume(s, method=method, n_samples=2_000, seed=0)
+        np.testing.assert_allclose(v.mean, 2.0, rtol=1e-9)
+
+
 class TestStarVolumeMCExactAgreement:
     def test_ci_contains_exact_across_random_stars(self):
         """20 random full-rank 3D Stars: MC 99% CI should contain exact
@@ -215,11 +239,14 @@ class TestStarUnionVolumeMC:
         with pytest.raises(ValueError):
             star_union_volume_mc([])
 
+    # 3000 samples: the Hoeffding 99 % half-width is 0.030 in fraction, 0.067
+    # in volume for the half-overlap case, so 1.5, 1.75 and 2.0 stay separated
+    # at a tenth of the LP count of the original 30k-40k samples.
     def test_single_star_matches_star_volume(self):
         s = _axis_aligned_star([0.0, 0.0], [2.0, 3.0])
         v_single = star_volume(s, method='exact').mean
         v_union = star_union_volume_mc(
-            [s], n_samples=30_000, batch_size=5_000, seed=0,
+            [s], n_samples=3_000, batch_size=1_000, seed=0,
         )
         assert v_union.method == 'mc_union'
         assert v_union.ci_low <= v_single <= v_union.ci_high
@@ -227,20 +254,20 @@ class TestStarUnionVolumeMC:
     def test_two_disjoint_boxes_equals_sum(self):
         a = _axis_aligned_star([0.0, 0.0], [1.0, 1.0])  # vol 1
         b = _axis_aligned_star([5.0, 5.0], [6.0, 6.0])  # vol 1
-        v = star_union_volume_mc([a, b], n_samples=30_000, batch_size=5_000, seed=0)
+        v = star_union_volume_mc([a, b], n_samples=3_000, batch_size=1_000, seed=0)
         assert v.ci_low <= 2.0 <= v.ci_high
 
     def test_two_identical_equals_one(self):
         a = _axis_aligned_star([0.0, 0.0], [1.0, 1.0])
         b = _axis_aligned_star([0.0, 0.0], [1.0, 1.0])
-        v = star_union_volume_mc([a, b], n_samples=30_000, batch_size=5_000, seed=0)
+        v = star_union_volume_mc([a, b], n_samples=3_000, batch_size=1_000, seed=0)
         assert v.ci_low <= 1.0 <= v.ci_high
 
     def test_two_half_overlap(self):
         # Squares [0,1]^2 and [0.5, 1.5]^2. Union = 2 - 0.25 = 1.75.
         a = _axis_aligned_star([0.0, 0.0], [1.0, 1.0])
         b = _axis_aligned_star([0.5, 0.5], [1.5, 1.5])
-        v = star_union_volume_mc([a, b], n_samples=40_000, batch_size=5_000, seed=0)
+        v = star_union_volume_mc([a, b], n_samples=3_000, batch_size=1_000, seed=0)
         assert v.ci_low <= 1.75 <= v.ci_high
 
     def test_honors_provided_bbox(self):

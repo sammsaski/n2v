@@ -8,10 +8,14 @@ Represents a star set: x = c + sum_{i=1}^n alpha_i * v_i
 Translated from MATLAB NNV Star.m
 """
 
+import itertools
+import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
+
 from scipy.linalg import block_diag
 
 # TYPE_CHECKING imports for type hints (avoid circular import at runtime)
@@ -23,13 +27,35 @@ if TYPE_CHECKING:
 # to avoid circular dependencies
 
 # Import utility modules
-from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch
+from n2v.utils.lpsolver import (solve_lp, check_feasibility, solve_lp_batch,
+                                 _bound_lp_solver, _outward_lp_ranges)
 from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
+from n2v.utils.ns_certificate import outward_interval_bounds as _outward_bounds
+from n2v.utils.ns_certificate import _add_dir
 
 from n2v.config import config as global_config
 
 # Profiler hooks (no-op when profiling is disabled)
 from n2v.profiling import region, count, is_enabled, OPERATION
+
+logger = logging.getLogger(__name__)
+
+# Counter behind the predicate tags (fresh_predicate_tag).
+_FRESH_TAGS = itertools.count()
+
+
+def fresh_predicate_tag() -> float:
+    """A float in ``[1, 2)`` that no other call in this process returns.
+
+    It is the upper bound of the box ``[0, t]`` of an unused predicate
+    variable that marks a block of predicate variables as new (see
+    ``Star.fresh_from_bounds`` and ``n2v.nn.reach._tag_new_predicates``):
+    two systems holding different tags are never identical, nor a prefix of
+    one another. The process id and a counter sit in the mantissa, so ``t``
+    is exact and unique for 2^30 calls per process.
+    """
+    return 1.0 + ((os.getpid() % (1 << 22)) * (1 << 30)
+                  + next(_FRESH_TAGS) % (1 << 30)) * 2.0 ** -52
 
 
 class Star:
@@ -56,7 +82,7 @@ class Star:
         fixed: Refinement-search provenance -- the fixed neuron phases that
             produced this star (set by ``n2v.refine``; ``None`` otherwise).
         bound_mode: Refinement-search provenance -- the bound mode the reach used
-            ("box"|"lp_cpu"|"lp_gpu"; set by ``n2v.refine``; ``None`` otherwise).
+            ("box"|"lp_cpu"|"dual_gpu"; set by ``n2v.refine``; ``None`` otherwise).
     """
 
     def __init__(
@@ -114,6 +140,12 @@ class Star:
         V = np.asarray(V, dtype=np.float64)
         C = np.asarray(C, dtype=np.float64) if C is not None else np.array([]).reshape(0, 0)
         d = np.asarray(d, dtype=np.float64) if d is not None else np.array([]).reshape(0, 1)
+        # No constraint rows (C omitted or empty): store a (0, nVar) matrix so
+        # rows can be stacked onto it (intersect_half_space, ReLU splits); a
+        # (0, 0) one breaks every such np.vstack. A point star's (k, 0) C
+        # with live rows in d is kept as given.
+        if C.size == 0 and (C.ndim != 2 or C.shape[0] == 0):
+            C = np.zeros((0, max(V.shape[1] - 1, 0)))
 
         # Ensure d is column vector
         if d.ndim == 1:
@@ -206,6 +238,31 @@ class Star:
         box = Box(lb, ub)
         return box.to_star()
 
+    @classmethod
+    def fresh_from_bounds(cls, lb: np.ndarray, ub: np.ndarray) -> 'Star':
+        """Box star over NEW predicate variables, for an op that re-encodes
+        its output from bounds (softmax, attention, bilinear products).
+
+        ``from_bounds`` gives every box with the same number of nonzero
+        widths the same predicate system (``alpha in [-1, 1]^k``, rows
+        ``+-I``). The graph reach reads identical systems as the same
+        predicate variables (``n2v.nn.reach._same_predicate_system``), so a
+        re-encoded output met the input star, or another re-encoded output,
+        as if correlated with it: ``Softmax(X) - X`` came out a false UNSAT.
+        This star leads with one unused predicate variable whose box
+        ``[0, t]`` holds a tag ``t`` unique to this call (process id and a
+        counter, exact in the mantissa of ``t`` in ``[1, 2)``). Its system is
+        then never identical to, nor a prefix of, a system built elsewhere,
+        while stars derived from it keep the variable and still match it.
+        """
+        base = cls.from_bounds(lb, ub)
+        tag = fresh_predicate_tag()
+        V = np.hstack([base.V[:, :1], np.zeros((base.dim, 1)), base.V[:, 1:]])
+        C = np.hstack([np.zeros((base.C.shape[0], 1)), base.C])
+        plb = np.vstack([[[0.0]], base.predicate_lb])
+        pub = np.vstack([[[tag]], base.predicate_ub])
+        return cls(V, C, base.d, plb, pub)
+
     # ======================== Affine Transformations ========================
 
     def affine_map(self, W: np.ndarray, b: Optional[np.ndarray] = None) -> 'Star':
@@ -297,8 +354,14 @@ class Star:
         # H*V[:, 0] + H*V[:, 1:]*alpha <= g
         # H*V[:, 1:]*alpha <= g - H*V[:, 0]
 
-        H_alpha = H @ self.V[:, 1:]  # Coefficient matrix for alpha
-        g_alpha = g - H @ self.V[:, 0:1]  # New constraint bound
+        # SOUNDNESS: these rows are rounded products; the bound is inflated
+        # outward so the intersection CONTAINS the true one -- a set touching
+        # the halfspace at exact margin 0 must not round into "empty" (a
+        # rigorous emptiness certificate would then prove the wrong system).
+        from n2v.utils.ns_certificate import outward_spec_rows
+        H_alpha, g_alpha = outward_spec_rows(H, g, self.V,
+                                             self.predicate_lb, self.predicate_ub)
+        g_alpha = g_alpha.reshape(-1, 1)  # New constraint bound (outward)
 
         # Add new constraints
         new_C = np.vstack([self.C, H_alpha])
@@ -310,48 +373,120 @@ class Star:
         """
         Compute over-approximation of convex hull with another Star.
 
+        The result is ``c2 + G1 b1 + G2 b2 + (c1 - c2) lam`` over
+        ``lam in [0, 1]``, with each operand's constraints scaled by its
+        weight: ``C1 b1 <= lam d1`` and ``C2 b2 <= (1 - lam) d2`` (and the
+        same for the predicate boxes). At ``lam = 1`` it contains ``self``
+        (with ``b2 = 0``), at ``lam = 0`` it contains ``other``, and in
+        between their convex combinations. It does not need 0 to be a
+        feasible predicate point of either operand, as a midpoint form with
+        both operands' generators free at once does. Every coefficient is an
+        operand's own value, except ``c1 - c2``, which is rounded: a
+        coordinate where that subtraction is inexact gets a slack predicate
+        variable ``s`` in ``[-lam, lam]`` whose generator bounds the rounding
+        error (``_add_dir``), so the containment holds exactly. The predicate
+        variables are ``[b1, b2, lam, s]``. Constraint rows with a non-finite
+        ``d`` are dropped, which only enlarges the set. When both operands
+        have a predicate box, the result has the box these rows imply.
+
         Args:
             other: Another Star object
 
         Returns:
             New Star over-approximating the convex hull
+
+        Raises:
+            ValueError: the difference of the centers overflows.
         """
         if not isinstance(other, Star):
             raise TypeError("Can only compute convex hull with another Star")
         if self.dim != other.dim:
             raise ValueError(f"Dimension mismatch: {self.dim} vs {other.dim}")
 
-        # Convex hull approximation using scalar parameter
-        # Similar to zonotope convex hull
-        new_c = 0.5 * (self.V[:, 0:1] + other.V[:, 0:1])
-        new_V = np.hstack(
-            [new_c, self.V[:, 1:], other.V[:, 1:], 0.5 * (self.V[:, 0:1] - other.V[:, 0:1])]
+        c1 = self.V[:, 0]
+        c2 = other.V[:, 0]
+        with np.errstate(over='ignore', invalid='ignore'):
+            diff = c1 - c2
+        if not np.all(np.isfinite(diff)):
+            raise ValueError("convex_hull: the difference of the centers is "
+                             "not finite")
+        # Rigorous bound on |(c1 - c2) - diff| per coordinate.
+        err = np.maximum(
+            _add_dir(_add_dir(c1, -c2, 1.0), -diff, 1.0),
+            _add_dir(diff, -_add_dir(c1, -c2, -1.0), 1.0),
         )
+        slack = np.flatnonzero(err > 0)
+        E = np.zeros((self.dim, slack.size))
+        E[slack, np.arange(slack.size)] = err[slack]
 
-        # Number of predicate variables in new star
-        n_new_var = new_V.shape[1] - 1  # self.nVar + other.nVar + 1
+        n1, n2, k = self.nVar, other.nVar, slack.size
+        new_V = np.hstack([c2.reshape(-1, 1), self.V[:, 1:], other.V[:, 1:],
+                           diff.reshape(-1, 1), E])
 
-        # Combine constraints from both stars
-        # block_diag creates a matrix where:
-        # - First self.nVar columns constrain self's predicates
-        # - Next other.nVar columns constrain other's predicates
-        # We need to pad with zeros for the new lambda variable
-        C_block = block_diag(self.C, other.C)
-        # Pad with zeros for the lambda column
-        C_block_padded = np.hstack([C_block, np.zeros((C_block.shape[0], 1))])
-        new_d = np.vstack([self.d, other.d])
+        # Predicate variables: [b1 (n1), b2 (n2), lam, s (k)].
+        def block(A1, A2, a_lam, A_s):
+            return np.hstack([A1, A2, a_lam.reshape(-1, 1), A_s])
 
-        # Add constraint for convex combination parameter lambda
-        # -1 <= lambda <= 1
-        C_extra = np.zeros((2, n_new_var))
-        C_extra[0, -1] = 1   # lambda <= 1
-        C_extra[1, -1] = -1  # -lambda <= 1 (i.e., lambda >= -1)
-        d_extra = np.ones((2, 1))
+        rows, rhs = [], []
+        # C1 b1 - d1 lam <= 0
+        d1 = self.d.reshape(-1)
+        keep = np.isfinite(d1)
+        m = int(keep.sum())
+        rows.append(block(self.C[keep], np.zeros((m, n2)), -d1[keep],
+                          np.zeros((m, k))))
+        rhs.append(np.zeros(m))
+        # C2 b2 + d2 lam <= d2
+        d2 = other.d.reshape(-1)
+        keep = np.isfinite(d2)
+        m = int(keep.sum())
+        rows.append(block(np.zeros((m, n1)), other.C[keep], d2[keep],
+                          np.zeros((m, k))))
+        rhs.append(d2[keep])
+        # Predicate boxes: lb1 lam <= b1 <= ub1 lam and
+        # lb2 (1 - lam) <= b2 <= ub2 (1 - lam), finite entries only.
+        for star, first in ((self, True), (other, False)):
+            for bnd, sign in ((star.predicate_ub, 1.0), (star.predicate_lb, -1.0)):
+                if bnd is None:
+                    continue
+                bnd = bnd.reshape(-1)
+                idx = np.flatnonzero(np.isfinite(bnd))
+                m = idx.size
+                B = np.zeros((m, star.nVar))
+                B[np.arange(m), idx] = sign
+                zeros = np.zeros((m, n2 if first else n1))
+                if first:
+                    rows.append(block(B, zeros, -sign * bnd[idx],
+                                      np.zeros((m, k))))
+                    rhs.append(np.zeros(m))
+                else:
+                    rows.append(block(zeros, B, sign * bnd[idx],
+                                      np.zeros((m, k))))
+                    rhs.append(sign * bnd[idx])
+        # 0 <= lam <= 1 and -lam <= s <= lam
+        rows.append(block(np.zeros((2, n1)), np.zeros((2, n2)),
+                          np.array([1.0, -1.0]), np.zeros((2, k))))
+        rhs.append(np.array([1.0, 0.0]))
+        eye = np.eye(k)
+        rows.append(block(np.zeros((2 * k, n1)), np.zeros((2 * k, n2)),
+                          -np.ones(2 * k), np.vstack([eye, -eye])))
+        rhs.append(np.zeros(2 * k))
 
-        new_C = np.vstack([C_block_padded, C_extra])
-        new_d = np.vstack([new_d, d_extra])
+        new_C = np.vstack(rows)
+        new_d = np.concatenate(rhs).reshape(-1, 1)
 
-        return Star(new_V, new_C, new_d)
+        pred_lb = pred_ub = None
+        if all(s.predicate_lb is not None and s.predicate_ub is not None
+               for s in (self, other)):
+            pred_lb = np.concatenate([
+                np.minimum(self.predicate_lb.reshape(-1), 0.0),
+                np.minimum(other.predicate_lb.reshape(-1), 0.0),
+                [0.0], -np.ones(k)]).reshape(-1, 1)
+            pred_ub = np.concatenate([
+                np.maximum(self.predicate_ub.reshape(-1), 0.0),
+                np.maximum(other.predicate_ub.reshape(-1), 0.0),
+                [1.0], np.ones(k)]).reshape(-1, 1)
+
+        return Star(new_V, new_C, new_d, pred_lb, pred_ub)
 
     # ======================== Bounds Computation ========================
 
@@ -531,14 +666,18 @@ class Star:
             futures = [executor.submit(compute_range, i) for i in range(self.dim)]
 
             # Collect results
+            failed = []
             for future in futures:
                 i, (lb_i, ub_i) = future.result()
                 if lb_i is not None and ub_i is not None:
                     lb[i] = lb_i
                     ub[i] = ub_i
                 else:
-                    # LP failed for this dimension, use estimate
-                    lb[i], ub[i] = self.estimate_range(i)
+                    failed.append(i)
+
+        if failed:
+            # LP failed for these dimensions, use estimates
+            lb[failed, 0], ub[failed, 0] = self._estimate_rows(failed)
 
         return lb, ub
 
@@ -576,14 +715,19 @@ class Star:
         lb = np.zeros((self.dim, 1))
         ub = np.zeros((self.dim, 1))
 
+        failed = []
         for i in range(self.dim):
             xmin_val = results[2 * i]
             xmax_val = results[2 * i + 1]
             if xmin_val is None or xmax_val is None:
-                lb[i], ub[i] = self.estimate_range(i)
+                failed.append(i)
             else:
                 lb[i] = xmin_val + self.V[i, 0]
                 ub[i] = xmax_val + self.V[i, 0]
+
+        if failed:
+            # LP failed for these dimensions, use estimates
+            lb[failed, 0], ub[failed, 0] = self._estimate_rows(failed)
 
         return lb, ub
 
@@ -598,25 +742,17 @@ class Star:
             Tuple of (min_estimate, max_estimate)
         """
         if self.predicate_lb is None or self.predicate_ub is None:
-            # Fall back to LP
-            return self.get_range(index)
+            # No predicate box: padded HiGHS LP bounds (see _lp_enclosure).
+            lb, ub = self._lp_enclosure([index])
+            return float(lb[0]), float(ub[0])
 
-        # Use vectorized computation for single dimension
-        c = self.V[index, 0]
-        generators = self.V[index, 1:]  # Shape: (nVar,)
-
-        pred_lb_flat = self.predicate_lb.flatten()
-        pred_ub_flat = self.predicate_ub.flatten()
-
-        # Separate positive and negative generators
-        pos_gens = np.maximum(generators, 0)
-        neg_gens = np.minimum(generators, 0)
-
-        # lb = c + pos_gens @ pred_lb + neg_gens @ pred_ub
-        # ub = c + pos_gens @ pred_ub + neg_gens @ pred_lb
-        lb = c + np.dot(pos_gens, pred_lb_flat) + np.dot(neg_gens, pred_ub_flat)
-        ub = c + np.dot(pos_gens, pred_ub_flat) + np.dot(neg_gens, pred_lb_flat)
-
+        # SOUNDNESS: round-to-nearest interval arithmetic is not an enclosure;
+        # ``outward_interval_bounds`` moves each bound outward by a rigorous
+        # bound on its own rounding (and masks 0 * inf for unbounded
+        # predicates), so a neuron classification never rests on a bound that
+        # sits a few ulps inside the true range.
+        lb, ub = _outward_bounds(self.V[index, 0], self.V[index, 1:],
+                                 self.predicate_lb, self.predicate_ub)
         return float(lb), float(ub)
 
     def estimate_ranges(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -630,31 +766,101 @@ class Star:
             Tuple of (lb, ub) arrays, each shape (dim, 1)
         """
         if self.predicate_lb is None or self.predicate_ub is None:
-            # Fall back to LP-based computation
-            return self.get_ranges()
+            # No predicate box: padded HiGHS LP bounds (see _lp_enclosure).
+            lb, ub = self._lp_enclosure(np.arange(self.dim))
+            return lb.reshape(-1, 1), ub.reshape(-1, 1)
 
-        # Extract center and generators
-        center = self.V[:, 0:1]           # Shape: (dim, 1)
-        generators = self.V[:, 1:]        # Shape: (dim, nVar)
-
-        pred_lb_flat = self.predicate_lb.flatten()  # Shape: (nVar,)
-        pred_ub_flat = self.predicate_ub.flatten()  # Shape: (nVar,)
-
-        # Separate positive and negative parts of generators
-        pos_gens = np.maximum(generators, 0)  # Shape: (dim, nVar)
-        neg_gens = np.minimum(generators, 0)  # Shape: (dim, nVar)
-
-        # Vectorized computation using matrix multiplication
-        # lb = center + pos_gens @ pred_lb + neg_gens @ pred_ub
-        # ub = center + pos_gens @ pred_ub + neg_gens @ pred_lb
-        lb = center + (pos_gens @ pred_lb_flat + neg_gens @ pred_ub_flat).reshape(-1, 1)
-        ub = center + (pos_gens @ pred_ub_flat + neg_gens @ pred_lb_flat).reshape(-1, 1)
+        # SOUNDNESS: the interval sums are round-to-nearest and can land a few
+        # ulps INSIDE the true range, which downstream reads as a stable neuron
+        # (output zeroed or passed through with no constraint) -- an
+        # under-approximation. ``outward_interval_bounds`` makes each bound a
+        # rigorous enclosure, charging it only for the rounding of the terms
+        # it sums (an exactly computed bound stays exact), masks 0 * inf for
+        # unbounded predicates and keeps its temporaries bounded.
+        lb, ub = _outward_bounds(self.V[:, 0], self.V[:, 1:],
+                                 self.predicate_lb, self.predicate_ub)
+        lb = lb.reshape(-1, 1)
+        ub = ub.reshape(-1, 1)
 
         # Store in state attributes for later use
         self.state_lb = lb
         self.state_ub = ub
 
         return lb, ub
+
+    def _estimate_rows(self, rows) -> Tuple[np.ndarray, np.ndarray]:
+        """``estimate_range`` of the dimensions ``rows`` at once, as 1-D
+        arrays (one LP batch for a star with no predicate box)."""
+        rows = np.asarray(rows, dtype=np.intp).reshape(-1)
+        if self.predicate_lb is None or self.predicate_ub is None:
+            return self._lp_enclosure(rows)
+        lb, ub = _outward_bounds(self.V[rows, 0], self.V[rows, 1:],
+                                 self.predicate_lb, self.predicate_ub)
+        return np.asarray(lb).reshape(-1), np.asarray(ub).reshape(-1)
+
+    def _lp_enclosure(self, rows) -> Tuple[np.ndarray, np.ndarray]:
+        """Rigorous bounds of the dimensions ``rows`` by LP, for a star with
+        no predicate box to take interval bounds over.
+
+        Callers of ``estimate_range(s)`` use the result as an enclosure.
+
+        - The predicate box is first made finite
+          (``ensure_finite_predicate_box``). Over a finite box
+          ``solve_lp_batch`` certifies each optimum with the NS bound; a
+          box-free optimum is only the solver's word, and HiGHS reports a
+          finite optimum for an unbounded LP whose unbounded direction has a
+          slope below its dual feasibility tolerance (e.g. ``a1 + 1e-9 a2``
+          with ``a2 >= 0``).
+        - The LPs run on HiGHS whatever the configured default
+          (``_bound_lp_solver``).
+        - Each optimum is padded by its own magnitude
+          (``_outward_lp_ranges``) before the center is added with outward
+          rounding (``_add_dir``). When the center cancels a large optimum,
+          a pad sized by the sum is far below the optimum's own error.
+
+        A dimension whose generator row is all zero is the constant
+        ``V[i, 0]``. Every other bound is infinite when no trustworthy
+        finite box exists (an unbounded predicate variable, failed bound
+        LPs), when the star is empty, or when its LP returns no optimum:
+        never a decided value.
+
+        Returns:
+            ``(lb, ub)``, 1-D float64 arrays of length ``len(rows)``.
+        """
+        from n2v.sets.predicate_box import ensure_finite_predicate_box
+        from n2v.utils.lpsolver import LPFailure
+
+        rows = np.asarray(rows, dtype=np.intp).reshape(-1)
+        center = self.V[rows, 0]
+        exact = ~np.any(self.V[rows, 1:] != 0, axis=1)
+        lo = np.full(rows.size, -np.inf)
+        hi = np.full(rows.size, np.inf)
+        solver = _bound_lp_solver(LPSolver.DEFAULT)
+        try:
+            star, empty = ensure_finite_predicate_box(self, lp_solver=solver)
+        except (ValueError, LPFailure) as exc:
+            logger.debug("Star range bounds without a finite predicate box "
+                         "are infinite: %s", exc)
+            star, empty = None, False
+        if star is not None and not empty:
+            objectives = []
+            minimize_flags = []
+            for i in rows:
+                f = star.V[i, 1:].flatten()
+                objectives.extend([f, f])
+                minimize_flags.extend([True, False])
+            results = star._solve_lp_batch(objectives, minimize_flags, solver)
+            lo = np.array([-np.inf if v is None else v for v in results[0::2]],
+                          dtype=np.float64)
+            hi = np.array([np.inf if v is None else v for v in results[1::2]],
+                          dtype=np.float64)
+            # Pad the optima alone (a zero center column keeps constant rows
+            # at 0), then add the center rounded outward.
+            gens = np.hstack([np.zeros((rows.size, 1)), star.V[rows, 1:]])
+            lo, hi = _outward_lp_ranges(lo, hi, gens)
+            lo = _add_dir(lo, center, -1.0)
+            hi = _add_dir(hi, center, 1.0)
+        return np.where(exact, center, lo), np.where(exact, center, hi)
 
     def _solve_lp_batch(
         self,

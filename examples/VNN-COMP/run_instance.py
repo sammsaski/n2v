@@ -13,6 +13,7 @@ Output:
     If sat, prints counterexample on next line.
 """
 
+import functools
 import logging
 import os
 import sys
@@ -25,6 +26,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 import n2v
+from n2v.config import config as _n2v_config
 from n2v.nn import NeuralNetwork
 from n2v.utils import load_vnnlib, falsify
 from n2v.utils.verify_specification import verify_specification
@@ -65,6 +67,23 @@ def format_counterexample(input_vec: np.ndarray, output_vec: np.ndarray) -> str:
     return "(" + "\n".join(lines) + ")"
 
 
+def _restores_global_config(fn):
+    """Restore ``n2v.config`` (parallel LP, workers, LP solver) after ``fn``:
+    callers that run several instances in one process must get it back."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        c = _n2v_config
+        saved = (c.parallel_lp, c.n_workers, c.auto_parallel,
+                 c.parallel_threshold, c.lp_solver)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            (c.parallel_lp, c.n_workers, c.auto_parallel,
+             c.parallel_threshold, c.lp_solver) = saved
+    return wrapper
+
+
+@_restores_global_config
 def verify_instance(
     onnx_path: str,
     vnnlib_path: str,

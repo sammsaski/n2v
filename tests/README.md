@@ -1,242 +1,59 @@
-# N2V Test Suite
+# n2v test suite
 
-This directory contains the complete test suite for the N2V (Neural Network Verification) library.
+The tests exist to fail when n2v is wrong. A test earns its place by naming a bug it would catch that no other test catches; a test that cannot fail, that pins a known wrong answer, or that was loosened to pass is a bad test. Tolerance is never added in the unsound direction.
 
-## Test Organization
+## Layout
 
-The test suite is organized into two categories:
+| Directory | What it checks | Oracle |
+|---|---|---|
+| `contracts/` | the public promises: import layering today; the reach coverage, set protocol, spec, verify and witness contracts as the API redesign lands | the design document, read with `ast` or exercised through public names only |
+| `soundness/` | enclosure soundness of every reach kernel, pre-pass, certificate and spec check, plus witness validity; guards for fixed soundness bugs, one file per component | onnxruntime samples, exact arithmetic (`fractions.Fraction`, mpmath) and LP membership against the constraint rows, never the code's own helpers |
+| `unit/` | internal behaviour that nothing above reaches, light touch | small analytic cases |
+| `integration/` | small real models end to end, the competition runner | onnxruntime replay |
+| `differential/` | the VNN-LIB parsers against the external corpus, reference parsers and a golden snapshot | the corpus (`corpus` tier) |
 
-### 1. Unit Tests (`unit/`)
+A failing verdict path is a bug to fix, or a strict `xfail` naming the step of the plan that fixes it (`xfail_strict = true`: a fixed bug fails the test until its marker is removed).
 
-**~620 tests** that verify correct implementation and edge case handling.
+## Tiers and markers
 
-These tests check that:
-- Code compiles and runs without errors
-- Methods handle edge cases correctly (empty inputs, boundary conditions, etc.)
-- API contracts are maintained
-- Integration between components works as expected
-
-**Subdirectories:**
-- `sets/` - Tests for Star, Zono, Box, ImageStar, Hexatope, Octatope, ProbabilisticBox
-- `layer_ops/` - Tests for layer operations (Linear, ReLU, Conv2D, MaxPool2D, AvgPool2D, Flatten)
-- `core/` - Tests for dispatcher and parallel processing
-- `utils/` - Tests for VNN-LIB parsing and differentiable solvers
-- `probabilistic/` - Tests for probabilistic verification (conformal inference, surrogates, conformal_reach); includes `probabilistic/flow/` for flow-matching reach (AMLS, importance sampling, calibration, scenario verification)
-- `integration/` - Integration tests for complete workflows
-- `experiments/` - Tests for paper-experiment runners
-- `vnncomp/` - Tests for VNN-COMP harness infrastructure
-
-In addition to the subdirectories, `tests/unit/` and the top-level
-`tests/integration/` directory contain a handful of test files that
-exercise cross-cutting infrastructure (fx tracing, model preprocessing,
-parallel regions, prepared instances, reach precomputed, run instance,
-strategy dispatch).
-
-### 2. Soundness Tests (`soundness/`)
-
-**~200 tests** (all passing) that verify mathematical correctness and soundness properties.
-
-These tests check that:
-- Operations produce mathematically correct results
-- Approximate methods over-approximate exact results (soundness)
-- Bounds are computed correctly
-- Ground truth matches expected values for simple cases
-
-**Files:**
-- `test_soundness_linear.py` - Linear/fully-connected layers
-- `test_soundness_relu.py` - ReLU activation (exact & approximate)
-- `test_soundness_conv2d.py` - 2D convolution layers
-- `test_soundness_maxpool2d.py` - Max pooling (exact & approximate)
-- `test_soundness_avgpool2d.py` - Average pooling
-- `test_soundness_flatten.py` - Flatten operations
-- `test_soundness_parallel.py` - Parallel LP solving
-- `test_soundness_to_star.py` - Conversion to Star sets
-- `test_soundness_differentiable.py` - Differentiable verification
-- `test_soundness_probabilistic.py` - Probabilistic verification guarantees
-
-See [soundness/README.md](soundness/README.md) for detailed methodology.
-
-## Running Tests
-
-### Quick Start
+The default run is the fast tier, about four and a half minutes on one process:
 
 ```bash
-# Run all tests (unit + soundness, ~846 passing)
-pytest tests/
-
-# Run with verbose output
-pytest tests/ -v
-
-# Run with quiet output (summary only)
-pytest tests/ -q
+pytest                 # the default tier: everything not marked slow, gpu or corpus
+pytest -m slow         # long flow training, large Monte Carlo sweeps, the 300-sample softmax cell
+pytest -m gpu          # tests that need a CUDA device
+pytest -m corpus       # tests that need external data: the VNN-COMP corpus, reference checkouts
+pytest -m ""           # everything
 ```
 
-### Test Categories
+Selecting `gpu` or `corpus` explicitly turns a missing-resource skip into a failure, so a requested tier can never pass vacuously. The certified GPU bound engine is deliberately not behind the `gpu` marker: its soundness guards take the `engine_device` fixture and run on CPU torch everywhere, and on CUDA where it exists.
+
+Warnings are errors. Each `ignore` in `pytest.ini` is message-based, names what emits it and, for n2v's own warnings, the plan step that removes it.
+
+## Test independence
+
+Two autouse fixtures in `conftest.py` keep tests independent of their order:
+
+- `n2v.config` (parallel LP, worker count, LP solver) is snapshotted before each test and restored after it; a test that changed it without restoring it fails. A test that needs another configuration sets it and resets it itself (`config.reset()` in a teardown, or `try/finally`).
+- `random`, `numpy` and `torch` are seeded from the test id and their state is restored afterwards, so reseeding inside a test leaks nowhere.
+
+## Running
 
 ```bash
-# Run only unit tests (~620 tests)
-pytest tests/unit/
-
-# Run only soundness tests (~200 tests)
-pytest tests/soundness/
-
-# Run only probabilistic verification tests
-pytest tests/unit/probabilistic/ tests/soundness/test_soundness_probabilistic.py -v
+pytest tests/soundness/test_soundness_relu.py          # one file
+pytest -k "relu and exact"                             # by name
+pytest --durations=50                                  # the slow end of the tier
+pytest -m slow tests/unit/probabilistic/flow           # one tier in one directory
 ```
 
-### Specific Test Files
+The default tier needs `onnx`, `onnxruntime` (pinned to the VNN-COMP grading version in `pyproject.toml`), `torch`, `cvxpy`, `highspy` and the `third_party/onnx2torch` editable install; a missing one fails the suite rather than skipping it. The optional gates that remain are for genuinely optional packages (`plotly`, `scikit-image`, `beartype`, the official `vnnlib` package).
 
-```bash
-# Run specific test file
-pytest tests/unit/sets/test_star.py -v
-pytest tests/soundness/test_soundness_relu.py -v
+## Writing a test
 
-# Run specific test class
-pytest tests/unit/sets/test_star.py::TestStar -v
-
-# Run specific test method
-pytest tests/unit/sets/test_star.py::TestStar::test_from_bounds -v
-```
-
-### Advanced Options
-
-```bash
-# Stop on first failure
-pytest tests/ -x
-
-# Show local variables on failure
-pytest tests/ -l
-
-# Run tests in parallel (requires pytest-xdist)
-pytest tests/ -n auto
-
-# Generate coverage report
-pytest tests/ --cov=n2v --cov-report=html
-```
-
-## Test Philosophy
-
-**Unit tests** focus on **implementation correctness**:
-- Does the code run without errors?
-- Are edge cases handled properly?
-- Do components integrate correctly?
-
-**Soundness tests** focus on **mathematical correctness**:
-- Are the results mathematically sound?
-- Do approximate methods over-approximate exact results?
-- Are the computed bounds correct?
-
-Both types of tests are essential:
-- Unit tests catch bugs and regressions
-- Soundness tests ensure the verification results are trustworthy
-
-## Writing Tests
-
-### Using Fixtures
-
-Unit tests use shared fixtures defined in `unit/conftest.py`:
-
-```python
-def test_my_feature(simple_star, simple_image_star):
-    """Test using predefined fixtures."""
-    result = my_function(simple_star)
-    assert result.dim == simple_star.dim
-    pytest.assert_star_valid(result)
-```
-
-**Available fixtures:**
-- `simple_star` - 3D Star set for basic tests
-- `simple_zono` - 3D Zonotope for basic tests
-- `simple_box` - 3D Box set for basic tests
-- `simple_image_star` - 4x4x1 ImageStar for CNN tests
-- `simple_image_zono` - 4x4x1 ImageZono for CNN tests
-
-**Custom assertions:**
-- `pytest.assert_star_valid(star)` - Verify Star set is well-formed
-- `pytest.assert_zono_valid(zono)` - Verify Zonotope is well-formed
-
-### Test Patterns
-
-**Unit test pattern:**
-```python
-class TestMyFeature:
-    """Tests for my new feature."""
-
-    def test_basic_case(self, simple_star):
-        """Test basic functionality."""
-        result = my_operation(simple_star)
-        assert result is not None
-        assert result.dim == simple_star.dim
-
-    def test_edge_case(self):
-        """Test edge case handling."""
-        # Create specific input for edge case
-        edge_input = Star.from_bounds(lb, ub)
-        result = my_operation(edge_input)
-        assert result.is_valid()
-
-    @pytest.mark.skip(reason="Feature not implemented yet")
-    def test_future_feature(self):
-        """Test for future feature."""
-        pass
-```
-
-**Soundness test pattern:**
-```python
-class TestLayerSoundness:
-    """Soundness tests for layer operation."""
-
-    def test_exact_vs_approx_soundness(self):
-        """Verify approximate over-approximates exact."""
-        # Generate test input
-        input_star = generate_random_star(dim=10)
-
-        # Compute both methods
-        exact_result = layer_reach_exact(input_star)
-        approx_result = layer_reach_approx(input_star)
-
-        # Verify soundness
-        for exact_star in exact_result:
-            exact_lb, exact_ub = exact_star.get_ranges()
-            approx_lb, approx_ub = approx_result[0].get_ranges()
-
-            # Approx should contain exact
-            assert np.all(approx_lb <= exact_lb + 1e-6)
-            assert np.all(approx_ub >= exact_ub - 1e-6)
-```
-
-### Test Requirements
-
-```bash
-# Install test dependencies
-pip install pytest pytest-cov
-
-# Optional: parallel test execution
-pip install pytest-xdist
-```
-
-## Contributing
-
-When adding new features:
-
-1. **Always add unit tests** to verify the implementation works
-   - Test basic functionality
-   - Test edge cases (empty inputs, boundary conditions, etc.)
-   - Test error handling
-
-2. **Add soundness tests** for verification operations to ensure mathematical correctness
-   - Compare exact vs. approximate methods
-   - Verify bounds are correct
-   - Check against ground truth for simple cases
-
-3. **Follow existing patterns**
-   - Use the existing test files as templates
-   - Use shared fixtures from `conftest.py`
-   - Use descriptive test names and docstrings
-
-4. **Ensure all tests pass** before submitting
-   ```bash
-   pytest tests/
-   ```
-
-For more details on soundness testing methodology, see [soundness/README.md](soundness/README.md).
+- Say in the docstring which bug the test catches. If you cannot, the test is probably not needed.
+- Soundness is one-sided: the computed set must contain the true value, with zero slack against exact references, a pad of the `1e-12` class against float64 references and a derived per-cell bound against float32 onnxruntime samples. Never a two-sided `allclose` on a bound, never slack that forgives an inward error.
+- Check membership against the constraint rows (`Star.contains(method="lp")` or the exact oracle), not the bounding box: a wrong row leaves the box unchanged.
+- Use inputs that can trigger the bug: asymmetric image shapes such as `(2, 3, 5)` with more than one channel, non-uniform bounds, a star with a binding non-box row, inputs on both sides of every kink.
+- Prefer a deterministic injected fault (a stubbed solver, a patched bound) to a search for a host where the fault happens to occur; a test must not skip when the host is well behaved.
+- A missing tracked asset is a broken checkout: raise, never skip. Skip only for the optional packages above, and mark external data `corpus` and CUDA `gpu`.
+- Before accepting a new soundness test, break the kernel once (drop a row, flip a sign, reverse a split) and watch the test fail.

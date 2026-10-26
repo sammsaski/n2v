@@ -25,6 +25,7 @@ from typing import List
 
 from n2v.sets import Star, Box
 from n2v.sets.image_star import ImageStar
+from n2v.utils.lpsolver import _bound_lp_solver, _outward_lp_ranges
 
 
 def _softmax_bounds(lbs: np.ndarray, ubs: np.ndarray):
@@ -59,17 +60,21 @@ def softmax_star(layer, input_stars: List[Star],
     for s in input_stars:
         star = s.to_star() if isinstance(s, ImageStar) else s
         N = star.dim
+        # HiGHS ranges padded outward: they bound the output
+        # (_bound_lp_solver, _outward_lp_ranges)
+        solver = _bound_lp_solver(lp_solver)
         lbs = np.zeros(N)
         ubs = np.zeros(N)
         for i in range(N):
-            l_val, u_val = star.get_range(i, lp_solver)
+            l_val, u_val = star.get_range(i, solver)
             if l_val is None or u_val is None:
                 raise ValueError(
                     f"LP solver returned None for dimension {i} of "
                     f"Softmax input. Star may be infeasible.")
             lbs[i], ubs[i] = l_val, u_val
+        lbs, ubs = _outward_lp_ranges(lbs, ubs, star.V)
         lower, upper = _softmax_bounds(lbs, ubs)
-        output_stars.append(Star.from_bounds(lower, upper))
+        output_stars.append(Star.fresh_from_bounds(lower, upper))
     return output_stars
 
 

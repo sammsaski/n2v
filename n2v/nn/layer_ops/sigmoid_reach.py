@@ -19,6 +19,7 @@ from typing import List, Optional, Callable
 from n2v.sets import Star, Zono
 from n2v.sets.image_star import ImageStar
 from n2v.utils.lp_solver_enum import LPSolver
+from n2v.utils.lpsolver import _bound_lp_solver, _outward_lp_ranges
 
 # Profiler hooks (no-op when profiling is disabled)
 from n2v.profiling import count
@@ -99,7 +100,15 @@ def sigmoid_zono_approx(input_zonos: List[Zono]) -> List[Zono]:
 def sigmoid_box(input_boxes: List) -> List:
     """Sigmoid for Boxes. Monotone, so just apply to bounds."""
     from n2v.sets import Box
-    return [Box(_sigmoid(box.lb), _sigmoid(box.ub)) for box in input_boxes]
+    from n2v.utils.ns_certificate import _widen_relative
+    # sigmoid is monotone. The library function is accurate to a few ulps, not
+    # correctly rounded, so the bounds are moved outward by a relative
+    # gamma_4 (times the safety factor) and clipped to the range.
+    out = []
+    for box in input_boxes:
+        lo, hi = _widen_relative(_sigmoid(box.lb), _sigmoid(box.ub), box.lb, box.ub, 4)
+        out.append(Box(np.clip(lo, 0.0, 1.0), np.clip(hi, 0.0, 1.0)))
+    return out
 
 
 # =============================================================================
@@ -147,15 +156,21 @@ def _s_curve_single_star_approx(
     N = I.dim
     n = I.nVar
 
-    # Get tight bounds via LP for all neurons
+    # Get tight bounds via LP for all neurons. They are the box of the
+    # relaxation, so they are solved with HiGHS and padded outward
+    # (_bound_lp_solver, _outward_lp_ranges); a failed LP falls back to the
+    # star's interval enclosure.
+    solver = _bound_lp_solver(lp_solver)
     lbs = np.zeros(N)
     ubs = np.zeros(N)
     for i in range(N):
-        lb_val, ub_val = I.get_range(i, lp_solver)
+        lb_val, ub_val = I.get_range(i, solver)
         lbs[i] = lb_val if lb_val is not None else lb_est[i]
         ubs[i] = ub_val if ub_val is not None else ub_est[i]
+    lbs, ubs = _outward_lp_ranges(lbs, ubs, I.V)
 
-    # Partition neurons
+    # Partition neurons. After the padding only a row with no generator (an
+    # exact constant) has a range narrower than the threshold.
     constant_map = np.where(np.abs(ubs - lbs) < 1e-10)[0]
     varying_map = np.where(np.abs(ubs - lbs) >= 1e-10)[0]
 

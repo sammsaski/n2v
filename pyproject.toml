@@ -33,9 +33,15 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
+    "pytest>=8.0.0",
     "pytest-cov>=3.0.0",
     "onnxscript>=0.1.0",
+    # onnxruntime replays every SAT witness the way the VNN-COMP grader does;
+    # the pin matches the 2026 grading environment (onnxruntime 1.26.0 with
+    # onnx 1.21.0). highspy backs the certified LP paths; without it every
+    # certificate test used to skip in CI.
+    "onnxruntime==1.26.0",
+    "highspy>=1.5.0",
     # Optional-feature deps the test suite exercises (lazy-imported in
     # the library so they stay out of core [project.dependencies]):
     #   matplotlib  — boundary_2d / star_viz rendering

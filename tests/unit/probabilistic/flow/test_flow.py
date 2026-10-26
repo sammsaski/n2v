@@ -336,6 +336,7 @@ class TestDiTLiteVelocityField:
 class TestDiTLiteLargeBatch:
     """Verify DiTLiteVelocityField handles batches > 65535 via chunking."""
 
+    @pytest.mark.gpu
     @pytest.mark.skipif(
         not torch.cuda.is_available(),
         reason="efficient attention crash is CUDA-only",

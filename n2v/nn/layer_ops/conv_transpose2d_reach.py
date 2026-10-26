@@ -13,29 +13,41 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from n2v.sets import Star, ImageStar
 from n2v.sets.image_zono import ImageZono
+from n2v.nn.layer_ops.conv2d_reach import (
+    float64_params, kernel_area, map_basis_columns)
 
 # Profiler hook (no-op when profiling is disabled)
 from n2v.profiling import region, count, OPERATION, is_enabled
 
 
-def _ct2d(layer: nn.ConvTranspose2d, x: torch.Tensor,
-          bias: Optional[torch.Tensor]) -> torch.Tensor:
-    """Apply the layer's transposed convolution to a batched NCHW tensor."""
-    with torch.no_grad():
+def _ct2d_columns(layer: nn.ConvTranspose2d,
+                  V: np.ndarray) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Apply the layer's transposed convolution, without bias, to every
+    column of a 4D (H, W, C, n) V in float64 (see
+    :func:`~n2v.nn.layer_ops.conv2d_reach.map_basis_columns`).
+
+    Returns the (H', W', C', n) result and the float64 bias (or None),
+    which the caller adds to the center column only."""
+    weight, bias = float64_params(layer)
+
+    def conv_t(x: torch.Tensor) -> torch.Tensor:
         return F.conv_transpose2d(
             x,
-            layer.weight,
-            bias,
+            weight,
+            None,
             stride=layer.stride,
             padding=layer.padding,
             output_padding=layer.output_padding,
             groups=layer.groups,
             dilation=layer.dilation,
         )
+
+    return (map_basis_columns(conv_t, V, kernel_area(layer)),
+            bias.numpy() if bias is not None else None)
 
 
 def conv_transpose2d_star(
@@ -84,8 +96,7 @@ def _conv_transpose2d_imagestar(
 ) -> ImageStar:
     """Apply ConvTranspose2D to the 4D V tensor (H, W, C, nVar+1)."""
     V = input_star.V
-    h_in, w_in, c_in, n_cols = V.shape
-    n_pred = n_cols - 1
+    c_in = V.shape[2]
 
     if c_in != layer.in_channels:
         raise ValueError(
@@ -93,25 +104,11 @@ def _conv_transpose2d_imagestar(
             f"{layer.in_channels}"
         )
 
-    center = V[:, :, :, 0]
-    center_torch = torch.from_numpy(center).permute(2, 0, 1) \
-        .unsqueeze(0).float()
-    c_out = _ct2d(layer, center_torch, layer.bias)
-    c_out_np = c_out.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    h_out, w_out, c_out_channels = c_out_np.shape
-
-    if n_pred > 0:
-        generators_torch = torch.from_numpy(V[:, :, :, 1:]) \
-            .permute(3, 2, 0, 1).float()
-        V_conv = _ct2d(layer, generators_torch, None)
-        generators_out = V_conv.permute(2, 3, 1, 0).cpu().numpy()
-    else:
-        generators_out = np.zeros((h_out, w_out, c_out_channels, 0))
-
-    V_out = np.zeros((h_out, w_out, c_out_channels, n_cols))
-    V_out[:, :, :, 0] = c_out_np
-    if n_pred > 0:
-        V_out[:, :, :, 1:] = generators_out
+    # Center and generators together; the bias belongs to the center only
+    V_out, bias = _ct2d_columns(layer, V)
+    if bias is not None:
+        V_out[:, :, :, 0] += bias
+    h_out, w_out, c_out_channels = V_out.shape[:3]
 
     return ImageStar(
         V_out,
@@ -149,20 +146,14 @@ def _conv_transpose2d_imagezono(
         )
 
     n_gen = input_zono.V.shape[1]
-    c_img = input_zono.c.reshape(h_in, w_in, c_in)
-    V_img = input_zono.V.reshape(h_in, w_in, c_in, n_gen)
 
-    c_torch = torch.from_numpy(c_img).permute(2, 0, 1).unsqueeze(0).float()
-    c_out = _ct2d(layer, c_torch, layer.bias)
-    c_out = c_out.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    h_out, w_out, c_out_channels = c_out.shape
-
-    if n_gen > 0:
-        V_torch = torch.from_numpy(V_img).permute(3, 2, 0, 1).float()
-        V_conv = _ct2d(layer, V_torch, None)
-        V_out = V_conv.permute(2, 3, 1, 0).cpu().numpy()
-    else:
-        V_out = np.zeros((h_out, w_out, c_out_channels, 0))
+    c_out, bias = _ct2d_columns(
+        layer, input_zono.c.reshape(h_in, w_in, c_in, 1))
+    if bias is not None:
+        c_out[:, :, :, 0] += bias
+    h_out, w_out, c_out_channels = c_out.shape[:3]
+    V_out, _ = _ct2d_columns(
+        layer, input_zono.V.reshape(h_in, w_in, c_in, n_gen))
 
     return ImageZono(
         c_out.reshape(-1, 1),

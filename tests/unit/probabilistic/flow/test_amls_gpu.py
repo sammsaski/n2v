@@ -54,6 +54,7 @@ class _IdentityFlow(torch.nn.Module):
 # ---------- GPU vs CPU equivalence ----------
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not _CUDA_AVAILABLE, reason='CUDA not available')
 def test_amls_gpu_smoke_runs_and_returns_result():
     """Smoke: GPU run completes and returns a valid AMLSResult."""
@@ -73,6 +74,7 @@ def test_amls_gpu_smoke_runs_and_returns_result():
     assert res.worst_y.shape == (2,)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not _CUDA_AVAILABLE, reason='CUDA not available')
 def test_amls_gpu_matches_cpu_on_easy_unsafe():
     """AMLS on GPU yields the same detected/levels as CPU for an easy case.
@@ -103,6 +105,7 @@ def test_amls_gpu_matches_cpu_on_easy_unsafe():
     assert r_cpu.pi_hat == pytest.approx(r_gpu.pi_hat, rel=1e-9)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not _CUDA_AVAILABLE, reason='CUDA not available')
 def test_amls_gpu_matches_cpu_on_undetectable():
     """AMLS on GPU agrees with CPU when ``U`` is unreachable (no detect)."""
@@ -163,6 +166,7 @@ def test_amls_default_device_autodetects_to_available_backend():
             assert flow_gpu._marker.device.type == 'cuda'
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not _CUDA_AVAILABLE, reason='CUDA not available')
 def test_amls_certify_spec_threads_device_kwarg():
     """``amls_certify_spec`` should accept ``device`` and thread it into

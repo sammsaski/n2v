@@ -20,6 +20,7 @@ found) is produced only by the falsifier lane
 (:func:`n2v.utils.falsify.falsify`), never by ``verify_specification``.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Union
 
@@ -27,7 +28,18 @@ import numpy as np
 from scipy.optimize import linprog
 
 from n2v.probabilistic.flow.sets import ProbabilisticSet
-from n2v.sets import Star, Box, HalfSpace
+from n2v.sets import Star, Box, HalfSpace, ImageZono
+from n2v.utils.lpsolver import LPFailure, confirm_infeasible
+from n2v.utils.ns_certificate import (
+    _ETA, _SAFETY, _gamma_rows, outward_interval_bounds, outward_spec_rows,
+)
+
+logger = logging.getLogger(__name__)
+
+# Matrix elements per row block of the Box fast check (64 KB of float64):
+# temporaries this small are reused by the allocator instead of being
+# page-faulted in on every call.
+_BOX_CHECK_BLOCK_ELEMS = 1 << 13
 
 SpecLike = Union[HalfSpace, list, dict]
 
@@ -357,8 +369,19 @@ def verify_specification(
 
     # For AND-across-groups: if ANY group is fully disjoint → UNSAT (safe).
     int_verdict = 2  # default UNKNOWN
-    for group in groups:
-        if _group_disjoint_from_reach_set(group, reach_set):
+    for k, group in enumerate(groups):
+        try:
+            disjoint = _group_disjoint_from_reach_set(group, reach_set)
+        except LPFailure as e:
+            # SOUNDNESS: a solver failure inside a disjointness test is not a
+            # disjointness certificate, so this group stays undecided (UNSAT is
+            # verdict-bearing: it prunes as safe). The groups are ANDed, so a
+            # later group that is certified disjoint still proves UNSAT alone.
+            logger.warning("verify_specification: LP did not decide for "
+                           "property group %d of %d (%s); group left "
+                           "undecided", k + 1, len(groups), e)
+            continue
+        if disjoint:
             int_verdict = 1  # UNSAT
             break
 
@@ -753,6 +776,21 @@ def _group_disjoint_from_reach_set(group: List[HalfSpace], reach_set: list) -> b
 
 def _is_disjoint(S: Union[Star, Box], halfspace: HalfSpace) -> bool:
     """Check if set S is disjoint from halfspace. Dispatches by set type."""
+    if hasattr(S, 'flatten_to_star'):
+        # ImageStar: its ``to_star()`` rows are HWC-ordered while specs index
+        # outputs in CHW, so a spec column lands on the wrong pixel/channel
+        # (measured: false UNSAT on multi-channel spatial outputs).
+        # ``flatten_to_star()`` produces the CHW ordering the spec expects.
+        return _verify_specification_star(S.flatten_to_star(), halfspace)
+    if isinstance(S, ImageZono):
+        # ImageZono rows are HWC-ordered as well (it subclasses Zono, so the
+        # generic ``to_star()`` branch below would keep that order and check
+        # CHW spec columns against the wrong pixel/channel). Reorder to CHW
+        # exactly as the Flatten layer does. Imported here: n2v.nn imports
+        # this module.
+        from n2v.nn.layer_ops.flatten_reach import _flatten_imagezono_chw
+        return _verify_specification_star(_flatten_imagezono_chw(S).to_star(),
+                                          halfspace)
     if isinstance(S, Box):
         return _verify_specification_box(S, halfspace)
     elif isinstance(S, Star):
@@ -771,7 +809,8 @@ def _verify_specification_box(box: Box, halfspace: HalfSpace) -> bool:
     there is no x in [lb, ub] satisfying all rows of Gx <= g.
 
     For each row i: min_{x in box} G_i·x = Σ_j min(G_ij*lb_j, G_ij*ub_j).
-    If min > g_i for any row → that constraint is infeasible → disjoint.
+    If min > g_i for any row, by more than the rounding error of computing
+    min → that constraint is infeasible → disjoint.
 
     If all rows are individually feasible, we solve a box-bounded LP to check
     simultaneous feasibility (needed for multi-row halfspaces).
@@ -787,12 +826,46 @@ def _verify_specification_box(box: Box, halfspace: HalfSpace) -> bool:
     n_rows = G.shape[0]
 
     # Fast check: for each row, compute min(G_i · x) over the box.
-    # min(G_i · x) = Σ_j min(G_ij * lb_j, G_ij * ub_j)
-    for i in range(n_rows):
-        row = G[i]
-        min_val = np.sum(np.minimum(row * lb, row * ub))
-        if min_val > g[i]:
-            return True  # constraint i infeasible → disjoint
+    # min(G_i · x) = Σ_j min(G_ij * lb_j, G_ij * ub_j) = G_i · x_min, where
+    # x_min is the minimizing corner. Rows are processed in blocks, so the
+    # (rows, n) temporaries stay bounded.
+    step = max(1, _BOX_CHECK_BLOCK_ELEMS // max(lb.size, 1))
+    # Overflow and inf - inf only reach min_val / slack as inf or NaN, which
+    # fail the comparison below (not disjoint).
+    with np.errstate(invalid='ignore', over='ignore'):
+        for start in range(0, n_rows, step):
+            Gb = G[start:start + step]
+            # Rounding is monotone, so this is the rounded product at x_min.
+            terms = Gb * lb
+            np.minimum(terms, Gb * ub, out=terms)
+            min_val = terms.sum(axis=1)
+            if np.isnan(min_val).any():
+                # A zero coefficient contributes exactly 0, also on an
+                # unbounded coordinate (where the product is 0 * inf = NaN).
+                terms[Gb == 0.0] = 0.0
+                min_val = terms.sum(axis=1)
+            # SOUNDNESS: min_val is a round-to-nearest sum of rounded products
+            # and can land a few ulps ABOVE the exact minimum, so a box whose
+            # corner touches the halfspace would be declared disjoint -- a
+            # false UNSAT (measured: 2117 of 20000 random touching boxes). A
+            # row certifies disjointness only when its margin clears a
+            # rigorous bound on the rounding of G_i · x_min. It is
+            # ns_certificate.outward_interval_slack's bound, built from that
+            # module's constants so the two stay in sync, but charged at the
+            # minimizing corner: for k nonzero terms, _SAFETY * (gamma_{k+1}
+            # * Σ|terms| + k * _ETA), where _SAFETY also covers taking |terms|
+            # after rounding and the rounding of the slack itself. Charging
+            # the corner rather than the whole box keeps the slack finite on
+            # a half-unbounded box whose minimizing corner is finite. (Calling
+            # outward_interval_slack itself, with each row split by sign
+            # against lb and ub, gives the same slack at 3-5x the cost of
+            # this whole check.)
+            k = (Gb != 0.0).sum(axis=1)
+            slack = _SAFETY * (_gamma_rows(k)
+                               * np.abs(terms, out=terms).sum(axis=1)
+                               + k * _ETA)
+            if (min_val - slack > g[start:start + step]).any():
+                return True  # some constraint infeasible → disjoint
 
     # If only one row and it's feasible, intersection exists
     if n_rows == 1:
@@ -807,8 +880,21 @@ def _verify_specification_box(box: Box, halfspace: HalfSpace) -> bool:
 
     result = linprog(c, A_ub=G, b_ub=g, bounds=bounds, method='highs')
 
-    # If infeasible → disjoint
-    return not result.success
+    # SOUNDNESS: "disjoint" is verdict-bearing (it prunes the branch as safe),
+    # so only a certified INFEASIBLE result may return True. ``not
+    # result.success`` also covers iteration limits, numerical failure and
+    # unboundedness, each of which would prune a branch the solver never
+    # decided -- a false UNSAT. scipy status codes: 0 optimal, 2 infeasible.
+    if result.status == 0:
+        return False  # feasible intersection
+    if result.status == 2:
+        # SOUNDNESS: scipy's presolve also mislabels tiny-scale feasible
+        # systems; only a robustly confirmed infeasibility is disjointness.
+        return confirm_infeasible(G, g, lb, ub)
+    raise LPFailure(
+        f"specification-box feasibility LP did not decide: scipy status "
+        f"{result.status} ({result.message!r}); not evidence of disjointness"
+    )
 
 
 def _verify_specification_star(star: Star, halfspace: HalfSpace) -> bool:
@@ -820,6 +906,23 @@ def _verify_specification_star(star: Star, halfspace: HalfSpace) -> bool:
     """
     G = halfspace.G.astype(np.float64)
     g = halfspace.g.astype(np.float64)
+
+    # Interval pre-check, no LP: a row whose pulled-back halfspace misses the
+    # predicate box already rules the unsafe region (all rows at once) out.
+    # ``outward_spec_rows`` moves the right-hand side out by the rounding of
+    # the pull-back and ``outward_interval_bounds`` gives a rigorous lower
+    # bound over the box, so ``lo > rhs`` proves the row infeasible. It needs
+    # a finite box (the slack's magnitude term). This also decides stars
+    # whose LP emptiness check a solver leaves at 'optimal' on the slackened
+    # system although the interval bound clears the threshold.
+    plb, pub = star.predicate_lb, star.predicate_ub
+    if (plb is not None and pub is not None
+            and np.all(np.isfinite(plb)) and np.all(np.isfinite(pub))):
+        H_alpha, rhs = outward_spec_rows(G, g, star.V, plb, pub)
+        lo, _ = outward_interval_bounds(np.zeros(H_alpha.shape[0]), H_alpha,
+                                        np.ravel(plb), np.ravel(pub))
+        if np.any(lo > rhs):
+            return True
 
     S = star.intersect_half_space(G, g)
 

@@ -9,6 +9,8 @@ import numpy as np
 from typing import Optional, Tuple, TYPE_CHECKING
 from scipy.linalg import svd
 
+from n2v.utils.ns_certificate import outward_center_radius, outward_interval_bounds
+
 # TYPE_CHECKING imports for type hints (avoid circular import at runtime)
 if TYPE_CHECKING:
     from n2v.sets.star import Star
@@ -95,7 +97,9 @@ class Zono:
             ub: Upper bounds (n,) or (n, 1)
 
         Returns:
-            Zonotope with center=(lb+ub)/2 and generators for each dimension
+            Zonotope with center (lb+ub)/2 and one generator per dimension
+            whose half-width is rounded outward, so the zonotope contains the
+            box exactly.
         """
         lb = np.asarray(lb, dtype=np.float64).reshape(-1, 1)
         ub = np.asarray(ub, dtype=np.float64).reshape(-1, 1)
@@ -103,12 +107,8 @@ class Zono:
         if lb.shape != ub.shape:
             raise ValueError(f"lb and ub must have same shape, got {lb.shape} and {ub.shape}")
 
-        # Center at midpoint
-        c = (lb + ub) / 2.0
-
-        # Generators: one per dimension, each with range (ub-lb)/2
-        lb.shape[0]
-        V = np.diag(((ub - lb) / 2.0).flatten())
+        c, r = outward_center_radius(lb, ub)
+        V = np.diag(r.flatten())
 
         return cls(c, V)
 
@@ -256,10 +256,22 @@ class Zono:
 
         V_kept = self.V[:, kept_indices]
 
-        # Over-approximate removed generators with interval hull
+        # Over-approximate removed generators with interval hull. The radius
+        # sum_j |V_removed[i, j]| is rounded outward (the upper bound of
+        # V_removed alpha over [-1, 1]^k): a round-to-nearest sum lands below
+        # the exact one about half the time, and the reduced Zono then misses
+        # the original by a few ulps.
         V_removed = self.V[:, removed_indices]
-        interval_hull = np.sum(np.abs(V_removed), axis=1, keepdims=True)
-        V_hull = np.diag(interval_hull.flatten())
+        n_removed = V_removed.shape[1]
+        _, radius = outward_interval_bounds(
+            np.zeros(self.dim), V_removed,
+            -np.ones(n_removed), np.ones(n_removed))
+        # Keep the Zono's dtype, rounding a float32 radius up, not to nearest.
+        interval_hull = radius.astype(self.V.dtype)
+        up = self.V.dtype.type(np.inf)
+        interval_hull = np.where(interval_hull < radius,
+                                 np.nextafter(interval_hull, up), interval_hull)
+        V_hull = np.diag(interval_hull)
 
         # Remove zero columns from hull
         non_zero = np.any(V_hull != 0, axis=0)
@@ -365,9 +377,8 @@ class Zono:
 
         # For each dimension: lb[i] = c[i] - ||V[i,:]||_1
         #                     ub[i] = c[i] + ||V[i,:]||_1
-        radius = np.sum(np.abs(self.V), axis=1, keepdims=True)
-        lb = self.c - radius
-        ub = self.c + radius
+        # (outward-rounded, see get_bounds)
+        lb, ub = self.get_bounds()
 
         return Box(lb, ub)
 
@@ -382,18 +393,19 @@ class Zono:
         Returns:
             Tuple of (lb, ub) arrays
         """
-        # Sum absolute values of generators
-        sum_abs_generators = np.sum(np.abs(self.V), axis=1, keepdims=True)
+        # SOUNDNESS: the sums are round-to-nearest; move each bound outward by
+        # a rigorous bound on its own rounding so the interval is an enclosure
+        # (same computation as Star.estimate_ranges -- zonotope bounds feed
+        # neuron classification).
+        n_gens = self.V.shape[1]
+        lb, ub = outward_interval_bounds(self.c.reshape(-1), self.V,
+                                         -np.ones(n_gens), np.ones(n_gens))
 
-        lb = self.c - sum_abs_generators
-        ub = self.c + sum_abs_generators
-
-        return lb, ub
+        return lb.reshape(-1, 1), ub.reshape(-1, 1)
 
     def get_ranges(self) -> Tuple[np.ndarray, np.ndarray]:
         """Get ranges (same as get_box bounds)."""
-        box = self.get_box()
-        return box.lb, box.ub
+        return self.get_bounds()
 
     def estimate_ranges(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -420,11 +432,12 @@ class Zono:
         if index < 0 or index >= self.dim:
             raise ValueError(f"Invalid index {index}, dimension is {self.dim}")
 
-        radius = np.sum(np.abs(self.V[index, :]))
-        lb = self.c[index, 0] - radius
-        ub = self.c[index, 0] + radius
+        # Outward-rounded, see get_bounds.
+        n_gens = self.V.shape[1]
+        lb, ub = outward_interval_bounds(self.c[index, 0], self.V[index, :],
+                                         -np.ones(n_gens), np.ones(n_gens))
 
-        return lb, ub
+        return float(lb), float(ub)
 
     def contains(self, x: np.ndarray) -> bool:
         """

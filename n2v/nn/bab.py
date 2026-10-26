@@ -27,6 +27,7 @@ from typing import Callable, List, Optional, Sequence
 
 import numpy as np
 
+from n2v.utils.lpsolver import LPFailure, _bound_lp_solver, _lp_pad
 from n2v.utils.verify_specification import verify_specification
 
 
@@ -198,9 +199,10 @@ def _seq_reach_relu(layers, input_star, splits, relax_factor, lp_solver):
 
     ``splits`` maps relu-layer index -> {neuron: +1 (active) | -1 (inactive)}.
     Forced neurons are pinned by intersecting the pre-activation star with the
-    sign halfspace; LP ranges (which respect those constraints) are passed to the
-    triangle ReLU so a forced neuron is treated exactly (stable). Returns
-    (out_star, undecided_unstable_list, empty)."""
+    sign halfspace and clamping their bounds to that sign, so the triangle ReLU
+    treats a forced neuron exactly (stable). The undecided-unstable list holds
+    exactly the neurons the triangle ReLU relaxes, so a node with none left is
+    an exact leaf. Returns (out_star, undecided_unstable_list, empty)."""
     from n2v.nn.layer_ops.linear_reach import linear_star
     from n2v.nn.layer_ops.relu_reach import relu_star_approx
 
@@ -222,15 +224,50 @@ def _seq_reach_relu(layers, input_star, splits, relax_factor, lp_solver):
                     r[n] = -1.0 if sign > 0 else 1.0   # s_n>=0  or  s_n<=0
                     rows.append(r); gs.append(0.0)
                 s = s.intersect_half_space(np.array(rows), np.array(gs))
-                if s.is_empty_set(lp_solver):
+                try:
+                    empty = s.is_empty_set(lp_solver)
+                except LPFailure:
+                    # SOUNDNESS: a solver failure is not an emptiness
+                    # certificate; keep exploring rather than declare safe.
+                    empty = False
+                if empty:
                     return None, [], True              # infeasible -> vacuously safe
-            lb, ub = s.get_ranges(lp_solver=lp_solver)
-            lbf, ubf = lb.reshape(-1), ub.reshape(-1)
-            for n in range(s.dim):
-                if n not in dec and lbf[n] < -1e-9 and ubf[n] > 1e-9:
-                    unstable.append((relu_id, n, float(lbf[n]), float(ubf[n])))
-            s = relu_star_approx([s], relax_factor=relax_factor,
-                                 lp_solver=lp_solver, precomputed_bounds=(lb, ub))[0]
+            # SOUNDNESS: LP optima are exact only to solver tolerance; pad
+            # outward before they decide a neuron's phase (_lp_pad). The pad is
+            # sized for HiGHS, so these LPs use HiGHS whatever lp_solver is
+            # (_bound_lp_solver; SCS/OSQP stop up to ~4e-5 short of the optimum).
+            lb, ub = s.get_ranges(lp_solver=_bound_lp_solver(lp_solver))
+            lb = (lb - _lp_pad(lb)).reshape(-1)
+            ub = (ub + _lp_pad(ub)).reshape(-1)
+            # The interval enclosure is what relu_star_approx intersects these
+            # with before classifying; apply it here too so the unstable list
+            # below matches the neurons it relaxes (a zero row stays [0, 0]
+            # instead of padding into a spurious crossing). fmax/fmin let the
+            # enclosure govern if an LP bound came back NaN.
+            elb, eub = s.estimate_ranges()
+            lb = np.fmax(lb, np.asarray(elb, dtype=np.float64).reshape(-1))
+            ub = np.fmin(ub, np.asarray(eub, dtype=np.float64).reshape(-1))
+            # Pin forced neurons to their sign; the padding would otherwise
+            # straddle 0 and relax them. Sound because the two children of a
+            # split each contain their exact half ({s_n >= 0} / {s_n <= 0}),
+            # so together they cover the parent even where the sign row was
+            # inflated outward.
+            for n, sign in dec.items():
+                if sign > 0:
+                    lb[n] = max(lb[n], 0.0)
+                else:
+                    ub[n] = min(ub[n], 0.0)
+            for n in np.flatnonzero((lb < 0) & (ub > 0)):
+                unstable.append((relu_id, int(n), float(lb[n]), float(ub[n])))
+            out = relu_star_approx([s], relax_factor=relax_factor,
+                                   lp_solver=lp_solver, precomputed_bounds=(lb, ub))
+            if len(out) != 1:
+                # SOUNDNESS: keeping one star of a split output would drop
+                # reachable states; this search needs one relaxed star.
+                raise RuntimeError(
+                    f"verify_bab_relu: ReLU layer {relu_id} produced {len(out)} "
+                    f"stars, expected 1")
+            s = out[0]
             relu_id += 1
         else:
             raise NotImplementedError(f"verify_bab_relu: unsupported layer {name}")
@@ -260,9 +297,17 @@ def verify_bab_relu(
     (forcing active/inactive), which exactly tile the parent, so it is sound and
     complete-in-the-limit. Prunes a subdomain when the bound proves it safe or
     the forced signs are infeasible; falsifies the (fixed) input box once.
+
+    ``relax_factor`` must lie in (0, 1]: each node is bounded by one
+    triangle-relaxed star, and 0 (exact ReLU splitting, one star per sign
+    pattern) is what this search already does one neuron at a time.
     """
     from n2v.sets import Star
     from n2v.utils.falsify import falsify as _falsify
+
+    if not 0.0 < relax_factor <= 1.0:
+        raise ValueError(
+            f"verify_bab_relu: relax_factor must be in (0, 1], got {relax_factor}")
 
     clock = _clock or time.monotonic
     t0 = clock()

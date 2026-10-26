@@ -79,4 +79,12 @@ def tanh_zono_approx(input_zonos: List[Zono]) -> List[Zono]:
 def tanh_box(input_boxes: List) -> List:
     """Tanh for Boxes. Monotone, so just apply to bounds."""
     from n2v.sets import Box
-    return [Box(_tanh(box.lb), _tanh(box.ub)) for box in input_boxes]
+    from n2v.utils.ns_certificate import _widen_relative
+    # tanh is monotone. The library function is accurate to a few ulps, not
+    # correctly rounded, so the bounds are moved outward by a relative
+    # gamma_4 (times the safety factor) and clipped to the range.
+    out = []
+    for box in input_boxes:
+        lo, hi = _widen_relative(_tanh(box.lb), _tanh(box.ub), box.lb, box.ub, 4)
+        out.append(Box(np.clip(lo, -1.0, 1.0), np.clip(hi, -1.0, 1.0)))
+    return out

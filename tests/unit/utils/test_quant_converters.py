@@ -11,8 +11,8 @@ ops (Conv/Gemm) still see initializers. These tests pin:
 import numpy as np
 import pytest
 
-onnx = pytest.importorskip("onnx")
-ort = pytest.importorskip("onnxruntime")
+import onnx
+import onnxruntime as ort
 import torch  # noqa: E402
 from onnx import TensorProto, helper, numpy_helper  # noqa: E402
 

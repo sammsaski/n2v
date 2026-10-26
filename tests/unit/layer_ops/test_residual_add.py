@@ -53,7 +53,9 @@ class TestAddSetsStar:
         assert np.allclose(out.V, expected_V)
 
     def test_star_addition_multiple_sets(self):
-        """Adding lists of multiple Stars pair-wise."""
+        """Adding lists of Stars that all share one predicate system: which
+        piece of each list holds a given input's value is unknown, so every
+        pair of pieces is added."""
         V1 = np.array([[1.0, 0.5], [2.0, 0.3]])
         V2 = np.array([[0.5, 0.1], [1.0, 0.2]])
         C = np.array([[1.0]])
@@ -67,9 +69,10 @@ class TestAddSetsStar:
         s2b = Star(V2 * 2, C, d, pred_lb, pred_ub)
 
         result = _add_sets([s1a, s1b], [s2a, s2b], 'add')
-        assert len(result) == 2
-        assert np.allclose(result[0].V, V1 + V2)
-        assert np.allclose(result[1].V, V1 * 2 + V2 * 2)
+        assert len(result) == 4
+        for r, expected in zip(result, [V1 + V2, V1 + V2 * 2,
+                                        V1 * 2 + V2, V1 * 2 + V2 * 2]):
+            assert np.allclose(r.V, expected)
 
     def test_star_preserves_constraints(self):
         """Constraints (C, d, pred_lb, pred_ub) are preserved from set a."""
@@ -185,7 +188,8 @@ class TestAddSetsZono:
         assert np.allclose(out.V[:, 2:], -V2)
 
     def test_zono_addition_multiple_sets(self):
-        """Adding lists of Zonos pair-wise."""
+        """Adding lists of Zonos: zonotopes carry no input-region
+        information, so every pair of pieces is added."""
         c1 = np.array([[1.0]])
         V1 = np.array([[0.5]])
         c2 = np.array([[2.0]])
@@ -197,9 +201,9 @@ class TestAddSetsZono:
         z2b = Zono(c2 * 2, V2)
 
         result = _add_sets([z1a, z1b], [z2a, z2b], 'add')
-        assert len(result) == 2
-        assert np.allclose(result[0].c, c1 + c2)
-        assert np.allclose(result[1].c, c1 * 2 + c2 * 2)
+        assert len(result) == 4
+        centers = [r.c.item() for r in result]
+        assert np.allclose(centers, [3.0, 5.0, 4.0, 6.0])
 
 
 class TestAddSetsImageZono:
@@ -249,18 +253,18 @@ class TestAddSetsBox:
         assert np.allclose(out.ub, np.array([[2.5]]))
 
     def test_box_addition_multiple_sets(self):
-        """Adding lists of Boxes pair-wise."""
+        """Adding lists of Boxes: boxes carry no input-region information,
+        so every pair of pieces is added."""
         b1a = Box(np.array([[0.0]]), np.array([[1.0]]))
         b1b = Box(np.array([[2.0]]), np.array([[3.0]]))
         b2a = Box(np.array([[0.5]]), np.array([[1.5]]))
         b2b = Box(np.array([[1.0]]), np.array([[2.0]]))
 
         result = _add_sets([b1a, b1b], [b2a, b2b], 'add')
-        assert len(result) == 2
-        assert np.allclose(result[0].lb, np.array([[0.5]]))
-        assert np.allclose(result[0].ub, np.array([[2.5]]))
-        assert np.allclose(result[1].lb, np.array([[3.0]]))
-        assert np.allclose(result[1].ub, np.array([[5.0]]))
+        assert len(result) == 4
+        got = [(r.lb.item(), r.ub.item()) for r in result]
+        assert np.allclose(got, [(0.5, 2.5), (1.0, 3.0),
+                                 (2.5, 4.5), (3.0, 5.0)])
 
 
 class TestCoerceSetTypes:

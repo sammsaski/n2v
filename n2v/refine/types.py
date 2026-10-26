@@ -1,18 +1,12 @@
 """
-Data types for the witness-guided star-set refinement layer (Phase 1).
-
-See ``.claude/research/29-RefineStar/`` for the design + theory. Phase 1 is a
-CPU-only branch-and-bound over ReLU activation splits whose sole purpose is the
-"kill experiment": does a *constraint-faithful* witness (minimizer over the full
-predicate polytope P) select better splits than a *box-corner* witness
-(minimizer over the predicate box only)?
+Data types for the star-set branch-and-bound verifiers in ``n2v.refine``.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Optional
 
 import numpy as np
 
@@ -61,8 +55,9 @@ class LinearSpec:
         """Row margins ``G y - g``; ``y`` is unsafe iff all entries <= 0."""
         return self.G @ np.asarray(y, dtype=np.float64).flatten() - self.g
 
-    def is_unsafe(self, y: np.ndarray, tol: float = 1e-9) -> bool:
-        """True iff ``y`` lies in the (closed) unsafe region, within ``tol``."""
+    def is_unsafe(self, y: np.ndarray, tol: float = 0.0) -> bool:
+        """True iff ``y`` lies in the closed unsafe region (``tol`` > 0 widens
+        it; the counterexample contract is zero tolerance)."""
         return bool(np.all(self.margins(y) <= tol))
 
 
@@ -126,23 +121,6 @@ class Witness:
 
 
 @dataclass
-class RefineNode:
-    """A branch-and-bound node: the set of fixed neuron phases on this branch."""
-
-    fixed: Dict[NeuronKey, Phase] = field(default_factory=dict)
-
-    @property
-    def depth(self) -> int:
-        return len(self.fixed)
-
-    def with_fixed(self, key: NeuronKey, phase: Phase) -> "RefineNode":
-        """Return a child node with one additional fixed neuron."""
-        child = dict(self.fixed)
-        child[key] = phase
-        return RefineNode(child)
-
-
-@dataclass
 class RefineResult:
     """Outcome of a refinement search."""
 
@@ -150,7 +128,3 @@ class RefineResult:
     nodes: int
     max_depth: int
     counterexample_x: Optional[np.ndarray] = None
-    # Per-node diagnostics for the kill experiment (only populated when requested):
-    # divergence Delta = t_faithful - t_box >= 0 (Prop. 2), and the node depth.
-    deltas: List[float] = field(default_factory=list)
-    delta_depths: List[int] = field(default_factory=list)

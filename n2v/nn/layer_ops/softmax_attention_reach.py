@@ -17,7 +17,7 @@ coordinates, so those corners are jointly attainable. See
 The symbolic exp/rowsum/reciprocal/normalize Star construction (Slice 1, the
 precision win) is a separate follow-up; this module deliberately ships only the
 sound bound. ``softmax_attn_star`` here returns the box-precision enclosure
-(``Star.from_bounds`` of the correlated row bound) -- sound, and exactly the
+(``Star.fresh_from_bounds`` of the correlated row bound) -- sound, and exactly the
 non-regression fallback the design intersects the symbolic path with. It does
 NOT pretend to keep predicate correlation.
 """
@@ -27,6 +27,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 from n2v.sets import Star, Zono, Box
+from n2v.utils.lpsolver import _bound_lp_solver, _outward_lp_ranges
 
 
 def _softmax_last(x: np.ndarray) -> np.ndarray:
@@ -120,20 +121,23 @@ def softmax_attn_star(
 ) -> List[Star]:
     """Sound softmax for Star logits (box-precision enclosure).
 
-    Concretises logits to their LP-exact per-dim range, applies the exact
-    correlated row bound, and re-encodes via ``Star.from_bounds``. Sound; this
+    Concretises logits to their per-dim range (``bounds='lp'``: the HiGHS
+    range padded outward, ``_bound_lp_solver`` and ``_outward_lp_ranges``;
+    ``'estimate'``: the predicate-box enclosure), applies the exact
+    correlated row bound, and re-encodes via ``Star.fresh_from_bounds``. Sound; this
     is the non-regression fallback that the symbolic Star softmax (Slice 1) will
     intersect with. It does not preserve predicate correlation.
     """
     out: List[Star] = []
     for star in input_stars:
         if bounds == "lp":
-            lo, hi = star.get_ranges(lp_solver=lp_solver)
+            lo, hi = star.get_ranges(lp_solver=_bound_lp_solver(lp_solver))
+            lo, hi = _outward_lp_ranges(lo, hi, star.V)
         elif bounds == "estimate":
             lo, hi = star.estimate_ranges()
         else:
             raise ValueError(f"unknown bounds mode {bounds!r}")
         a_lb, a_ub = _bounds_to_flat(
             np.asarray(lo).reshape(-1), np.asarray(hi).reshape(-1), shape, axis)
-        out.append(Star.from_bounds(a_lb, a_ub))
+        out.append(Star.fresh_from_bounds(a_lb, a_ub))
     return out

@@ -57,6 +57,8 @@ n2v.set_lp_solver('SCS')      # Alternative CVXPY solver
 - **Speed**: Moderate (problem construction overhead)
 - **Strengths**: Rich API, easy debugging, supports many solver backends
 
+Whatever solver is set, the LPs whose optimum is used as a bound run on HiGHS. These are the LPs that decide a ReLU, LeakyReLU or Sign neuron's phase, the branch-and-bound ReLU bounds, the operand ranges of an element-wise Mul or Div of two sets, the per-neuron ranges that the Sigmoid, Tanh, Softmax, Pow, trigonometric, rounding and set-by-set MatMul relaxations are built on, and the `lp_cpu` bounds of the refine engine. CVXPY solvers stop at their own tolerances: SCS and OSQP returned maxima up to 4e-5 below the true maximum with status "optimal", which is too far for the small outward pad that makes such a bound sound.
+
 **When to use:**
 - Debugging or developing new features
 - Need access to solution details (dual values, slack, etc.)

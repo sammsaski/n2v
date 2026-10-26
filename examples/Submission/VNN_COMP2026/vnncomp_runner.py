@@ -32,6 +32,7 @@ producing a witness the official checker would reject.
 """
 
 import ast
+import functools
 import gzip
 import logging
 import multiprocessing
@@ -44,6 +45,7 @@ import tempfile
 import time
 
 import numpy as np
+import torch
 
 logger = logging.getLogger("vnncomp_runner")
 
@@ -54,6 +56,7 @@ _REPO = os.path.abspath(os.path.join(_HERE, "..", "..", ".."))
 sys.path.insert(0, os.path.join(_REPO, "examples", "VNN-COMP"))
 
 import n2v  # noqa: E402
+from n2v.config import config as _n2v_config  # noqa: E402
 from n2v.nn import NeuralNetwork  # noqa: E402
 from n2v.utils import load_vnnlib, falsify  # noqa: E402
 from n2v.utils.verify_specification import verify_specification  # noqa: E402
@@ -62,6 +65,7 @@ from n2v.utils.onnx_validate import (  # noqa: E402
     onnx_forward, in_unsafe_region, make_onnx_forward,
 )
 from n2v.utils.falsify import _extract_halfspace_groups  # noqa: E402
+from n2v.utils.vnnlib2 import evaluate_nonlinear  # noqa: E402
 from n2v.sets import Star  # noqa: E402
 from n2v.sets.image_star import ImageStar  # noqa: E402
 
@@ -135,8 +139,8 @@ def _maybe_decompress(path):
     return path, False
 
 
-def get_input_shape(onnx_path):
-    """Input tensor shape with the batch dimension stripped."""
+def _onnx_input_dims(onnx_path):
+    """Declared dims of the first true ONNX input (0 = dynamic)."""
     import onnx
     model = onnx.load(onnx_path)
     init = {i.name for i in model.graph.initializer}
@@ -144,13 +148,95 @@ def get_input_shape(onnx_path):
     if not inputs:
         raise ValueError(f"no true input tensor in {onnx_path}")
     dims = inputs[0].type.tensor_type.shape.dim
-    vals = tuple(d.dim_value for d in dims)
+    return tuple(d.dim_value for d in dims)
+
+
+def _strip_batch_dim(vals):
     # Strip the leading dim only when it looks like a batch dim
     # (1, or 0 = dynamic). A rank-1 input (e.g. a flat vector packing
     # image + spec params) has no batch dim to strip.
     if len(vals) > 1 and vals[0] in (0, 1):
         vals = vals[1:]
     return vals
+
+
+def get_input_shape(onnx_path):
+    """Input tensor shape with the batch dimension stripped."""
+    return _strip_batch_dim(_onnx_input_dims(onnx_path))
+
+
+class _PerSampleModel(torch.nn.Module):
+    """Run a converted graph whose ONNX input has no batch dimension one sample
+    at a time.
+
+    The falsifiers call the model on ``(N, *input_shape)``. A graph declared on
+    the bare input shape (cctsdb_yolo_2023's flat ``[12296]``, which reshapes
+    it internally to ``[1, 3, 64, 64]``) rejects that, so each sample is run at
+    the declared shape and the flattened outputs are stacked. Autograd flows
+    through, so the gradient attacks still work."""
+
+    def __init__(self, model, input_shape):
+        super().__init__()
+        self.model = model
+        self.input_shape = tuple(input_shape)
+
+    def forward(self, x):
+        xs = x.reshape(-1, *self.input_shape)
+        return torch.stack([self.model(xi).reshape(-1) for xi in xs])
+
+
+def _falsify_model(model, input_shape, raw_dims, x_probe):
+    """The model to hand to ``falsify``. Unchanged unless the ONNX input
+    declares no batch dimension (nothing was stripped from ``raw_dims``) and
+    the converted graph rejects a batch-prefixed input but accepts the bare
+    one; then it is wrapped in :class:`_PerSampleModel`."""
+    if len(input_shape) != len(raw_dims):
+        return model
+    x = torch.as_tensor(np.asarray(x_probe, dtype=np.float32)
+                        .reshape(input_shape))
+    with torch.no_grad():
+        try:
+            model(x.unsqueeze(0))
+            return model
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            model(x)
+        except Exception:  # noqa: BLE001
+            return model
+    logger.info("ONNX input %s has no batch dim; falsifying one sample at a "
+                "time", tuple(raw_dims))
+    return _PerSampleModel(model, input_shape)
+
+
+def _snap_into_box(x, lb, ub):
+    """Clip a candidate witness into the ORIGINAL float64 VNNLIB box.
+
+    Witness producers reconstruct inputs from a normalised star (c + rad*alpha)
+    or optimise in float32; both can land 1 ulp outside [lb, ub], and the
+    grader replays input membership at ZERO tolerance. The snap happens
+    BEFORE the onnxruntime re-check so the emitted (x, y) pair is consistent.
+    Accepts a flat vector, a shaped vector, or a (N, d) batch.
+    """
+    lb = np.asarray(lb, dtype=np.float64).reshape(-1)
+    ub = np.asarray(ub, dtype=np.float64).reshape(-1)
+    x = np.asarray(x, dtype=np.float64)
+    if x.size % lb.size != 0:
+        return x
+    shp = x.shape
+    xf = x.reshape(-1, lb.size)
+    return np.clip(xf, lb[None, :], ub[None, :]).reshape(shp)
+
+
+def _physical_memory_bytes():
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return 64 * 2**30
+
+
+# Largest dense input-set basis create_input_set builds: half the machine.
+_MAX_INPUT_BASIS_BYTES = _physical_memory_bytes() // 2
 
 
 def create_input_set(lb, ub, input_shape):
@@ -164,6 +250,17 @@ def create_input_set(lb, ub, input_shape):
     """
     lb = np.asarray(lb, dtype=np.float64).flatten().reshape(-1, 1)
     ub = np.asarray(ub, dtype=np.float64).flatten().reshape(-1, 1)
+
+    # The set's basis is dense: dim x (perturbed dims + 1) float64. A
+    # full-image box on a large input (e.g. 640x640x3) would need terabytes
+    # and get the process killed before it could report; refuse it instead
+    # (the caller concedes unknown for this method).
+    n_pert = int(np.count_nonzero(ub > lb))
+    basis_bytes = lb.size * (n_pert + 1) * 8
+    if basis_bytes > _MAX_INPUT_BASIS_BYTES:
+        raise MemoryError(
+            f"input set basis would take {basis_bytes / 2**30:.0f} GiB "
+            f"({lb.size} dims, {n_pert} perturbed)")
 
     nontrivial = [d for d in input_shape if d != 1]
     if len(input_shape) >= 3 and len(nontrivial) >= 2:
@@ -180,11 +277,12 @@ def create_input_set(lb, ub, input_shape):
 
 def _v2_ce_meta(vnnlib_path):
     """Declared I/O tensors of a VNNLIB 2.0 spec, in declaration order, for the
-    section-5.3 textual counterexample format: a list of ``(name, dtype,
-    dims)``. Returns ``None`` for a 1.0 spec (no ``(vnnlib-version ...)``
-    header), so the caller falls back to the legacy s-expr. Mirrors NNV's
-    ``i_vnnlib2_ce_meta`` regex so our witnesses are byte-compatible with what
-    the official 2.0 checker (``counterexamples_v2.py``) accepts."""
+    section-5.3 textual counterexample format: a list of ``(kind, name, dtype,
+    dims)`` with ``kind`` ``"input"`` or ``"output"``. Returns ``None`` for a
+    1.0 spec (no ``(vnnlib-version ...)`` header), so the caller falls back to
+    the legacy s-expr. Follows NNV's ``i_vnnlib2_ce_meta`` regex so our
+    witnesses are byte-compatible with what the official 2.0 checker
+    (``counterexamples_v2.py``) accepts."""
     if not vnnlib_path:
         return None
     try:
@@ -196,31 +294,42 @@ def _v2_ce_meta(vnnlib_path):
         return None
     meta = []
     for m in re.finditer(
-            r"\(\s*declare-(?:input|output)\s+(\S+)\s+(\S+)\s+\[([0-9,\s]*)\]",
+            r"\(\s*declare-(input|output)\s+(\S+)\s+(\S+)\s+\[([0-9,\s]*)\]",
             txt):
-        dims = m.group(3).strip()
+        dims = m.group(4).strip()
         shape = [int(d) for d in dims.split(",") if d.strip()] if dims else []
-        meta.append((m.group(1), m.group(2), shape))
+        meta.append((m.group(1), m.group(2), m.group(3), shape))
     return meta or None
 
 
 def _format_ce_v2(meta, input_vec, output_vec):
     """VNNLIB 2.0 section-5.3 textual witness: for each declared tensor, a
     ``name dtype [d0,d1,...]`` header then its C-order values one per line, in
-    declaration order (Y* blocks drawn from the output witness, others from the
-    input witness). The 1.0 ``(X_i v)`` s-expr is scored ``malformed_ce`` for a
-    2.0 spec, which is why our 2.0-track SAT witnesses came back invalid."""
+    declaration order (``declare-output`` blocks drawn from the output witness,
+    ``declare-input`` blocks from the input witness). The header repeats the
+    declared dims verbatim, so a scalar ``[]`` stays ``[]`` with one value:
+    the checker requires the header shape to equal the declared shape. The
+    1.0 ``(X_i v)`` s-expr is scored ``malformed_ce`` for a 2.0 spec, which is
+    why our 2.0-track SAT witnesses came back invalid. Raises ``ValueError``
+    when a declared tensor has more values than the witness holds (the file
+    would be malformed)."""
     out = []
     xi = yi = 0
-    for name, dtype, shape in meta:
-        n = int(np.prod(shape)) if shape else 1
-        dimstr = ",".join(str(d) for d in shape) if shape else "1"
+    for kind, name, dtype, shape in meta:
+        n = int(np.prod(shape))                 # 1 for a scalar []
+        dimstr = ",".join(str(d) for d in shape)
         out.append(f"{name} {dtype} [{dimstr}]")
-        if name.upper().startswith("Y"):
+        if kind == "output":
             blk = output_vec[yi:yi + n]; yi += n
         else:
             blk = input_vec[xi:xi + n]; xi += n
-        out.extend(format(float(v), ".16g") for v in blk)
+        if len(blk) != n:
+            raise ValueError(f"witness has {len(blk)} values for {kind} "
+                             f"{name} {shape}, expected {n}")
+        # repr() is the shortest ROUND-TRIP representation; ".16g" drops the
+        # 17th significant digit, so a witness sitting exactly on a 17-digit
+        # bound re-parsed outside the box (measured; invalid at zero tolerance).
+        out.extend(repr(float(v)) for v in blk)
     return "\n".join(out)
 
 
@@ -239,9 +348,57 @@ def format_counterexample(input_vec, output_vec, vnnlib_path=None):
     return "(" + "\n".join(lines) + ")"
 
 
+def _assertions_hold(prop, x, y):
+    """Do the spec's own assertions hold at the witness ``(x, y)``? They are
+    evaluated in float64 and again in float32, the precision in which the
+    VNN-COMP 2026 checker evaluates the witness of a float32 network (it
+    parses the input into float32 and compares the float32 replay output with
+    NumPy's scalar promotion rules); both must hold."""
+    x = np.asarray(x, dtype=np.float64).ravel()
+    y = np.asarray(y, dtype=np.float64).ravel()
+    return (evaluate_nonlinear(prop, x, y)
+            and evaluate_nonlinear(prop, x, y, dtype=np.float32))
+
+
+def _witness_satisfies_spec(prop, groups, x, y):
+    """Final SAT gate for a linear (single-network) spec: the replayed output
+    ``y`` lies in the unsafe region ``groups`` of the witness's (region, prop)
+    pair at zero tolerance. The parser lowers a strict ``<``/``>`` to the
+    closed row, and the grader evaluates arithmetic (sums, coefficients) in
+    float32, so the float64 rows can admit points the grader rejects; for
+    such specs the parser also keeps the assertions (``prop['assertions']``),
+    and they must hold at ``(x, y)`` as well (:func:`_assertions_hold`)."""
+    if not in_unsafe_region(y, groups, tol=0.0):
+        return False
+    if prop.get("assertions") is None:
+        return True
+    return _assertions_hold(prop, x, y)
+
+
 # ---------------------------------------------------------------------------
 # Verification
 # ---------------------------------------------------------------------------
+
+
+def _restores_global_config(fn):
+    """Restore ``n2v.config`` (parallel LP, workers, LP solver) after ``fn``.
+
+    The runner switches the process-wide configuration to use every core;
+    callers that run several instances in one process (the test suite, the
+    internal harness) must get it back unchanged.
+    """
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        c = _n2v_config
+        saved = (c.parallel_lp, c.n_workers, c.auto_parallel,
+                 c.parallel_threshold, c.lp_solver)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            (c.parallel_lp, c.n_workers, c.auto_parallel,
+             c.parallel_threshold, c.lp_solver) = saved
+    return wrapper
+
 
 def _resolve_workers(workers):
     """Worker count for parallel LP. Defaults to all cores (one instance at a
@@ -258,6 +415,7 @@ def _resolve_workers(workers):
     return multiprocessing.cpu_count()
 
 
+@_restores_global_config
 def verify_instance(onnx_path, vnnlib_path, category, workers=None):
     t0 = time.time()
     prop = load_vnnlib(vnnlib_path)
@@ -287,7 +445,8 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
                                    category, t0, vnnlib_path, workers=workers)
 
     model = load_onnx(onnx_path)
-    input_shape = get_input_shape(onnx_path)
+    raw_dims = _onnx_input_dims(onnx_path)
+    input_shape = _strip_batch_dim(raw_dims)
 
     # Nonlinear output property (Pow/Mul over the variables): no linear
     # half-space `pairs`, so it has its own falsify -> sound-reach path.
@@ -318,11 +477,20 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
     # with 200 pairs) don't multiply the falsification cost by the region
     # count.
     n_rand_per_pair = max(20, n_rand // max(len(pairs), 1))
+    f_model = model
+    if pairs:
+        try:
+            f_model = _falsify_model(
+                model, input_shape, raw_dims,
+                (np.asarray(pairs[0]["lb"], dtype=np.float64)
+                 + np.asarray(pairs[0]["ub"], dtype=np.float64)) / 2)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("falsify model probe failed: %s", e)
     for pair in pairs:
         try:
             lb_s = np.asarray(pair["lb"], dtype=np.float64).reshape(input_shape)
             ub_s = np.asarray(pair["ub"], dtype=np.float64).reshape(input_shape)
-            res, cex = falsify(model, lb_s, ub_s, pair["prop"],
+            res, cex = falsify(f_model, lb_s, ub_s, pair["prop"],
                                method=falsify_method,
                                n_samples=n_rand_per_pair, seed=42,
                                **falsify_kwargs)
@@ -340,20 +508,26 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
                 # remaining pairs, then fall to reach. NOTE: we do not gate on a
                 # float64 re-forward — float64 is explicitly NOT the grader's
                 # oracle, and gating on it discards witnesses the official ONNX
-                # replay accepts (see resolved.md I-45).
+                # replay accepts (see resolved.md I-45). A strict comparison or
+                # arithmetic is checked here as the checker evaluates it
+                # (_witness_satisfies_spec), although the pair's half-spaces
+                # are a float64 closure.
                 try:
-                    y_ort = onnx_forward(onnx_path, cex[0])
+                    cx0 = _snap_into_box(cex[0], pair["lb"], pair["ub"])
+                    y_ort = onnx_forward(onnx_path, cx0)
                     groups = _extract_halfspace_groups(pair["prop"])
-                    if in_unsafe_region(y_ort, groups, tol=0.0):
+                    if _witness_satisfies_spec(prop, groups, cx0, y_ort):
                         return {"result": RESULT_SAT, "time": time.time() - t0,
                                 "counterexample": format_counterexample(
-                                    cex[0], y_ort, vnnlib_path)}
+                                    cx0, y_ort, vnnlib_path)}
                     logger.warning("falsify CE rejected by onnxruntime re-check "
-                                   "(onnx2torch divergence); not emitting sat")
+                                   "(onnx2torch divergence, or a strict bound "
+                                   "or float32 arithmetic in the spec); "
+                                   "not emitting sat")
                 except Exception as e:  # noqa: BLE001
                     logger.warning("onnxruntime CE re-validation error: %s", e)
         except Exception as e:  # noqa: BLE001
-            logger.debug("falsification failed: %s", e)
+            logger.warning("falsification failed: %s", e)
 
     # Stage 2: reachability methods, in configured order; each pair is
     # verified against its own prop, UNSAT only if every pair is disjoint.
@@ -361,8 +535,9 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
     for method, kwargs in cfg["reach_methods"]:
         all_unsat = True
         for pair in pairs:
-            input_set = create_input_set(pair["lb"], pair["ub"], input_shape)
             try:
+                input_set = create_input_set(pair["lb"], pair["ub"],
+                                             input_shape)
                 extra = dict(kwargs)
                 extra["input_shape"] = input_shape
                 if method != "probabilistic":
@@ -381,9 +556,11 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
                     if cx is not None:
                         try:
                             cx = np.asarray(cx, dtype=np.float64).flatten()
+                            cx = _snap_into_box(cx, pair["lb"], pair["ub"])
                             y_ort = onnx_forward(onnx_path, cx)
                             groups = _extract_halfspace_groups(pair["prop"])
-                            if in_unsafe_region(y_ort, groups, tol=0.0):
+                            if _witness_satisfies_spec(prop, groups, cx,
+                                                       y_ort):
                                 return {"result": RESULT_SAT,
                                         "time": time.time() - t0,
                                         "counterexample":
@@ -423,6 +600,7 @@ def verify_instance(onnx_path, vnnlib_path, category, workers=None):
 _NONLINEAR_FALSIFY_SAMPLES = 2000
 
 
+@_restores_global_config
 def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
                               vnnlib_path, t0, workers=None):
     """Verify a ``format='nonlinear'`` single-network instance.
@@ -432,19 +610,19 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
     ``sat`` only after the witness input, replayed through onnxruntime,
     still satisfies the spec (the VNN-COMP 2026 CORRECT criterion: ONNX
     CPU replay is authoritative for the output, input bounds at zero
-    tolerance; :func:`evaluate_nonlinear` evaluates both the input
+    tolerance; :func:`_assertions_hold` evaluates both the input
     constraints on the witness and the output constraints on the replayed
-    output exactly). The replayed output is finite-checked first so a
-    NaN/Inf forward can never satisfy a ``!=`` conjunct and emit a spurious
-    ``sat``. Stage 2 (sound reach): propagate the box through the network and
+    output exactly, in float64 and in the checker's float32). The replayed
+    output is finite-checked first so a NaN/Inf forward can never satisfy a
+    ``!=`` conjunct and emit a spurious ``sat``. Stage 2 (sound reach): propagate the box through the network and
     evaluate the assertion conjunction over the reach set with three-valued
     affine/interval arithmetic -> ``unsat`` when provably violation-free,
     else ``unknown``.
     """
     from n2v.utils.verify_nonlinear import (
         verify_nonlinear_reach, falsify_nonlinear,
+        network_keeps_input_predicates,
     )
-    from n2v.utils.vnnlib2 import evaluate_nonlinear
 
     lb = np.asarray(prop["lb"], dtype=np.float64)
     ub = np.asarray(prop["ub"], dtype=np.float64)
@@ -466,7 +644,7 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
     # replayed through onnxruntime, still satisfies the spec — the VNN-COMP
     # 2026 CORRECT criterion (ONNX CPU replay is the output authority; the
     # input constraints, including the nonlinear ones, are checked exactly on
-    # the witness at zero tolerance by ``evaluate_nonlinear``). We do NOT gate
+    # the witness at zero tolerance by ``_assertions_hold``). We do NOT gate
     # on a float64 re-forward: float64 is not the grader's oracle, and gating
     # on it discards witnesses the official ONNX replay accepts (resolved.md
     # I-45) — e.g. acc instances whose output saturates on the spec boundary.
@@ -482,9 +660,10 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
                               n_samples=n_rand, seed=42, forward=ort_forward)
         if x is not None:
             try:
+                x = _snap_into_box(x, lb, ub)
                 y_ort = ort_forward(x.reshape(1, -1))[0]
                 if np.all(np.isfinite(y_ort)) and \
-                        evaluate_nonlinear(prop, x.ravel(), y_ort):
+                        _assertions_hold(prop, x, y_ort):
                     return {"result": RESULT_SAT, "time": time.time() - t0,
                             "counterexample": format_counterexample(
                                 x, y_ort, vnnlib_path)}
@@ -494,13 +673,17 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
             except Exception as e:  # noqa: BLE001
                 logger.warning("onnxruntime CE re-validation error: %s", e)
     except Exception as e:  # noqa: BLE001
-        logger.debug("nonlinear falsification failed: %s", e)
+        logger.warning("nonlinear falsification failed: %s", e)
 
     # Stage 2: sound reachability. Each configured sound method is tried in
     # turn; an op unsupported in one method (NotImplementedError) skips to the
     # next rather than abandoning the rest (a later method may still prove it).
     net = NeuralNetwork(model)
     input_set = create_input_set(lb, ub, input_shape)
+    # A pure Linear/ReLU network keeps the input predicates as the prefix of
+    # every output star, so x and y may share them (a conjunct relating x and
+    # y is then decided exactly); any other network uses disjoint variables.
+    shared = network_keeps_input_predicates(net)
     for method, kwargs in cfg["reach_methods"]:
         if method == "probabilistic":
             continue  # sound-only path for nonlinear specs
@@ -509,7 +692,8 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
             extra["input_shape"] = input_shape
             extra["precompute_bounds"] = "ibp"
             reach_sets = net.reach(input_set, method=method, **extra)
-            verdict = verify_nonlinear_reach(reach_sets, input_set, prop)
+            verdict = verify_nonlinear_reach(
+                reach_sets, input_set, prop, input_predicates_shared=shared)
             if verdict == "UNSAT":
                 return {"result": RESULT_UNSAT, "time": time.time() - t0,
                         "counterexample": None}
@@ -521,6 +705,12 @@ def verify_nonlinear_instance(model, onnx_path, prop, input_shape, category,
 
     return {"result": RESULT_UNKNOWN, "time": time.time() - t0,
             "counterexample": None}
+
+
+# Output slack for the batched ViT candidate screen (absolute, on G @ y - g).
+# Rows inside it are replayed at batch 1 and checked at zero tolerance; it only
+# has to exceed the batched-vs-batch-1 difference (~2e-6 measured).
+_VIT_SCREEN_TOL = 1e-4
 
 
 def _vit_pgd(md, lb, ub, group, rng, n_starts=8, steps=60):
@@ -552,10 +742,11 @@ def verify_vit_instance(onnx_path, prop, input_shape, category, t0,
     """Verify a ViT robustness instance LP-free (method translated from NNV ViTCrown, no NNV dep).
 
     SAT iff a falsifier (random + ViT-gradient PGD), re-validated on the RAW ONNX
-    in onnxruntime at zero tolerance, lands in the unsafe region. UNSAT iff the
-    LP-free CROWN reach proves every (region, prop) pair disjoint from its unsafe
-    region (a pair is safe iff SOME OR-group is fully unreachable, i.e. CROWN
-    bounds ``G_k @ Y > g_k`` for every row). Else unknown (sound)."""
+    in onnxruntime at batch 1 and zero tolerance, lands in the unsafe region.
+    UNSAT iff the LP-free CROWN reach proves every (region, prop) pair disjoint
+    from its unsafe region (a pair is safe iff SOME OR-group is fully
+    unreachable, i.e. CROWN bounds ``G_k @ Y > g_k`` for every row). Else
+    unknown (sound)."""
     import torch
     from n2v.nn.vit_crown import load_vit_onnx, to_ops, verify_halfspace_group_safe
 
@@ -582,12 +773,24 @@ def verify_vit_instance(onnx_path, prop, input_shape, category, t0,
             X = np.vstack([X] + [_vit_pgd(model, lb, ub, gp, rng) for gp in groups])
         except Exception as e:  # noqa: BLE001
             logger.debug("ViT PGD failed: %s", e)
+        X = _snap_into_box(X, lb, ub)
+        # The batched run is a screen only: its rows can differ from the
+        # batch-1 replay the grader performs by float reordering (up to ~2e-6
+        # on ibp_3_3_8). A row within a small slack of the unsafe region is
+        # replayed alone, and the witness is judged and emitted on that output.
         Y = fwd(X)
         for i in range(X.shape[0]):
-            if in_unsafe_region(Y[i], groups, tol=0.0):
-                return {"result": RESULT_SAT, "time": time.time() - t0,
-                        "counterexample": format_counterexample(
-                            X[i], Y[i], vnnlib_path)}
+            if not in_unsafe_region(Y[i], groups, tol=_VIT_SCREEN_TOL):
+                continue
+            try:
+                y1 = fwd(X[i:i + 1])[0]
+                if np.all(np.isfinite(y1)) and \
+                        _witness_satisfies_spec(prop, groups, X[i], y1):
+                    return {"result": RESULT_SAT, "time": time.time() - t0,
+                            "counterexample": format_counterexample(
+                                X[i], y1, vnnlib_path)}
+            except Exception as e:  # noqa: BLE001
+                logger.warning("ViT CE re-validation error: %s", e)
 
     # Stage 2: LP-free CROWN reach. UNSAT iff every pair is provably safe.
     all_unsat = True
@@ -642,6 +845,7 @@ def _resolve_relational_onnx(base, rel):
     raise FileNotFoundError(f"relational ONNX not found: {rel}")
 
 
+@_restores_global_config
 def verify_relational_instance(onnx_arg, vnnlib_arg, category):
     """Verify a two-network relational instance via self-composition
     (falsify -> sound joint reach)."""

@@ -3,7 +3,8 @@
 
 The reach sets here are built by hand: an identity "network" maps a flat
 input ``Star`` to an output star with the *same* predicates, so the joint
-affine model ``[x; y]`` is exact (``y == x``). That lets each test pin a
+affine model ``[x; y]`` is exact (``y == x``) once the caller asserts the
+sharing (``input_predicates_shared=True``). That lets each test pin a
 hand-computed three-valued outcome without standing up a real model.
 """
 
@@ -71,13 +72,16 @@ def test_unknown_when_output_constraint_straddles():
 def test_joint_affine_coupling_beats_decoupled_box():
     """`y - x >= 0.5` is unreachable because y == x (so y - x == 0), but the
     decoupled boxes y in [1,2], x in [1,2] give y - x in [-1,1] (MAYBE). The
-    shared-predicate affine form proves it FALSE -> UNSAT."""
+    shared-predicate affine form proves it FALSE -> UNSAT. Sharing is only
+    used when the caller asserts it; the default stays decoupled."""
     p = _spec(
         "(assert (and (>= X[0,0] 1.0) (<= X[0,0] 2.0)))\n"
         "(assert (>= (- Y[0,0] X[0,0]) 0.5))\n" + _DUMMY_NL
     )
     iset, reach = _identity_reach(p)
-    assert verify_nonlinear_reach(reach, iset, p) == "UNSAT"
+    assert verify_nonlinear_reach(reach, iset, p,
+                                  input_predicates_shared=True) == "UNSAT"
+    assert verify_nonlinear_reach(reach, iset, p) == "UNKNOWN"
 
 
 def test_quadratic_input_term_enclosed_soundly():
@@ -166,7 +170,8 @@ def test_appended_predicates_padding_and_coupling():
     out = Star(V=np.array([[0.5, 0.5, 1.0]]), C=None, d=None,
                pred_lb=np.array([-1.0, 0.0]), pred_ub=np.array([1.0, 1.0]))
     assert out.nVar == 2 and iset.nVar == 1  # genuinely an appended predicate
-    assert verify_nonlinear_reach([out], iset, p) == "UNSAT"
+    assert verify_nonlinear_reach([out], iset, p,
+                                  input_predicates_shared=True) == "UNSAT"
 
 
 def test_pinned_input_dimension_still_decides():

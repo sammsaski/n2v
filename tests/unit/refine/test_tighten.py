@@ -3,20 +3,11 @@
 import numpy as np
 import pytest
 import torch
-import torch.nn as nn
 
 from n2v.sets.star import Star
 from n2v.refine.reach_relaxed import extract_layers, relaxed_reach
-from n2v.refine.tighten import neuron_bounds
-
-
-def _seq(*dims, seed=0):
-    torch.manual_seed(seed)
-    layers = []
-    for i in range(len(dims) - 2):
-        layers += [nn.Linear(dims[i], dims[i + 1]), nn.ReLU()]
-    layers += [nn.Linear(dims[-2], dims[-1])]
-    return nn.Sequential(*layers).double()
+from n2v.refine.tighten import contract_input_boxes, neuron_bounds
+from tests.unit.refine.conftest import seq_net as _seq
 
 
 def _star_with_constraints(seed):
@@ -42,51 +33,13 @@ def _exact_outputs(net, lb, ub, n, seed=0):
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_lp_cpu_matches_get_range(seed):
-    """The full (prefilter=False) path LPs every dim and matches Star.get_range."""
+    """lp_cpu LPs every dim and matches Star.get_range."""
     S, _, _, _ = _star_with_constraints(seed)
-    lb, ub = neuron_bounds(S, "lp_cpu", prefilter=False)
+    lb, ub = neuron_bounds(S, "lp_cpu")
     for i in range(S.dim):
         gmin, gmax = S.get_range(i)
         assert lb[i, 0] == pytest.approx(gmin, abs=1e-6)
         assert ub[i, 0] == pytest.approx(gmax, abs=1e-6)
-
-
-def _classify(l, u):
-    return "inactive" if u <= 0 else ("active" if l >= 0 else "crossing")
-
-
-@pytest.mark.parametrize("seed", [0, 1, 2, 3])
-def test_prefilter_reach_identical_to_full(seed):
-    """
-    The OBBT pre-filter is result-identical to LPing every dim: same ReLU
-    classification on every neuron, and identical [l,u] on every CROSSING
-    (relaxed) neuron -- which is all the reach output depends on. (Box-stable
-    neurons keep box values, but those never reach the output star.)
-    """
-    S, _, _, _ = _star_with_constraints(seed)
-    lb_pf, ub_pf = neuron_bounds(S, "lp_cpu", prefilter=True)
-    lb_full, ub_full = neuron_bounds(S, "lp_cpu", prefilter=False)
-    for i in range(S.dim):
-        cls_full = _classify(lb_full[i, 0], ub_full[i, 0])
-        assert _classify(lb_pf[i, 0], ub_pf[i, 0]) == cls_full
-        if cls_full == "crossing":
-            assert lb_pf[i, 0] == pytest.approx(lb_full[i, 0], abs=1e-6)
-            assert ub_pf[i, 0] == pytest.approx(ub_full[i, 0], abs=1e-6)
-
-
-def test_prefilter_skips_lp_when_all_box_stable():
-    """A star whose every dim is box-stable returns the box interval verbatim
-    (no LP solved) -- the best case for the pre-filter."""
-    # y = alpha in [1, 2] x [-3, -1]: dim 0 box-active, dim 1 box-inactive.
-    V = np.array([[1.5, 0.5, 0.0], [-2.0, 0.0, 1.0]])
-    S = Star(V, np.zeros((0, 2)), np.zeros((0, 1)),
-             np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
-    lb_box, ub_box = S.estimate_ranges()
-    lb, ub = neuron_bounds(S, "lp_cpu", prefilter=True)
-    assert np.allclose(lb, lb_box) and np.allclose(ub, ub_box)
-    # neither dim crosses zero -> both provably stable
-    assert ub[0, 0] >= 0 >= lb_box[0, 0] - 1 and lb[0, 0] >= 0  # dim0 active
-    assert ub[1, 0] <= 0                                         # dim1 inactive
 
 
 @pytest.mark.parametrize("seed", [0, 1, 2, 3])
@@ -113,41 +66,43 @@ def test_nvar_zero_returns_center():
     assert np.allclose(lb, V) and np.allclose(ub, V)
 
 
-@pytest.mark.skipif(
-    not __import__("n2v.utils.lpsolver_gpu", fromlist=["gpu_available"]).gpu_available(),
-    reason="no CUDA",
-)
+def test_lp_cpu_ranges_are_padded_outward():
+    from n2v.refine.tighten import _lp_ranges
+    rng = np.random.default_rng(2)
+    V = np.hstack([rng.standard_normal((4, 1)), rng.standard_normal((4, 3))])
+    S = Star(V, np.zeros((0, 3)), np.zeros((0, 1)),
+             -np.ones((3, 1)), np.ones((3, 1)))
+    # exact optimum over the [-1, 1]^3 box (no polytope rows): c -/+ sum|V|
+    lb_x = V[:, 0] - np.abs(V[:, 1:]).sum(axis=1)
+    ub_x = V[:, 0] + np.abs(V[:, 1:]).sum(axis=1)
+    pad_lo = 1e-7 * (1.0 + np.abs(lb_x))
+    pad_hi = 1e-7 * (1.0 + np.abs(ub_x))
+    lo, hi = _lp_ranges(S, "lp_cpu", np.arange(4))
+    assert np.all(lo <= lb_x - 0.5 * pad_lo)
+    assert np.all(hi >= ub_x + 0.5 * pad_hi)
+
+
+def test_contract_input_boxes_rejects_inf_boxes():
+    """Certified contraction is undefined on infinite predicate intervals
+    (0 * inf = NaN); it must fail loudly instead of returning poisoned boxes."""
+    # alpha_0 in [-1, 1] carried only by C/d rows (box +/-inf on that dim)
+    V = np.hstack([np.zeros((2, 1)), np.eye(2)])
+    C = np.array([[1.0, 0.0], [-1.0, 0.0]])
+    d = np.array([[1.0], [1.0]])
+    S = Star(V, C, d,
+             np.array([[-np.inf], [-1.0]]), np.array([[np.inf], [1.0]]))
+    with pytest.raises(ValueError, match="finite predicate boxes"):
+        contract_input_boxes(
+            [(S.C, S.d)], [(S.predicate_lb, S.predicate_ub)], n_dims=2,
+            device="cpu")
+
+
 @pytest.mark.parametrize("seed", [0, 1, 2])
-@pytest.mark.parametrize("backend", ["lp_gpu", "dual_gpu"])
-def test_gpu_backends_enclose_lp_cpu(seed, backend):
+def test_dual_gpu_bounds_enclose_lp_cpu(seed, engine_device):
     """NS-certified GPU bounds must be OUTWARD of the exact CPU LP bounds."""
     S, _, _, _ = _star_with_constraints(seed)
     lb_cpu, ub_cpu = neuron_bounds(S, "lp_cpu")
-    lb_gpu, ub_gpu = neuron_bounds(S, backend)
+    lb_gpu, ub_gpu = neuron_bounds(S, "dual_gpu")
     # outward enclosure: lb_gpu <= lb_cpu, ub_gpu >= ub_cpu (within tiny tol)
     assert np.all(lb_gpu <= lb_cpu + 1e-5)
     assert np.all(ub_gpu >= ub_cpu - 1e-5)
-
-
-@pytest.mark.skipif(
-    not __import__("n2v.utils.lpsolver_gpu", fromlist=["gpu_available"]).gpu_available(),
-    reason="no CUDA",
-)
-@pytest.mark.skipif(
-    not __import__("n2v.utils.lpsolver_gpu", fromlist=["gpu_available"]).gpu_available(),
-    reason="no CUDA",
-)
-@pytest.mark.parametrize("seed", [0, 1, 2])
-@pytest.mark.parametrize("backend", ["lp_gpu", "dual_gpu"])
-def test_prefilter_gpu_stays_sound(seed, backend):
-    """
-    The prefiltered GPU paths are a sound over-approximation: their bounds enclose
-    the EXACT range (so a neuron is never falsely stabilised). Neither is
-    bit-identical to full LP (first-order duals are batch-composition-sensitive),
-    but soundness -- box-clipped NS still outward of the true range -- always holds.
-    """
-    S, _, _, _ = _star_with_constraints(seed)
-    lb_pf, ub_pf = neuron_bounds(S, backend, prefilter=True)
-    lb_exact, ub_exact = neuron_bounds(S, "lp_cpu", prefilter=False)   # exact HiGHS range
-    assert np.all(lb_pf <= lb_exact + 1e-5), "GPU prefilter lb not outward of exact"
-    assert np.all(ub_pf >= ub_exact - 1e-5), "GPU prefilter ub not outward of exact"

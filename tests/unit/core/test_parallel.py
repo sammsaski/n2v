@@ -120,6 +120,9 @@ class TestConfigurationSystem:
         """Reset configuration before each test."""
         config.reset()
 
+    def teardown_method(self):
+        config.reset()
+
     def test_default_config(self):
         """Test default configuration values."""
         assert config.parallel_lp is False
@@ -231,6 +234,9 @@ class TestParallelIntegration:
 
     def setup_method(self):
         """Reset configuration before each test."""
+        config.reset()
+
+    def teardown_method(self):
         config.reset()
 
     def test_star_respects_global_config(self):
@@ -359,6 +365,9 @@ class TestStarLevelParallelism:
 
     def setup_method(self):
         """Reset configuration before each test."""
+        config.reset()
+
+    def teardown_method(self):
         config.reset()
 
     def test_single_star_no_parallel(self):

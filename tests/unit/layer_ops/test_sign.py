@@ -97,15 +97,19 @@ class TestSignStarExact:
         np.testing.assert_allclose(lb, 1.0, atol=1e-6)
         np.testing.assert_allclose(ub, 1.0, atol=1e-6)
 
-    def test_one_crossing_two_stars(self):
+    def test_one_crossing_three_stars(self):
+        # x <= 0 -> -1, x = 0 -> 0 (sign(0) = 0), x >= 0 -> +1
         star = Star.from_bounds(np.array([[1.0], [-1.0]]), np.array([[2.0], [1.0]]))
         result = sign_star(None, [star], method='exact')
-        assert len(result) == 2
+        assert len(result) == 3
+        values = []
         for s in result:
             lb, ub = s.get_ranges()
             np.testing.assert_allclose(lb[0], 1.0, atol=1e-6)
             np.testing.assert_allclose(ub[0], 1.0, atol=1e-6)
             assert abs(lb[1, 0] - ub[1, 0]) < 1e-6
+            values.append(round(float(lb[1, 0])))
+        assert sorted(values) == [-1, 0, 1]
 
     def test_soundness_random(self):
         np.random.seed(42)
@@ -114,11 +118,12 @@ class TestSignStarExact:
             np.array([[1.0], [0.5], [1.5]])
         )
         result = sign_star(None, [star], method='exact')
+        ranges = [s.get_ranges() for s in result]
         for _ in range(200):
             x = np.random.uniform([-1.0, -0.5, 0.5], [1.0, 0.5, 1.5])
             y = np.sign(x).reshape(-1, 1)
             contained = any(
-                np.all(y >= s.get_ranges()[0] - 1e-6) and np.all(y <= s.get_ranges()[1] + 1e-6)
-                for s in result
+                np.all(y >= lb - 1e-6) and np.all(y <= ub + 1e-6)
+                for lb, ub in ranges
             )
             assert contained, f"sign({x}) = {y.flatten()} not in any output star"

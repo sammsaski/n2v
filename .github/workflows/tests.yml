@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Nightly: the opt-in slow tier (long flow training, the 300-sample
+    # softmax cell, ViT CROWN). The corpus tier needs the external benchmark
+    # corpus and is not run here; the gpu tier needs a CUDA runner.
+    - cron: "17 3 * * *"
 
 jobs:
   test:
@@ -23,15 +28,16 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install torch==2.8.0+cpu torchvision==0.23.0+cpu --index-url https://download.pytorch.org/whl/cpu
-          pip install onnx onnxruntime
           pip install -e ".[dev]"
           pip install -e third_party/onnx2torch
 
-      - name: Run unit tests
-        run: pytest tests/unit/
+      # The default tier: pytest.ini deselects slow, gpu and corpus. One run,
+      # so test order (and the config/RNG isolation fixtures) is exercised the
+      # same way everywhere.
+      - name: Run the default test tier
+        if: github.event_name != 'schedule'
+        run: pytest
 
-      - name: Run soundness tests
-        run: pytest tests/soundness/
-
-      - name: Run integration tests
-        run: pytest tests/integration/
+      - name: Run the slow tier
+        if: github.event_name == 'schedule'
+        run: pytest -m slow

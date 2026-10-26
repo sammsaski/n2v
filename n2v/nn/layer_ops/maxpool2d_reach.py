@@ -46,6 +46,9 @@ def maxpool2d_star(
     Returns:
         List of output Stars (ImageStars)
     """
+    for star in input_stars:
+        if isinstance(star, ImageStar):
+            _check_supported(layer, star.height, star.width)
     if method == 'exact':
         out = _maxpool2d_star_exact_multiple(layer, input_stars, lp_solver, verbose)
     else:
@@ -85,12 +88,11 @@ def _maxpool2d_star_exact_single(
         List of output ImageStars (may be multiple due to splitting)
     """
     # Apply padding if needed
-    pad_star = _apply_padding_4d(layer, input_star)
+    pad_star, valid = _apply_padding_4d(layer, input_star)
 
     # V is 4D: (H, W, C, nVar+1)
     V = pad_star.V
     h_in, w_in, c_in, n_cols = V.shape
-    n_cols - 1
 
     # Get kernel size and stride (can be int, tuple, or list from onnx2torch)
     kernel_size = layer.kernel_size
@@ -119,11 +121,7 @@ def _maxpool2d_star_exact_single(
     max_indices = {}
 
     # Estimate ranges for bounds checking
-    if pad_star.state_lb is None or pad_star.state_ub is None:
-        pad_star.estimate_ranges()
-
-    lb_4d = pad_star.state_lb.reshape(h_in, w_in, c_in)
-    ub_4d = pad_star.state_ub.reshape(h_in, w_in, c_in)
+    lb_4d, ub_4d = _window_bounds_4d(pad_star, valid)
 
     # For each channel and each pooling window, find the max
     for k in range(c_in):
@@ -226,7 +224,7 @@ def _maxpool2d_star_approx_single(
         Single over-approximate ImageStar with 4D V
     """
     # Apply padding
-    pad_star = _apply_padding_4d(layer, input_star)
+    pad_star, valid = _apply_padding_4d(layer, input_star)
 
     # V is 4D: (H, W, C, nVar+1)
     V = pad_star.V
@@ -253,11 +251,7 @@ def _maxpool2d_star_approx_single(
     start_points = _get_start_points(h_in, w_in, h_out, w_out, kernel_size, stride)
 
     # Estimate ranges
-    if pad_star.state_lb is None or pad_star.state_ub is None:
-        pad_star.estimate_ranges()
-
-    lb_4d = pad_star.state_lb.reshape(h_in, w_in, c_in)
-    ub_4d = pad_star.state_ub.reshape(h_in, w_in, c_in)
+    lb_4d, ub_4d = _window_bounds_4d(pad_star, valid)
 
     # Count new predicates needed
     new_pred_count = 0
@@ -325,8 +319,12 @@ def _maxpool2d_star_approx_single(
                     new_d[new_pred_idx * (pool_size + 1)] = half_range
 
                     # Constraints: xi - (center + y) <= 0 for each pixel
+                    # of the input (a padding position is not an entry: its
+                    # row stays 0 <= 0)
                     center = (lb + ub) / 2
                     for idx, (ph, pw) in enumerate(_get_local_points(start_h, start_w, kernel_size)):
+                        if not valid[ph, pw]:
+                            continue
                         C_row = np.zeros((1, n_pred_new))
                         # Coefficients from 4D V
                         C_row[0, :n_pred_orig] = V[ph, pw, k, 1:n_pred_orig + 1]
@@ -391,13 +389,18 @@ def maxpool2d_zono(layer: nn.MaxPool2d, input_zonos: List[ImageZono]) -> List[Im
         lb_img = lb.reshape(zono.height, zono.width, zono.num_channels).transpose(2, 0, 1)
         ub_img = ub.reshape(zono.height, zono.width, zono.num_channels).transpose(2, 0, 1)
 
-        # Convert to torch tensors
-        lb_torch = torch.from_numpy(lb_img).unsqueeze(0).float()
-        ub_torch = torch.from_numpy(ub_img).unsqueeze(0).float()
+        # Convert to torch tensors (float64: a float32 cast would round the
+        # bounds to nearest, possibly inward)
+        lb_torch = torch.from_numpy(np.ascontiguousarray(lb_img, dtype=np.float64)).unsqueeze(0)
+        ub_torch = torch.from_numpy(np.ascontiguousarray(ub_img, dtype=np.float64)).unsqueeze(0)
 
-        # Apply maxpool to -lb (gives -(min pooling)) and ub
-        new_lb = -F.max_pool2d(-lb_torch, layer.kernel_size, layer.stride, layer.padding)
-        new_ub = F.max_pool2d(ub_torch, layer.kernel_size, layer.stride, layer.padding)
+        # MaxPool is monotone: the window max lies between the max of the
+        # lower bounds and the max of the upper bounds. F.max_pool2d pads
+        # with -inf, so padding never becomes a candidate.
+        pool_args = (layer.kernel_size, layer.stride, layer.padding,
+                     layer.dilation, layer.ceil_mode)
+        new_lb = F.max_pool2d(lb_torch, *pool_args)
+        new_ub = F.max_pool2d(ub_torch, *pool_args)
 
         # Convert back to ImageZono
         new_lb_np = new_lb.squeeze(0).numpy().transpose(1, 2, 0)
@@ -414,16 +417,46 @@ def maxpool2d_zono(layer: nn.MaxPool2d, input_zonos: List[ImageZono]) -> List[Im
 
 # Helper functions
 
-def _apply_padding_4d(layer: nn.MaxPool2d, input_star: ImageStar) -> ImageStar:
-    """Apply zero padding to ImageStar with 4D V if needed."""
+def _check_supported(layer: nn.MaxPool2d, height: int, width: int) -> None:
+    """The star paths build floor-mode windows from kernel size, stride and
+    padding only. A dilated pool, or a ceil-mode pool whose extra windows
+    change the output shape, has other windows, so it is refused instead of
+    reached as a different function."""
+    dilation = getattr(layer, 'dilation', 1)
+    dilation = (dilation, dilation) if isinstance(dilation, int) else tuple(dilation)
+    if dilation != (1, 1):
+        raise NotImplementedError(
+            f"MaxPool2d star reach supports dilation 1 (got {layer.dilation})")
+    if getattr(layer, 'ceil_mode', False):
+        pool = dict(kernel_size=layer.kernel_size, stride=layer.stride,
+                    padding=layer.padding)
+        probe = torch.zeros(1, 1, height, width)
+        if (F.max_pool2d(probe, ceil_mode=True, **pool).shape
+                != F.max_pool2d(probe, ceil_mode=False, **pool).shape):
+            raise NotImplementedError(
+                "MaxPool2d star reach does not build the extra ceil_mode "
+                "windows")
+
+
+def _apply_padding_4d(layer: nn.MaxPool2d, input_star: ImageStar):
+    """Pad an ImageStar with 4D V for the pooling windows.
+
+    Returns ``(padded_star, valid)``: ``valid`` is an ``(H, W)`` boolean mask
+    of the positions that hold input entries. MaxPool pads with -inf (torch
+    and ONNX), so a padding position is never a window's max. Its rows in
+    the padded star are zero only as placeholders; callers must keep them
+    out of the max candidates (see ``_window_bounds_4d``), or a window over
+    negative inputs would get a max of at least 0.
+    """
     padding = layer.padding
     if isinstance(padding, int):
         padding = (padding, padding)
     elif isinstance(padding, (list, tuple)):
         padding = tuple(padding)
 
+    h, w = input_star.V.shape[:2]
     if padding == (0, 0):
-        return input_star
+        return input_star, np.ones((h, w), dtype=bool)
 
     # V is 4D: (H, W, C, nVar+1)
     V = input_star.V
@@ -439,12 +472,28 @@ def _apply_padding_4d(layer: nn.MaxPool2d, input_star: ImageStar) -> ImageStar:
     # Create padded V (4D)
     V_pad = np.zeros((h_pad, w_pad, c, n_cols))
     V_pad[pad_t:pad_t + h, pad_l:pad_l + w, :, :] = V
+    valid = np.zeros((h_pad, w_pad), dtype=bool)
+    valid[pad_t:pad_t + h, pad_l:pad_l + w] = True
 
     return ImageStar(
         V_pad, input_star.C, input_star.d,
         input_star.predicate_lb, input_star.predicate_ub,
         h_pad, w_pad, c
-    )
+    ), valid
+
+
+def _window_bounds_4d(pad_star: ImageStar, valid: np.ndarray):
+    """Per-entry bounds ``(lb_4d, ub_4d)`` of a padded ImageStar, shaped
+    ``(H, W, C)``, with -inf at padding positions so no helper below takes
+    one as a max candidate."""
+    h_in, w_in, c_in = pad_star.V.shape[:3]
+    if pad_star.state_lb is None or pad_star.state_ub is None:
+        pad_star.estimate_ranges()
+    lb_4d = np.array(pad_star.state_lb, dtype=np.float64).reshape(h_in, w_in, c_in)
+    ub_4d = np.array(pad_star.state_ub, dtype=np.float64).reshape(h_in, w_in, c_in)
+    lb_4d[~valid] = -np.inf
+    ub_4d[~valid] = -np.inf
+    return lb_4d, ub_4d
 
 
 def _get_start_points(h_in: int, w_in: int, h_out: int, w_out: int,
@@ -522,13 +571,17 @@ def _get_local_bounds_4d(
     kernel_size: Tuple[int, int],
     channel: int
 ) -> Tuple[float, float]:
-    """Get min/max bounds for all pixels in a local pooling window."""
+    """Bounds ``(max(lbs), max(ubs))`` on the max over the input pixels in a
+    local pooling window (padding positions, marked by an upper bound of
+    -inf, are skipped). The window max is at least every pixel, so at least
+    the largest lower bound."""
     points = _get_local_points(start_h, start_w, kernel_size)
 
+    points = [(ph, pw) for ph, pw in points if ub_4d[ph, pw, channel] > -np.inf]
     lbs = [lb_4d[ph, pw, channel] for ph, pw in points]
     ubs = [ub_4d[ph, pw, channel] for ph, pw in points]
 
-    return min(lbs), max(ubs)
+    return max(lbs), max(ubs)
 
 
 def _step_split_4d(

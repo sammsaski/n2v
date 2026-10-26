@@ -293,24 +293,39 @@ def _resolve_ast(node, resolver: _Resolver):
     raise VNNLibParseError(f"unsupported clause: {node!r}")
 
 
-def evaluate_ast(node, x, y):
-    """Evaluate a resolved AST at concrete input/output vectors."""
+def evaluate_ast(node, x, y, dtype=None):
+    """Evaluate a resolved AST at concrete input/output vectors.
+
+    By default every variable is read as a Python float, so arithmetic and
+    comparisons run in float64. With ``dtype`` (e.g. ``np.float32``) every
+    variable, constant and accumulator start value is a numpy scalar of that
+    type, so the arithmetic (left to right, rounding after each operation)
+    and the comparisons run in ``dtype`` under any NumPy version. That is how
+    the VNN-COMP 2026 checker evaluates a witness of a float32 network: the
+    witness input is parsed into float32, the replayed output is float32,
+    spec constants are converted to float32 by NumPy 2's promotion rules, and
+    ``(> Y 0.1)`` with ``Y = float32(0.1)`` is False there although it is
+    True in float64. (Under NumPy 1.x a Python scalar operand would promote
+    the operation to float64, hence the explicit casts.)
+    """
     op = node[0]
     if op == "var":
-        return float(x[node[2]] if node[1] == "in" else y[node[2]])
+        v = x[node[2]] if node[1] == "in" else y[node[2]]
+        return float(v) if dtype is None else dtype(v)
     if op == "const":
-        return node[1]
+        return node[1] if dtype is None else dtype(node[1])
     if op == "and":
-        return all(evaluate_ast(c, x, y) for c in node[1:])
+        return all(evaluate_ast(c, x, y, dtype) for c in node[1:])
     if op == "or":
-        return any(evaluate_ast(c, x, y) for c in node[1:])
-    args = [evaluate_ast(c, x, y) for c in node[1:]]
+        return any(evaluate_ast(c, x, y, dtype) for c in node[1:])
+    args = [evaluate_ast(c, x, y, dtype) for c in node[1:]]
+    zero = 0 if dtype is None else dtype(0)
     if op == "+":
-        return sum(args)
+        return sum(args, zero)
     if op == "-":
-        return -args[0] if len(args) == 1 else args[0] - sum(args[1:])
+        return -args[0] if len(args) == 1 else args[0] - sum(args[1:], zero)
     if op == "*":
-        r = 1.0
+        r = 1.0 if dtype is None else dtype(1)
         for a in args:
             r *= a
         return r
@@ -321,10 +336,13 @@ def evaluate_ast(node, x, y):
             "==": args[0] == args[1], "!=": args[0] != args[1]}[op]
 
 
-def evaluate_nonlinear(result: Dict, x, y) -> bool:
-    """Does (x, y) satisfy a ``format='nonlinear'`` spec (i.e. witness a
-    violation)? The assertion conjunction, evaluated on the faithful AST."""
-    return all(evaluate_ast(a, x, y) for a in result["assertions"])
+def evaluate_nonlinear(result: Dict, x, y, dtype=None) -> bool:
+    """Does (x, y) satisfy a spec's ``assertions`` (i.e. witness a
+    violation)? The assertion conjunction, evaluated on the faithful AST.
+    Every ``format='nonlinear'`` spec carries ``assertions``; a linear spec
+    carries them too when it has strict comparisons or arithmetic (see
+    :func:`_lower_linear`). ``dtype`` is passed to :func:`evaluate_ast`."""
+    return all(evaluate_ast(a, x, y, dtype) for a in result["assertions"])
 
 
 def _load_nonlinear(text: str, resolver: _Resolver) -> Dict:
@@ -548,7 +566,13 @@ Row = Tuple[Dict[int, float], float]  # (out-index -> coeff, rhs) : row . y <= r
 
 
 def _compare_to_rows(op, coeffs, const) -> List[Row]:
-    """Canonicalize an output comparison into rows of ``row . y <= rhs``."""
+    """Canonicalize an output comparison into rows of ``row . y <= rhs``.
+
+    A strict ``<`` / ``>`` becomes the closed row: a superset of the strict
+    region, which keeps an UNSAT sound but admits boundary points that are
+    not counterexamples. :func:`_lower_linear` therefore keeps the spec's
+    assertions for SAT checks whenever a strict comparison is present (see
+    :func:`_keep_assertions_for_sat_checks`)."""
     if any(k[0] == "in" for k in coeffs):
         raise VNNLibParseError(
             "constraint mixes input and output variables (combined / "
@@ -605,7 +629,8 @@ def _dnf_to_halfspaces(dnf: List[List[Row]], out_size: int) -> List[HalfSpace]:
 # ---------------------------------------------------------------------------
 
 def _atomic_input_bound(op, coeffs, const) -> Tuple[int, str, float]:
-    """Reduce a single-variable input comparison to ``(idx, kind, value)``."""
+    """Reduce a single-variable input comparison to ``(idx, kind, value)``.
+    A strict bound becomes the closed one, as in :func:`_compare_to_rows`."""
     if any(k[0] == "out" for k in coeffs):
         raise VNNLibParseError(
             "constraint mixes input and output variables (combined form "
@@ -654,8 +679,12 @@ def _apply_bounds(lb, ub, bounds):
         elif kind == "lower":
             lb[idx] = max(lb[idx], val)
         else:  # both (equality)
-            lb[idx] = val
-            ub[idx] = val
+            # Intersect with any earlier bound on the same variable rather
+            # than overriding it: an equality that contradicts an earlier
+            # bound yields lb > ub (an empty region), which downstream
+            # validation must reject, instead of silently widening the region.
+            lb[idx] = max(lb[idx], val)
+            ub[idx] = min(ub[idx], val)
 
 
 # ---------------------------------------------------------------------------
@@ -773,13 +802,62 @@ def load_vnnlib_v2(property_file: str, text: Optional[str] = None) -> Dict:
         raise
 
 
+# One single-character operator followed by a delimiter (whitespace, a
+# parenthesis or the end of the text). With the operator as a literal prefix
+# the regex engine skips to each occurrence at C speed, which matters for
+# ``-``: large specs contain millions of them as signs (the smart_turn specs
+# have 2.4M in 121 MB).
+_OPERATOR_THEN_DELIMITER = {
+    op: re.compile(re.escape(op) + r"(?=[\s()]|\Z)") for op in "<>+-*/"
+}
+
+
+def _has_operator_token(text: str, ops: str) -> bool:
+    """Does the spec text contain one of the single-character operators
+    ``ops`` as an atom?
+
+    The s-expression reader splits on whitespace and parentheses, so an
+    operator atom is delimited by them on both sides; ``<=``/``>=``, the
+    ``<2.0>`` of the version header, a negative literal ``-0.5`` and an
+    exponent ``1e+05`` are not. Each operator followed by a delimiter is
+    found by :data:`_OPERATOR_THEN_DELIMITER`; only those few are checked for
+    a delimiter on the left (0.1-0.2 s per operator on a 130 MB spec)."""
+    for op in ops:
+        if op not in text:
+            continue
+        for m in _OPERATOR_THEN_DELIMITER[op].finditer(text):
+            i = m.start()
+            if i == 0 or text[i - 1].isspace() or text[i - 1] in "()":
+                return True
+    return False
+
+
+def _has_strict_comparison(text: str) -> bool:
+    """Does the spec text contain a ``<`` or ``>`` operator atom?"""
+    return _has_operator_token(text, "<>")
+
+
+def _has_arithmetic(text: str) -> bool:
+    """Does the spec text contain a ``+``, ``-``, ``*`` or ``/`` operator
+    atom (a sum, difference, negation, product or quotient)?"""
+    return _has_operator_token(text, "+-*/")
+
+
 def _lower_linear(text: str, resolver: _Resolver) -> Dict:
-    """The single-network linear lowering (box/pairs/halfspaces)."""
+    """The single-network linear lowering (box/pairs/halfspaces).
+
+    When the rows can accept a point the checker rejects (see
+    :func:`_keep_assertions_for_sat_checks`), the result also carries
+    ``assertions``: every assert as a resolved AST, the same form
+    ``format='nonlinear'`` specs use. A caller about to report a
+    counterexample checks it against them with :func:`evaluate_nonlinear`;
+    reachability ignores them."""
     base_lb = np.full(resolver.in_size, -np.inf, dtype=np.float64)
     base_ub = np.full(resolver.in_size, np.inf, dtype=np.float64)
     or_regions: Optional[List[List[Tuple[int, str, float]]]] = None
     out_groups: List[Dict] = []
     combined: List = []
+    formulas: List = []
 
     for sexpr in _extract_sexprs(text, "(assert"):
         tree = _read(sexpr)
@@ -788,6 +866,7 @@ def _lower_linear(text: str, resolver: _Resolver) -> Dict:
         if len(tree) < 2:
             raise VNNLibParseError(f"empty assert: {sexpr!r}")
         formula = tree[1]
+        formulas.append(formula)
 
         roles: set = set()
         _collect_roles(formula, resolver, roles)
@@ -826,6 +905,7 @@ def _lower_linear(text: str, resolver: _Resolver) -> Dict:
                                  out_groups)
         result["input_tensors"] = resolver.input_tensors
         result["output_tensors"] = resolver.output_tensors
+        _keep_assertions_for_sat_checks(result, text, formulas, resolver)
         return result
 
     if not out_groups:
@@ -846,6 +926,27 @@ def _lower_linear(text: str, resolver: _Resolver) -> Dict:
     else:
         lb_out, ub_out = base_lb, base_ub
 
-    return {"lb": lb_out, "ub": ub_out, "prop": out_groups,
-            "input_tensors": resolver.input_tensors,
-            "output_tensors": resolver.output_tensors}
+    result = {"lb": lb_out, "ub": ub_out, "prop": out_groups,
+              "input_tensors": resolver.input_tensors,
+              "output_tensors": resolver.output_tensors}
+    _keep_assertions_for_sat_checks(result, text, formulas, resolver)
+    return result
+
+
+def _keep_assertions_for_sat_checks(result: Dict, text: str, formulas: List,
+                                    resolver: _Resolver) -> None:
+    """Attach ``result['assertions']`` when the float64 rows ``G y <= g`` can
+    accept a point that is not a counterexample:
+
+    - a strict comparison is lowered to its closure (:func:`_compare_to_rows`);
+    - arithmetic is evaluated by the VNN-COMP 2026 checker in float32, left
+      to right with a rounding after each operation, so a sum of three or
+      more terms or a non-unit coefficient can hold in float64 and fail
+      there (e.g. ``Y0 + Y1 + Y2 <= c`` with ``Y = [1 + 2^-23, 2^-24, -1]``
+      and ``c = 1.5 * 2^-23``).
+
+    Without either, every comparison is between two variables or a variable
+    and a constant; float32 rounding is monotone, so a point on the float64
+    row also passes the checker's float32 comparison."""
+    if _has_strict_comparison(text) or _has_arithmetic(text):
+        result["assertions"] = [_resolve_ast(f, resolver) for f in formulas]

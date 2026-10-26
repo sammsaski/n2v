@@ -29,6 +29,7 @@ from typing import List, Optional
 from n2v.sets import Star, Zono, Box
 from n2v.sets.image_star import ImageStar
 from n2v.sets.image_zono import ImageZono
+from n2v.utils.lpsolver import _bound_lp_solver, _outward_lp_ranges
 
 _PI = np.pi
 _TOL = 1e-12
@@ -75,14 +76,19 @@ def _trig_single_star(I: Star, kind: str, lp_solver: str) -> Optional[Star]:
     func, dfunc, crit_off, infl_off = _spec(kind)
     N, n = I.dim, I.nVar
 
+    # HiGHS ranges padded outward, since they are the box of the relaxation
+    # (_bound_lp_solver, _outward_lp_ranges); only an exact constant row stays
+    # a point
+    solver = _bound_lp_solver(lp_solver)
     lbs = np.zeros(N)
     ubs = np.zeros(N)
     for i in range(N):
-        lo, hi = I.get_range(i, lp_solver)
+        lo, hi = I.get_range(i, solver)
         if lo is None or hi is None:
             raise ValueError(
                 f"LP returned None for dim {i} of {kind} input (infeasible?)")
         lbs[i], ubs[i] = lo, hi
+    lbs, ubs = _outward_lp_ranges(lbs, ubs, I.V)
 
     const_mask = np.abs(ubs - lbs) < 1e-12
     vary = np.where(~const_mask)[0]

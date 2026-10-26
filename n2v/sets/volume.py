@@ -263,6 +263,20 @@ def star_volume(
     C = star.C if (star.C is not None and np.asarray(star.C).size > 0) else None
     d = star.d if (star.d is not None and np.asarray(star.d).size > 0) else None
 
+    # A predicate variable that no basis vector and no constraint row uses
+    # (e.g. the tag variable of Star.fresh_from_bounds) does not change the
+    # set, so it is left out of the predicate polytope: its box width would
+    # otherwise scale the volume. Its zero basis column adds nothing to the
+    # Jacobian above.
+    used = np.any(basis != 0, axis=0)
+    if C is not None:
+        C = np.asarray(C, dtype=np.float64).reshape(-1, n_var)
+        used |= np.any(C != 0, axis=0)
+    if not used.all():
+        plb, pub = plb[used], pub[used]
+        if C is not None:
+            C = C[:, used]
+
     box_vol = float(np.prod(pub - plb))
 
     if method == 'mc':

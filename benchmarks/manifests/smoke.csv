@@ -1,0 +1,31 @@
+# selection: fixed list chosen 2026-10-08 to cover distinct paths; most decided in under 60 s in the July full run
+# vnnlib_version: 2.0
+# timeout_cap_for_smoke_runs: 120 s
+benchmark,onnx,vnnlib,timeout
+acasxu_2023,onnx/ACASXU_run2a_4_5_batch_2000.onnx,vnnlib/prop_2.vnnlib,116
+acasxu_2023,onnx/ACASXU_run2a_4_7_batch_2000.onnx,vnnlib/prop_4.vnnlib,116
+collins_rul_cnn_2022,onnx/NN_rul_small_window_20.onnx,vnnlib/robustness_8perturbations_delta10_epsilon10_w20.vnnlib,120
+cifar100_2024,onnx/CIFAR100_resnet_medium.onnx,vnnlib/CIFAR100_resnet_medium_prop_idx_9845_sidx_200_eps_0.0039.vnnlib,100
+metaroom_2023,./onnx/4cnn_tz_20_3_no_custom_OP.onnx,./vnnlib/spec_idx_53_eps_0.00001000.vnnlib,210
+linearizenn_2024,onnx/AllInOne_30_30.onnx,vnnlib/prop_30_30_1.vnnlib,900
+adaptive_cruise_control_non_linear_2026,onnx/acc-2000000-64-64-64-64-retrain-100000-200000-0.9.onnx,vnnlib/instance_2.vnnlib,100
+adaptive_cruise_control_non_linear_2026,onnx/acc-2000000-64-64-64-64-retrain-100000-200000-0.9.onnx,vnnlib/instance_45.vnnlib,100
+isomorphic_acasxu_2026,"[('f', 'onnx/original/ACASXU_run2a_2_4_batch_2000.onnx'), ('g', 'onnx/perturbed/ACASXU_run2a_2_4_batch_2000_perturbed_24.onnx')]",./vnnlib/instance_24.vnnlib,100
+monotonic_acasxu_2026,"[('f', 'onnx/ACASXU_run2a_2_4_batch_2000.onnx'), ('g', 'onnx/ACASXU_run2a_2_4_batch_2000.onnx')]",./vnnlib/instance_6.vnnlib,100
+smart_turn_multimodal_2026,onnx/smart-turn-multimodal-cpu.onnx,vnnlib/instance_5.vnnlib,100
+cctsdb_yolo_2023,onnx/patch-1.onnx,vnnlib/spec_onnx_patch-1_idx_16972_2.vnnlib,350
+cctsdb_yolo_2023,onnx/patch-3.onnx,vnnlib/spec_onnx_patch-3_idx_15377_1.vnnlib,350
+dist_shift_2023,./onnx/mnist_concat.onnx,./vnnlib/index1453_delta0.13.vnnlib,300
+soundnessbench,onnx/model.onnx,vnnlib/model_23.vnnlib,150
+cgan_2023,onnx/cGAN_imgSz32_nCh_3_small_transformer.onnx,vnnlib/cGAN_imgSz32_nCh_3_small_transformer_prop_0_input_eps_0.005_output_eps_0.010.vnnlib,1800
+vit_2023,onnx/pgd_2_3_16.onnx,vnnlib/pgd_2_3_16_9719.vnnlib,100
+test,onnx/test_sat.onnx,vnnlib/test_prop.vnnlib,60
+test,onnx/test_small.onnx,vnnlib/test_small.vnnlib,60
+sat_relu,onnx/sat_v30_c99_k32.onnx,vnnlib/sat_v30_c99_k32.vnnlib,100
+relusplitter_2026,onnx/model_2_2.onnx,vnnlib/d2_eps_0.01_sample_19_label_0.vnnlib,180
+safenlp_2024,onnx/medical/perturbations_0.onnx,vnnlib/medical/hyperrectangle_1953.vnnlib,20
+ml4acopf_2024,./onnx/14_ieee_ml4acopf.onnx,./vnnlib/14_ieee_prop13.vnnlib,600
+nn4sys,onnx/lindex.onnx,vnnlib/lindex_1.vnnlib,30
+tllverifybench_2023,onnx/tllBench_n=2_N=M=16_m=1_instance_1_1.onnx,vnnlib/property_N=16_1.vnnlib,600
+malbeware,onnx/malware_malimg_family_scaled_4-25.onnx,vnnlib/malbeware_family-VB.AT_label-22_eps-3_idx-112.vnnlib,100
+cersyve,onnx/pendulum_pretrain_inv.onnx,vnnlib/prop_pendulum.vnnlib,100

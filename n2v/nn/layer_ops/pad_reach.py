@@ -4,6 +4,12 @@ Pad layer reachability operations.
 Zero-padding is a linear operation: it adds zeros around the spatial
 dimensions of the image. The V tensor (and Zono center/generators) are
 padded with zeros along the spatial axes.
+
+Only zero padding of the two spatial axes is reached. A pad with another
+constant (e.g. the -inf padding onnx2torch puts in front of an
+asymmetrically padded MaxPool) or another mode (reflect, replicate), a
+negative pad (cropping), and a pad of the batch or channel axis raise
+NotImplementedError rather than being reached as zero padding.
 """
 
 import numpy as np
@@ -17,37 +23,75 @@ from n2v.sets.image_zono import ImageZono
 from onnx2torch.node_converters.pad import OnnxPadDynamic, OnnxPadStatic
 
 
+def _require_zero_padding(layer: nn.Module, mode: str, value: float) -> None:
+    """Raise unless the layer pads with the constant 0."""
+    if mode != 'constant':
+        raise NotImplementedError(
+            f"{type(layer).__name__} with mode '{mode}' is not supported "
+            f"(only zero padding)")
+    if value != 0:
+        raise NotImplementedError(
+            f"{type(layer).__name__} with constant value {value} is not "
+            f"supported (only zero padding)")
+
+
 def _extract_padding(layer: nn.Module) -> Tuple[int, int, int, int]:
     """
     Extract (left, right, top, bottom) padding from various layer types.
 
     Returns:
         Tuple (left, right, top, bottom)
+
+    Raises:
+        NotImplementedError: if the layer does not zero-pad only the two
+            spatial axes by nonnegative amounts.
     """
     if isinstance(layer, (nn.ZeroPad2d, nn.ConstantPad2d)):
+        _require_zero_padding(layer, 'constant', getattr(layer, 'value', 0))
         p = layer.padding
-        if isinstance(p, int):
-            return (p, p, p, p)
-        # nn.ZeroPad2d stores (left, right, top, bottom)
-        return tuple(p)
+        # nn.ZeroPad2d / nn.ConstantPad2d store (left, right, top, bottom)
+        pads = (p, p, p, p) if isinstance(p, int) else tuple(p)
 
-    if isinstance(layer, (OnnxPadDynamic, OnnxPadStatic)):
-        # OnnxPad stores padding differently — extract from attributes
-        if hasattr(layer, 'pads'):
-            pads = layer.pads
-            # ONNX pads format: [x1_begin, x2_begin, ..., x1_end, x2_end, ...]
-            # For 4D (N,C,H,W): [0, 0, top, left, 0, 0, bottom, right]
-            if len(pads) == 8:
-                top, left = int(pads[2]), int(pads[3])
-                bottom, right = int(pads[6]), int(pads[7])
-                return (left, right, top, bottom)
-        # No resolvable pads: fail loud rather than silently apply zero
-        # padding (which would produce a wrong, smaller output).
+    elif isinstance(layer, OnnxPadStatic):
+        _require_zero_padding(layer, layer.mode, layer.constant_value)
+        # onnx2torch stores these pads in torch.nn.functional.pad order, last
+        # axis first: (left, right, top, bottom, channel begin, channel end,
+        # batch begin, batch end). The module it puts in front of an
+        # asymmetrically padded conv holds only the first four.
+        pads = [int(v) for v in layer.pads]
+        if len(pads) % 2 or len(pads) > 8 or any(pads[4:]):
+            raise NotImplementedError(
+                f"OnnxPadStatic pads {list(layer.pads)} pad more than the "
+                f"two spatial axes of an (N, C, H, W) tensor")
+        pads = tuple((pads + [0] * 4)[:4])
+
+    elif isinstance(layer, OnnxPadDynamic):
+        # The constant value is a runtime input; the graph reach checks it
+        # when it resolves the pads (n2v.nn.reach).
+        _require_zero_padding(layer, layer.mode, 0)
+        # ONNX order, all begins then all ends: for (N, C, H, W)
+        # [N_begin, C_begin, top, left, N_end, C_end, bottom, right].
+        pads = getattr(layer, 'pads', None)
+        if pads is None or len(pads) != 8:
+            # No resolvable pads: fail loud rather than silently apply zero
+            # padding (which would produce a wrong, smaller output).
+            raise NotImplementedError(
+                f"Cannot extract pad amounts from {type(layer).__name__}; "
+                f"the pads input was not resolved to the 8 entries of an "
+                f"(N, C, H, W) pad")
+        pads = [int(v) for v in pads]
+        if any(pads[i] for i in (0, 1, 4, 5)):
+            raise NotImplementedError(
+                f"OnnxPadDynamic pads {pads} pad the batch or channel axis")
+        pads = (pads[3], pads[7], pads[2], pads[6])
+
+    else:
+        raise TypeError(f"Cannot extract padding from {type(layer).__name__}")
+
+    if any(v < 0 for v in pads):
         raise NotImplementedError(
-            f"Cannot extract pad amounts from {type(layer).__name__}; "
-            f"the pads input was not resolved")
-
-    raise TypeError(f"Cannot extract padding from {type(layer).__name__}")
+            f"Negative padding (cropping) is not supported: {pads}")
+    return tuple(int(v) for v in pads)
 
 
 # Tuple of supported pad types for isinstance checks

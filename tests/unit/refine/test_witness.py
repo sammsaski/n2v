@@ -6,15 +6,30 @@ import torch
 import torch.nn as nn
 
 from n2v.sets.star import Star
+from n2v.utils.lpsolver import LPFailure
 from n2v.refine.reach_relaxed import extract_layers, relaxed_reach
 from n2v.refine.types import LinearSpec
 from n2v.refine.witness import (
     binding_row,
+    certified_prune_wave,
+    clip_to_raw_box,
     epsilon_vector,
     is_true_counterexample,
     score_vector,
     violation_lp,
 )
+from tests.unit.refine.conftest import seq_net
+
+
+_FAILURE_STATUSES = ["unbounded", "failed: iteration limit", "error: numerical"]
+
+
+def _input_star():
+    return Star.from_bounds(np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
+
+
+# A spec every output satisfies: the whole reach is "unsafe".
+_EVERYTHING = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([1e9]))
 
 
 def test_binding_row_is_argmax_not_argmin():
@@ -175,3 +190,140 @@ def test_ce_requires_point_inside_unsafe_region():
     spec_in = LinearSpec(G=np.array([[1.0]]), g=np.array([0.5]))
     is_ce2, _, _ = is_true_counterexample(np.array([0.5, 0.5]), S_in, net, spec_in)
     assert is_ce2
+
+
+# ---------------------------------------------------------------------------
+# Corner witnesses inside the user's float64 box
+# ---------------------------------------------------------------------------
+
+def test_box_star_corners_clip_inside_raw_box():
+    rng = np.random.default_rng(3)
+    lb = rng.uniform(-1, 1, 5) * 0.37
+    ub = lb + rng.uniform(0.01, 0.3, 5) * 0.91
+    S = Star.from_bounds(lb.reshape(-1, 1), ub.reshape(-1, 1))
+    for signs in ([1] * 5, [-1] * 5, [1, -1, 1, -1, 1]):
+        a = np.array(signs, dtype=np.float64)
+        x = S.V[:, 0] + S.V[:, 1:] @ a
+        x = clip_to_raw_box(x, S)
+        assert np.all(x >= lb) and np.all(x <= ub)
+
+
+def test_is_true_counterexample_returns_witness_inside_box():
+    torch.manual_seed(4)
+    net = nn.Sequential(nn.Linear(3, 4), nn.ReLU(), nn.Linear(4, 2)).double()
+    lb = np.array([0.1, -0.3, 0.7]) / 3.0
+    ub = lb + np.array([0.2, 0.5, 0.1]) / 7.0
+    S = Star.from_bounds(lb.reshape(-1, 1), ub.reshape(-1, 1))
+    spec = LinearSpec(np.array([[1.0, 0.0]]), np.array([1e9]))   # always unsafe
+    for signs in ([1, 1, 1], [-1, -1, -1], [1, -1, 1]):
+        a = np.array(signs, dtype=np.float64)
+        ok, x, y = is_true_counterexample(a, S, net, spec)
+        assert ok
+        assert np.all(x >= lb) and np.all(x <= ub)
+
+
+def test_clip_to_raw_box_is_a_noop_without_raw_bounds_or_with_extra_rows():
+    V = np.array([[0.0, 1.0], [0.0, 1.0]])
+    S = Star(V, np.array([[1.0]]), np.array([[0.5]]),
+             -np.ones((1, 1)), np.ones((1, 1)))
+    x = np.array([0.3, 0.3])
+    assert np.array_equal(clip_to_raw_box(x, S), x)          # no raw bounds
+    S = Star(V, np.array([[1.0], [1.0], [1.0]]), np.array([[0.5], [0.5], [0.5]]),
+             -np.ones((1, 1)), np.ones((1, 1)))
+    S._raw_lb, S._raw_ub = np.zeros(1), np.zeros(1)
+    assert np.array_equal(clip_to_raw_box(x, S), x)          # more rows than a box
+
+
+# ---------------------------------------------------------------------------
+# LP failure is not a certificate of emptiness
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("status", _FAILURE_STATUSES)
+def test_violation_lp_raises_instead_of_reporting_empty(status, monkeypatch):
+    import n2v.refine.witness as wmod
+
+    net, S_in = seq_net(2, 6, 6, 2, seed=4), _input_star()
+    out, _ = relaxed_reach(S_in, extract_layers(net), {}, bound_mode="box")
+    monkeypatch.setattr(wmod, "solve_lp",
+                        lambda **k: (None, None, status, None))
+    with pytest.raises(LPFailure):
+        wmod.violation_lp(out, _EVERYTHING, include_Cd=True)
+
+
+def test_violation_lp_still_reports_genuine_emptiness(monkeypatch):
+    import n2v.refine.witness as wmod
+
+    net, S_in = seq_net(2, 6, 6, 2, seed=4), _input_star()
+    out, _ = relaxed_reach(S_in, extract_layers(net), {}, bound_mode="box")
+    # make the polytope GENUINELY empty: alpha_0 <= -1 and alpha_0 >= 1
+    e0 = np.zeros((1, out.nVar)); e0[0, 0] = 1.0
+    out.C = np.vstack([out.C, e0, -e0])
+    out.d = np.concatenate([out.d.reshape(-1), [-1.0, -1.0]]).reshape(-1, 1)
+    assert wmod.violation_lp(out, _EVERYTHING, include_Cd=True) is None
+    monkeypatch.setattr(wmod, "solve_lp",
+                        lambda **k: (None, None, "infeasible", None))
+    assert wmod.violation_lp(out, _EVERYTHING, include_Cd=True) is None
+
+
+def test_violation_lp_does_not_trust_an_unconfirmed_infeasible(monkeypatch):
+    """The default solve says 'infeasible' but ``confirm_infeasible`` does not
+    certify it. A presolve-off 'infeasible' is not a certificate either, so
+    the violation LP raises (the caller degrades to UNKNOWN) instead of
+    reporting the node empty. The statuses are forced: alpha <= 1000 - 5e-5
+    over [1000, 2000] is genuinely empty, and the Farkas/NS certificate now
+    proves it (a flat 1e-7 * (1 + |b|) row slack used to hide that)."""
+    import n2v.refine.witness as wmod
+
+    S = Star(np.array([[0.0, 1.0]]), np.array([[1.0]]),
+             np.array([[1000 - 5e-5]]), np.array([[1000.0]]),
+             np.array([[2000.0]]))
+    spec = LinearSpec(G=np.array([[1.0]]), g=np.array([0.0]))
+    infeasible = lambda *a, **k: (None, None, "infeasible", None)  # noqa: E731
+    monkeypatch.setattr(wmod, "solve_lp", infeasible)
+    monkeypatch.setattr(wmod, "_solve_lp_careful", infeasible)
+    monkeypatch.setattr(wmod, "confirm_infeasible", lambda *a, **k: False)
+    with pytest.raises(LPFailure):
+        violation_lp(S, spec, include_Cd=True)
+
+
+def test_violation_lp_careful_resolve_works_without_highspy(monkeypatch):
+    """After an unconfirmed 'infeasible', the presolve-off re-solve falls
+    back to scipy's HiGHS when highspy is absent, and its optimum is the
+    witness. It used to call a highspy-only solve, so without highspy every
+    such node raised and the run degraded to UNKNOWN."""
+    import n2v.refine.witness as wmod
+    import n2v.utils.lpsolver as lpmod
+
+    S = Star(np.array([[0.0, 1.0]]), np.zeros((0, 1)), np.zeros((0, 1)),
+             np.array([[-1.0]]), np.array([[1.0]]))
+    spec = LinearSpec(G=np.array([[1.0]]), g=np.array([0.0]))    # y <= 0
+    monkeypatch.setattr(lpmod, "_HAS_HIGHSPY", False)
+    monkeypatch.setattr(wmod, "solve_lp",
+                        lambda **k: (None, None, "infeasible", None))
+    monkeypatch.setattr(wmod, "confirm_infeasible", lambda *a, **k: False)
+    alpha, t = violation_lp(S, spec, include_Cd=True)
+    # min over alpha in [-1, 1] of the margin alpha - 0 is -1, at alpha = -1
+    assert t == pytest.approx(-1.0, abs=1e-9)
+    assert alpha[0] == pytest.approx(-1.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Rounding-safe certified prune of a point star
+# ---------------------------------------------------------------------------
+
+def test_point_star_prune_keeps_a_touching_point():
+    """Exactly, G c = 2**53 + 3 - 2**53 = 3 = g: the point touches the unsafe
+    region, so it must not be pruned; float G @ c rounds to 4 > g."""
+    G = np.array([[1.0, 1.0, -1.0]])
+    c = np.array([2.0 ** 53, 3.0, 2.0 ** 53])
+    g = np.array([3.0])
+    # Exact arithmetic says "not pruned" whatever the BLAS summation order does,
+    # so the assertion holds unconditionally; the rounding only makes it bite.
+    P = Star(c.reshape(-1, 1), np.zeros((0, 0)), np.zeros((0, 1)))
+    assert certified_prune_wave([P], LinearSpec(G, g))[0] is False
+
+
+def test_is_unsafe_defaults_to_zero_tolerance():
+    s = LinearSpec(np.array([[1.0]]), np.array([0.0]))
+    assert s.is_unsafe([0.0]) is True
+    assert s.is_unsafe([1e-12]) is False

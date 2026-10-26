@@ -116,9 +116,9 @@ class TestDispatcherZono:
         assert len(result) == 1
         pytest.assert_zono_valid(result[0])
 
-    @pytest.mark.skip(reason="Conv2d not implemented for Zonotope")
     def test_dispatch_conv2d(self, simple_image_zono):
-        """Test dispatching Conv2D layer with ImageZono."""
+        """Conv2d on an ImageZono routes to ``conv2d_zono`` (soundness of
+        that kernel is ``test_soundness_conv2d.TestConv2DImageZonoSoundness``)."""
         layer = nn.Conv2d(1, 2, kernel_size=3, padding=1)
         layer.eval()
 

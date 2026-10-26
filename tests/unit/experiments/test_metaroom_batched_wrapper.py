@@ -51,6 +51,10 @@ from pathlib import Path
 import pytest
 import torch
 
+# External benchmark data: the opt-in ``corpus`` tier. When that tier is
+# selected explicitly, a missing file fails instead of skipping.
+pytestmark = pytest.mark.corpus
+
 # Path to a representative metaroom ONNX (.gz). If absent, we skip.
 _METAROOM_GZ = Path.home() / (
     'v/other/VNNCOMP/vnncomp2025_benchmarks/benchmarks/metaroom_2023/'

@@ -1,0 +1,27 @@
+acasxu_2023: ACAS Xu SAT
+acasxu_2023: ACAS Xu UNSAT
+collins_rul_cnn_2022: CNN robustness UNSAT
+cifar100_2024: image ResNet, SAT
+metaroom_2023: CNN UNSAT through the interval pre-pass
+linearizenn_2024: VNN-LIB 2.0 arithmetic spec
+adaptive_cruise_control_non_linear_2026: nonlinear spec, SAT
+adaptive_cruise_control_non_linear_2026: nonlinear spec, UNSAT
+isomorphic_acasxu_2026: relational (isomorphic)
+monotonic_acasxu_2026: relational (monotonic)
+smart_turn_multimodal_2026: multi-input spec
+cctsdb_yolo_2023: graph without a batch dimension (alpha-beta-CROWN: sat)
+cctsdb_yolo_2023: graph without a batch dimension
+dist_shift_2023: exact reach over Sigmoid, UNSAT
+soundnessbench: soundness benchmark, SAT
+cgan_2023: scalar output (Y float32 []) witness, SAT
+vit_2023: ViT route
+test: sanity SAT
+test: sanity UNSAT
+sat_relu: SAT by the Square attack
+relusplitter_2026: UNSAT
+safenlp_2024: UNSAT
+ml4acopf_2024: UNSAT with hard LPs
+nn4sys: UNSAT
+tllverifybench_2023: SAT
+malbeware: errored in July
+cersyve: SAT

@@ -12,7 +12,7 @@ import pytest
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 ONNX_DIR = os.path.join(REPO, "benchmarks", "vit_vnncomp2023", "onnx")
 
-ort = pytest.importorskip("onnxruntime")
+import onnxruntime as ort
 import sys
 sys.path.insert(0, os.path.join(REPO, "benchmarks", "vit_vnncomp2023"))
 
@@ -23,8 +23,8 @@ def test_ported_model_matches_onnx(name):
     from model import build_model
 
     onnx_path = os.path.join(ONNX_DIR, f"{name}.onnx")
-    if not os.path.exists(onnx_path):
-        pytest.skip(f"vendored ONNX missing: {onnx_path}")
+    # Tracked file: a missing one is a broken checkout, never a skip.
+    assert os.path.exists(onnx_path), f"vendored ONNX missing: {onnx_path}"
 
     m = build_model(name, onnx_path)
     sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])

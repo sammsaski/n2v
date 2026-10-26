@@ -473,28 +473,30 @@ class TestVerifySpecificationBox:
         result = verify_specification([pbox], hs)
         assert result.verdict == "UNSAT"
 
-    def test_box_high_dimensional_disjoint(self):
-        """High-dimensional Box should be fast (no Star conversion).
+    def test_box_high_dimensional_disjoint(self, monkeypatch):
+        """A Box is checked by interval arithmetic, never through a Star.
 
-        At 21K dims (yolo scale), Star conversion takes ~55s due to creating
-        a 21K x 21K matrix. Box interval arithmetic should take < 1s.
+        At 21K dims (yolo scale) a Star conversion would build a 21K x 21K
+        matrix. The structural check below replaces a wall-clock bound, which
+        could not fail on a slow Box path and could flake on a loaded host:
+        both the Star verifier and ``Box.to_star`` are patched to raise, so
+        any route through a Star fails the test.
         """
-        import time
-        n = 21125  # yolo output dimension
+        import n2v.utils.verify_specification as vs
 
+        def _no_star(*args, **kwargs):
+            raise AssertionError("the Box spec check must not build a Star")
+
+        monkeypatch.setattr(vs, "_verify_specification_star", _no_star)
+        monkeypatch.setattr(Box, "to_star", _no_star)
+        n = 21125  # yolo output dimension
         box = Box(np.zeros(n), np.ones(n))
 
         # sum(x) >= 2*n: impossible for [0,1]^n (max sum = n)
         G = -np.ones((1, n), dtype=np.float64)
         g = np.array([[-2 * n]], dtype=np.float64)
-        hs = HalfSpace(G, g)
-
-        t0 = time.time()
-        result = verify_specification([box], hs)
-        elapsed = time.time() - t0
-
+        result = verify_specification([box], HalfSpace(G, g))
         assert result.verdict == "UNSAT"
-        assert elapsed < 5.0, f"Box verify_specification took {elapsed:.1f}s, expected < 5s"
 
     def test_box_matches_star_result(self):
         """Box path should give same result as Star path for equivalent sets."""

@@ -17,6 +17,7 @@ from typing import List, Tuple
 
 from n2v.sets import Star, Zono, Box
 from n2v.sets.image_star import ImageStar
+from n2v.utils.lpsolver import _bound_lp_solver, _outward_lp_ranges
 
 # Value range of f(y) - y for each rounding mode. torch.round and
 # np.round both round half to even, so the +/-1/2 bound is tight.
@@ -44,15 +45,20 @@ def round_star(layer, input_sets: List, lp_solver: str = 'default') -> List:
         star = s.to_star() if isinstance(s, ImageStar) else s
         N, n = star.dim, star.nVar
 
+        # HiGHS ranges padded outward (_bound_lp_solver, _outward_lp_ranges):
+        # a max that stops just below an integer would round to the integer
+        # below it
+        solver = _bound_lp_solver(lp_solver)
         lbs = np.zeros(N)
         ubs = np.zeros(N)
         for i in range(N):
-            l_val, u_val = star.get_range(i, lp_solver)
+            l_val, u_val = star.get_range(i, solver)
             if l_val is None or u_val is None:
                 raise ValueError(
                     f"LP solver returned None for dimension {i} of "
                     f"rounding-op input. Star may be infeasible.")
             lbs[i], ubs[i] = l_val, u_val
+        lbs, ubs = _outward_lp_ranges(lbs, ubs, star.V)
 
         z_lb = npf(lbs)
         z_ub = npf(ubs)

@@ -56,6 +56,7 @@ class TestSinkhornCoupling:
         x0c_sorted = x0_c[x0_c[:, 0].sort().indices]
         torch.testing.assert_close(x0_sorted, x0c_sorted)
 
+    @pytest.mark.gpu
     def test_gpu_compatible(self):
         """Sinkhorn should work on GPU tensors if available."""
         from n2v.probabilistic.flow.train import sinkhorn_coupling

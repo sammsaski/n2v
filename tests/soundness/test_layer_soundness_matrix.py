@@ -417,8 +417,6 @@ class TestConstArithmeticSoundness:
     @pytest.mark.parametrize("op", ["Add", "Sub", "Mul", "Div"])
     @pytest.mark.parametrize("mirror", [False, True])
     def test_all_set_paths(self, tmp_path, op, mirror):
-        if op == "Div" and mirror:
-            pytest.skip("c / set is division by a set, not supported")
         lb = np.array([0.5, 1., -0.5, 2.])      # positive-safe for Div
         ub = np.array([1.5, 2., 0.5, 3.])
         cst = np.array([2.0, -1.0, 0.5, 3.0])
@@ -437,6 +435,14 @@ class TestConstArithmeticSoundness:
         onnx.save(model, path)
         sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
         tmodel = load_onnx(path)
+        if op == "Div" and mirror:
+            # Division BY a computed set is unsupported: the reach must refuse
+            # (today ``NotImplementedError``; ``UnsupportedError`` once PLAN
+            # step 23 lands), never return a set for this cell.
+            with pytest.raises(NotImplementedError,
+                               match="division BY a computed set"):
+                _assert_sound(tmodel, sess, lb, ub, (1, 4), _flat_inputs(lb, ub))
+            return
         _assert_sound(tmodel, sess, lb, ub, (1, 4), _flat_inputs(lb, ub))
 
 

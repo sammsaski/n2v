@@ -15,7 +15,7 @@ slice resolves exactly.
 import numpy as np
 import pytest
 
-onnx = pytest.importorskip("onnx")
+import onnx
 pytest.importorskip("onnx2torch")
 
 from onnx import TensorProto, helper, numpy_helper  # noqa: E402

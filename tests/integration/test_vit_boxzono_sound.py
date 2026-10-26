@@ -15,7 +15,8 @@ ONNX = os.path.join(BENCH, "onnx", "pgd_2_3_16.onnx")
 NPZ = os.path.join(BENCH, "instances", "pgd_2_3_16.npz")
 
 if not (os.path.exists(ONNX) and os.path.exists(NPZ)):
-    pytest.skip("vendored ViT model/instances missing", allow_module_level=True)
+    # Tracked files: a missing one is a broken checkout, never a skip.
+    raise FileNotFoundError(f"vendored ViT assets missing: {ONNX}, {NPZ}")
 sys.path.insert(0, BENCH)
 
 import torch                                  # noqa: E402

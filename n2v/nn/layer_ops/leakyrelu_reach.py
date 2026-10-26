@@ -27,6 +27,15 @@ from n2v.nn.layer_ops._profiling import (
     record_layer_neurons,
     record_classification,
 )
+from n2v.nn.layer_ops.relu_reach import (
+    _get_maxs,
+    _get_mins,
+    _intersect_precomputed,
+    _phase_range,
+    _phase_sliver_star,
+    _thin_neuron_side,
+)
+from n2v.utils.ns_certificate import outward_interval_slack
 
 logger = logging.getLogger(__name__)
 
@@ -85,11 +94,12 @@ def _leakyrelu_single_star_exact(
     if lb is None or ub is None:
         return []
 
-    # Refine bounds with precomputed Zono pre-pass bounds if available
+    # Refine bounds with precomputed pre-pass bounds if available. As in
+    # relu_reach._relu_single_star_exact, these round-to-nearest bounds only
+    # save LPs here: they are widened by the LP pad before they may decide
+    # a phase.
     if precomputed_bounds is not None:
-        pre_lb, pre_ub = precomputed_bounds
-        lb = np.maximum(lb, pre_lb.reshape(lb.shape))
-        ub = np.minimum(ub, pre_ub.reshape(ub.shape))
+        lb, ub = _intersect_precomputed(lb, ub, precomputed_bounds, pad=True)
 
     # Scale neurons that are always inactive (ub <= 0)
     inactive_map = np.where(ub.flatten() <= 0)[0]
@@ -127,11 +137,23 @@ def _leakyrelu_single_star_exact(
 
 
 def _step_leakyrelu(I: Star, index: int, gamma: float, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> List[Star]:
-    """Split a single neuron for LeakyReLU (exact step reach)."""
-    xmin, xmax = I.get_range(index, lp_solver)
+    """Split a single neuron for LeakyReLU (exact step reach).
 
-    if xmin is None or xmax is None:
+    Phases are decided as in ``relu_reach._step_relu``: from the padded LP
+    range, with a star dropped only when certified empty, and a raw bound
+    within its pad of 0 kept in one star with a sliver variable when the
+    other bound is outside its pad (a neuron whose whole range lies within
+    the pads is split, which is exact, unless one side is certified empty,
+    ``relu_reach._thin_neuron_side``). For the band on the positive side,
+    ``f(x) = gamma*x + (1-gamma)*max(x, 0)``; on the negative side
+    ``f(x) = x + (1-gamma)*max(-x, 0)``.
+    """
+    rng = _phase_range(I, index, lp_solver)
+    if rng is None:
         return []
+    xmin, xmax, pad_lo, pad_hi = rng
+    max_in_band = xmax <= 2.0 * pad_hi
+    min_in_band = -xmin <= 2.0 * pad_lo
 
     if xmin >= 0:
         count("n_resolved", 1)
@@ -140,19 +162,29 @@ def _step_leakyrelu(I: Star, index: int, gamma: float, lp_solver: "LPSolver | st
     elif xmax <= 0:
         # Always inactive — scale by gamma
         count("n_resolved", 1)
-        new_V = I.V.copy()
-        new_V[index, :] = gamma * new_V[index, :]
+        return [_scale_star_row(I, index, gamma)]
 
-        if I.Z is not None:
-            new_c = I.Z.c.copy()
-            new_c[index] = gamma * new_c[index]
-            new_V_z = I.Z.V.copy()
-            new_V_z[index, :] = gamma * new_V_z[index, :]
-            new_Z = Zono(new_c, new_V_z)
-        else:
-            new_Z = None
+    side = None
+    if max_in_band and min_in_band:
+        side = _thin_neuron_side(I, index, xmin, xmax, pad_lo, pad_hi, lp_solver)
 
-        return [Star(new_V, I.C, I.d, I.predicate_lb, I.predicate_ub, outer_zono=new_Z)]
+    if side == 1:
+        count("n_resolved", 1)
+        return [I]
+
+    elif side == -1:
+        count("n_resolved", 1)
+        return [_scale_star_row(I, index, gamma)]
+
+    elif max_in_band and not min_in_band:
+        # Raw max within its pad of 0: gamma*x + t, t in (1-gamma)*[0, xmax]
+        count("n_resolved", 1)
+        return [_phase_sliver_star(I, index, gamma, (1.0 - gamma) * xmax)]
+
+    elif min_in_band and not max_in_band:
+        # Raw min within its pad of 0: x + t, t in (1-gamma)*[0, -xmin]
+        count("n_resolved", 1)
+        return [_phase_sliver_star(I, index, 1.0, (1.0 - gamma) * (-xmin))]
 
     else:
         # Split into two cases
@@ -183,6 +215,23 @@ def _step_leakyrelu(I: Star, index: int, gamma: float, lp_solver: "LPSolver | st
         S2 = Star(I.V, new_C2, new_d2, I.predicate_lb, I.predicate_ub, outer_zono=I.Z)
 
         return [S1, S2]
+
+
+def _scale_star_row(I: Star, index: int, gamma: float) -> Star:
+    """``I`` with row ``index`` (and its outer zonotope row) scaled by gamma."""
+    new_V = I.V.copy()
+    new_V[index, :] = gamma * new_V[index, :]
+
+    if I.Z is not None:
+        new_c = I.Z.c.copy()
+        new_c[index] = gamma * new_c[index]
+        new_V_z = I.Z.V.copy()
+        new_V_z[index, :] = gamma * new_V_z[index, :]
+        new_Z = Zono(new_c, new_V_z)
+    else:
+        new_Z = None
+
+    return Star(new_V, I.C, I.d, I.predicate_lb, I.predicate_ub, outer_zono=new_Z)
 
 
 def leakyrelu_star_approx(
@@ -240,9 +289,7 @@ def _leakyrelu_single_star_approx(
 
     # Refine bounds with precomputed Zono pre-pass bounds if available
     if precomputed_bounds is not None:
-        pre_lb, pre_ub = precomputed_bounds
-        lb_est = np.maximum(lb_est, pre_lb.flatten())
-        ub_est = np.minimum(ub_est, pre_ub.flatten())
+        lb_est, ub_est = _intersect_precomputed(lb_est, ub_est, precomputed_bounds)
 
     # Scale definitely inactive neurons (ub <= 0)
     inactive_map = np.where(ub_est <= 0)[0]
@@ -264,11 +311,10 @@ def _leakyrelu_single_star_approx(
     if len(crossing_map_est) == 0:
         return current_star
 
-    # Get tight bounds via LP for crossing neurons
-    ub_tight = np.zeros(len(crossing_map_est))
-    for i, idx in enumerate(crossing_map_est):
-        _, ub_val = current_star.get_range(idx, lp_solver)
-        ub_tight[i] = ub_val if ub_val is not None else ub_est[idx]
+    # Get tight bounds via LP for crossing neurons (padded outward; the
+    # estimate where the LP returns no optimum)
+    ub_tight = _get_maxs(current_star, crossing_map_est, lp_solver,
+                         ub_est[crossing_map_est])
 
     # Neurons LP confirmed inactive
     still_positive = ub_tight > 0
@@ -296,10 +342,8 @@ def _leakyrelu_single_star_approx(
     if len(crossing_indices) == 0:
         return current_star
 
-    lb_for_crossing = np.zeros(len(crossing_indices))
-    for i, idx in enumerate(crossing_indices):
-        lb_val, _ = current_star.get_range(idx, lp_solver)
-        lb_for_crossing[i] = lb_val if lb_val is not None else lb_est[idx]
+    lb_for_crossing = _get_mins(current_star, crossing_indices, lp_solver,
+                                lb_est[crossing_indices])
 
     actually_crossing = lb_for_crossing < 0
     final_indices = crossing_indices[actually_crossing]
@@ -322,10 +366,14 @@ def _apply_leakyrelu_approx_multi(
     """
     Apply LeakyReLU triangle approximation to multiple neurons simultaneously.
 
-    3 constraints per crossing neuron:
+    3 constraints per crossing neuron. For gamma <= 1 LeakyReLU is
+    max(x, gamma*x), convex:
       y >= gamma * x     (lower bound from negative side)
       y >= x             (lower bound from positive side)
       y <= a*(x - lb) + gamma*lb,  a = (ub - gamma*lb)/(ub - lb)  (secant upper)
+    For gamma > 1 it is min(x, gamma*x), concave, and every inequality flips
+    (the secant becomes the lower face). y is also boxed to the function's
+    range on [lb, ub]: [min(gamma*lb, 0), max(gamma*lb, ub)].
     """
     if len(indices) == 0:
         return I
@@ -348,31 +396,63 @@ def _apply_leakyrelu_approx_multi(
     C0 = np.hstack([I.C, np.zeros((I.C.shape[0], m))])
     d0 = I.d
 
+    has_box = I.predicate_lb is not None and I.predicate_ub is not None
+    # +1: the two lines bound y from below and the secant from above
+    # (convex, gamma <= 1); -1: the reverse (concave, gamma > 1)
+    s = 1.0 if gamma <= 1.0 else -1.0
+
     # Constraint 1: y >= gamma * x  →  gamma*x - y <= 0
     #   gamma * V[idx, 1:n+1] * alpha - y_i <= -gamma * V[idx, 0]
-    C1 = np.hstack([gamma * I.V[indices, 1:n+1], -np.eye(m)])
-    d1 = (-gamma * I.V[indices, 0:1])
+    # The scaled row is stored rounded: its right-hand side moves out by a
+    # rigorous bound on that rounding over the predicate box (as for C3).
+    G1 = gamma * I.V[indices, 1:n+1]
+    C1 = s * np.hstack([G1, -np.eye(m)])
+    d1 = -s * gamma * I.V[indices, 0]
+    if has_box:
+        d1 = d1 + outward_interval_slack(np.abs(d1), G1, I.predicate_lb,
+                                         I.predicate_ub)
+    d1 = d1.reshape(-1, 1)
 
     # Constraint 2: y >= x  →  x - y <= 0
     #   V[idx, 1:n+1] * alpha - y_i <= -V[idx, 0]
-    C2 = np.hstack([I.V[indices, 1:n+1], -np.eye(m)])
-    d2 = -I.V[indices, 0:1]
+    C2 = s * np.hstack([I.V[indices, 1:n+1], -np.eye(m)])
+    d2 = -s * I.V[indices, 0:1]
 
     # Constraint 3: y <= a*(x - lb) + gamma*lb
     #   y - a*x <= -a*lb + gamma*lb = lb*(gamma - a)
     #   -a * V[idx, 1:n+1] * alpha + y_i <= -a*V[idx,0] + a*lb - gamma*lb + gamma*V[idx,0]
     # Simplified: a = (ub - gamma*lb) / (ub - lb)
-    a = (ubs - gamma * lbs) / (ubs - lbs + 1e-10)
+    # SOUNDNESS: as in relu_reach._apply_triangle_approx_multi, for gamma <= 1
+    # any slope a >= (ub - gamma*lb)/(ub - lb) keeps the face on or above
+    # (ub, ub) and the kink, so the rounded quotient is raised by 8 units of
+    # roundoff (2^-50 relative); for gamma > 1 the face is a lower bound and
+    # the slope is lowered instead. lb < 0 < ub, so no epsilon in the
+    # denominator (the old ``+ 1e-10`` lowered the face below (ub, ub)).
+    lbs = np.asarray(lbs, dtype=np.float64).reshape(-1)
+    ubs = np.asarray(ubs, dtype=np.float64).reshape(-1)
+    a = ((ubs - gamma * lbs) / (ubs - lbs)) * (1.0 + s * 2.0 ** -50)
     b = a * lbs - gamma * lbs  # -a*lb + gamma*lb negated = a*lb - gamma*lb
-    C3 = np.hstack([-a.reshape(-1, 1) * I.V[indices, 1:n+1], np.eye(m)])
-    d3 = (a * I.V[indices, 0] - b).reshape(-1, 1)
+    G3 = a.reshape(-1, 1) * I.V[indices, 1:n+1]
+    C3 = s * np.hstack([-G3, np.eye(m)])
+    # Rigorous bound on the rounding of the stored row over the predicate box.
+    d3 = s * (a * I.V[indices, 0] - b)
+    if has_box:
+        d3 = d3 + outward_interval_slack(
+            np.abs(a * I.V[indices, 0]) + np.abs(a * lbs) + np.abs(gamma * lbs),
+            G3, I.predicate_lb, I.predicate_ub)
+    d3 = d3.reshape(-1, 1)
 
     new_C = np.vstack([C0, C1, C2, C3])
     new_d = np.vstack([d0, d1, d2, d3])
 
-    # Predicate bounds: y_i in [gamma*lb_i, ub_i]
-    new_pred_lb = np.vstack([I.predicate_lb, (gamma * lbs).reshape(-1, 1)]) if I.predicate_lb is not None else None
-    new_pred_ub = np.vstack([I.predicate_ub, ubs.reshape(-1, 1)]) if I.predicate_ub is not None else None
+    # Predicate bounds: the range of LeakyReLU on [lb, ub], attained at lb, 0
+    # or ub (the product gamma*lb rounded outward)
+    g_lo = np.nextafter(gamma * lbs, -np.inf)
+    g_hi = np.nextafter(gamma * lbs, np.inf)
+    y_lb = np.minimum(g_lo, 0.0)
+    y_ub = np.maximum(g_hi, ubs)
+    new_pred_lb = np.vstack([I.predicate_lb, y_lb.reshape(-1, 1)]) if I.predicate_lb is not None else None
+    new_pred_ub = np.vstack([I.predicate_ub, y_ub.reshape(-1, 1)]) if I.predicate_ub is not None else None
 
     return Star(new_V, new_C, new_d, new_pred_lb, new_pred_ub, outer_zono=None)
 
@@ -445,16 +525,28 @@ def _leakyrelu_single_zono(I: Zono, gamma: float) -> Zono:
 
 
 def leakyrelu_box(input_boxes: List, gamma: float = 0.01) -> List:
-    """LeakyReLU for Boxes."""
+    """LeakyReLU for Boxes.
+
+    LeakyReLU is piecewise linear with its kink at 0, so on [lb, ub] its range
+    is spanned by f(lb), f(ub) and, when lb < 0 < ub, f(0) = 0. This holds for
+    any slope (for gamma < 0, f(lb) = gamma*lb can exceed ub and the old
+    [gamma*lb, ub] left out f(0); an all-negative box came out inverted). The
+    products gamma*x are rounded outward, as for the Star predicate bounds.
+    """
     from n2v.sets import Box
     output = []
     for box in input_boxes:
-        new_lb = np.minimum(box.lb, gamma * box.lb)
-        new_lb = np.where(box.lb >= 0, box.lb, gamma * box.lb)
-        new_ub = np.where(box.ub >= 0, box.ub, gamma * box.ub)
-        # Handle crossing: lb < 0 and ub > 0
-        crossing = (box.lb < 0) & (box.ub > 0)
-        new_lb = np.where(crossing, gamma * box.lb, new_lb)
-        new_ub = np.where(crossing, box.ub, new_ub)
+        lb = np.asarray(box.lb, dtype=np.float64)
+        ub = np.asarray(box.ub, dtype=np.float64)
+        f_lo, f_hi = [], []
+        for v in (lb, ub):
+            neg = v < 0
+            f_lo.append(np.where(neg, np.nextafter(gamma * v, -np.inf), v))
+            f_hi.append(np.where(neg, np.nextafter(gamma * v, np.inf), v))
+        new_lb = np.minimum(f_lo[0], f_lo[1])
+        new_ub = np.maximum(f_hi[0], f_hi[1])
+        crossing = (lb < 0) & (ub > 0)
+        new_lb = np.where(crossing, np.minimum(new_lb, 0.0), new_lb)
+        new_ub = np.where(crossing, np.maximum(new_ub, 0.0), new_ub)
         output.append(Box(new_lb, new_ub))
     return output

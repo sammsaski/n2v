@@ -19,16 +19,16 @@ import sys
 import numpy as np
 import pytest
 
-torch = pytest.importorskip("torch")
+import torch
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BENCH = os.path.join(REPO, "benchmarks", "vit_vnncomp2023")
 ONNX = os.path.join(BENCH, "onnx", "ibp_3_3_8.onnx")
 NPZ = os.path.join(BENCH, "instances", "ibp_3_3_8.npz")
 
-pytestmark = pytest.mark.skipif(
-    not (os.path.exists(ONNX) and os.path.exists(NPZ)),
-    reason="ViT benchmark assets (onnx/instances) not present")
+if not (os.path.exists(ONNX) and os.path.exists(NPZ)):
+    # Tracked files: a missing one is a broken checkout, never a skip.
+    raise FileNotFoundError(f"vendored ViT assets missing: {ONNX}, {NPZ}")
 
 sys.path.insert(0, BENCH)
 

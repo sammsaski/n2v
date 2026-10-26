@@ -540,7 +540,7 @@ def _load_onnx_softmax_model(opset, op="Softmax"):
     import os
     import tempfile
 
-    onnx = pytest.importorskip("onnx")
+    import onnx
     pytest.importorskip("onnx2torch")
     import numpy as np
     from onnx import TensorProto, helper
@@ -659,10 +659,9 @@ class TestOpset9UpsampleLoadShim:
     def test_loads_and_matches_onnxruntime(self, tmp_path):
         import warnings
 
-        pytest.importorskip("onnx")
+        import onnxruntime as ort
         pytest.importorskip("onnx2torch")
         pytest.importorskip("onnxsim")
-        ort = pytest.importorskip("onnxruntime")
         import numpy as np
 
         from n2v.utils.model_loader import load_onnx

@@ -20,6 +20,10 @@ class TestParallelLPSoundness:
         """Reset configuration before each test."""
         config.reset()
 
+    def teardown_method(self):
+        """These tests switch parallel LP on; leave the process as found."""
+        config.reset()
+
     def test_simple_bounds_soundness(self):
         """Test parallel LP on simple box-based Star sets."""
         # Create Star from bounds
@@ -182,6 +186,9 @@ class TestStarParallelSoundness:
 
     def setup_method(self):
         """Reset configuration before each test."""
+        config.reset()
+
+    def teardown_method(self):
         config.reset()
 
     def test_relu_soundness_multiple_stars(self):

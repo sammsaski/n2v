@@ -264,3 +264,99 @@ class TestSolveLpHighspy:
         assert status == 'optimal'
         assert fval == pytest.approx(0.0, abs=1e-6)
         assert info['solver'] == 'highspy'
+
+
+# The HiGHS model the solvers build with presolve on (lowered small-matrix
+# threshold, row-scaled rows) ended in kUnknown on a feasible 220-row star
+# from ml4acopf that a presolve-off solve decides at once. The batch path
+# recorded None, the single path 'failed', and the McCormick product then
+# raised: four instances that are UNSAT came out unknown. Such an LP is now
+# re-solved once with presolve off. HiGHS's kUnknown depends on its version,
+# so these tests make the presolve-on model report it.
+# Triangle-like polytope: x + 2y <= 4, x >= 0.5, box [0, 3]^2.
+_A = np.array([[1.0, 2.0], [-1.0, 0.0]])
+_B = np.array([4.0, -0.5])
+_LB = np.zeros(2)
+_UB = np.full(2, 3.0)
+_F = np.array([1.0, -1.0])      # min f'x = -1.25 at (0.5, 1.75); max 3 at (3, 0)
+
+
+def _report_undecided(monkeypatch, presolve_off_too=False):
+    """Make every HiGHS model built with presolve on (and, with
+    ``presolve_off_too``, every model) report kUnknown after a solve."""
+    import highspy
+    import n2v.utils.lpsolver as lpsolver
+
+    class _Undecided:
+        def __init__(self, h):
+            self._h = h
+
+        def __getattr__(self, name):
+            return getattr(self._h, name)
+
+        def getModelStatus(self):
+            return highspy.HighsModelStatus.kUnknown
+
+    real = lpsolver._new_highs
+
+    def new_highs(presolve=True):
+        h = real(presolve=presolve)
+        return _Undecided(h) if (presolve or presolve_off_too) else h
+
+    monkeypatch.setattr(lpsolver, "_new_highs", new_highs)
+
+
+@pytest.mark.skipif(not _HAS_HIGHSPY, reason="highspy not installed")
+class TestHighspyUndecidedRetry:
+    """An LP the presolve-on HiGHS model leaves undecided is re-solved with
+    presolve off; a failure of that re-solve stays a failure."""
+
+    def test_batch_resolves_undecided_objectives(self, monkeypatch):
+        _report_undecided(monkeypatch)
+        lo, hi = solve_lp_batch([_F, _F], _A, _B, _LB, _UB, [True, False],
+                                lp_solver='linprog')
+        assert lo is not None and hi is not None
+        assert lo <= -1.25 and lo == pytest.approx(-1.25, abs=1e-9)
+        assert hi >= 3.0 and hi == pytest.approx(3.0, abs=1e-9)
+
+    def test_single_resolves_undecided_lp(self, monkeypatch):
+        _report_undecided(monkeypatch)
+        _, fval, status, info = solve_lp(_F, _A, _B, lb=_LB, ub=_UB,
+                                         lp_solver='linprog', minimize=True)
+        assert status == 'optimal'
+        assert info['solver'] == 'highspy-nopresolve'
+        assert fval <= -1.25 and fval == pytest.approx(-1.25, abs=1e-9)
+
+    def test_star_range_and_mccormick_product(self, monkeypatch):
+        """The failure surfaced as Star.get_range -> (None, None) and a
+        ValueError from the McCormick product of two stars."""
+        from n2v.nn.reach import _mul_stars_mccormick
+        from n2v.sets import Star
+
+        _report_undecided(monkeypatch)
+        V = np.array([[0.0, 1.0, 0.0], [0.5, 0.0, 1.0]])
+        S = Star(V, _A, _B.reshape(-1, 1), _LB.reshape(-1, 1),
+                 _UB.reshape(-1, 1))
+        lo, hi = S.get_range(0, 'linprog')
+        assert lo == pytest.approx(0.5, abs=1e-9) and lo <= 0.5
+        assert hi == pytest.approx(3.0, abs=1e-9) and hi >= 3.0
+
+        T = Star(V[::-1].copy(), _A, _B.reshape(-1, 1), _LB.reshape(-1, 1),
+                 _UB.reshape(-1, 1))
+        Z = _mul_stars_mccormick(S, T, 'linprog')
+        zlo, zhi = Z.get_ranges('linprog')
+        # sampled products x0 * (y + 0.5) and (y + 0.5) * x0 lie in the range
+        rng = np.random.default_rng(0)
+        pts = rng.uniform(_LB, _UB, size=(2000, 2))
+        pts = pts[(pts @ _A.T <= _B).all(axis=1)]
+        prod = pts[:, 0] * (pts[:, 1] + 0.5)
+        assert np.all(zlo.ravel() <= prod.min()) and np.all(zhi.ravel() >= prod.max())
+
+    def test_failed_retry_stays_a_failure(self, monkeypatch):
+        _report_undecided(monkeypatch, presolve_off_too=True)
+        assert solve_lp_batch([_F], _A, _B, _LB, _UB, [True],
+                              lp_solver='linprog') == [None]
+        x, fval, status, _ = solve_lp(_F, _A, _B, lb=_LB, ub=_UB,
+                                      lp_solver='linprog', minimize=True)
+        assert x is None and fval is None
+        assert status.startswith('failed')

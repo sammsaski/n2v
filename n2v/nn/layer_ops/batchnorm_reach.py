@@ -17,6 +17,7 @@ from typing import List, Tuple, Union
 from n2v.sets import Star, Zono, Box
 from n2v.sets.image_star import ImageStar
 from n2v.sets.image_zono import ImageZono
+from n2v.utils.ns_certificate import _ETA, _widen_sum
 
 
 def _get_bn_params(layer: Union[nn.BatchNorm1d, nn.BatchNorm2d]) -> Tuple[np.ndarray, np.ndarray]:
@@ -33,16 +34,56 @@ def _get_bn_params(layer: Union[nn.BatchNorm1d, nn.BatchNorm2d]) -> Tuple[np.nda
     Returns:
         Tuple of (scale, shift) as 1D numpy arrays of shape (num_features,)
     """
-    gamma = layer.weight.detach().cpu().numpy()         # (num_features,)
-    beta = layer.bias.detach().cpu().numpy()             # (num_features,)
-    mu = layer.running_mean.detach().cpu().numpy()       # (num_features,)
-    sigma2 = layer.running_var.detach().cpu().numpy()    # (num_features,)
+    # Without running statistics (track_running_stats=False) the layer
+    # normalizes each batch by its own statistics even in eval mode, so it
+    # is not an affine map of its input.
+    if layer.running_mean is None or layer.running_var is None:
+        raise NotImplementedError(
+            f"{type(layer).__name__} without running statistics "
+            f"(track_running_stats=False) normalizes by batch statistics; "
+            f"it is not supported")
+    # float64: in the parameters' float32 the folded scale and shift would
+    # carry a relative error of ~6e-8 against the layer.
+    mu = layer.running_mean.detach().cpu().double().numpy()       # (num_features,)
+    sigma2 = layer.running_var.detach().cpu().double().numpy()    # (num_features,)
+    gamma = (layer.weight.detach().cpu().double().numpy()
+             if layer.weight is not None else np.ones_like(mu))
+    beta = (layer.bias.detach().cpu().double().numpy()
+            if layer.bias is not None else np.zeros_like(mu))
     eps = layer.eps
 
     scale = gamma / np.sqrt(sigma2 + eps)
     shift = beta - scale * mu
 
     return scale, shift
+
+
+def _bn_fold_mag(layer: Union[nn.BatchNorm1d, nn.BatchNorm2d],
+                 scale: np.ndarray) -> np.ndarray:
+    """Per-feature magnitude ``|beta| + |scale * mean|`` of the terms folded
+    into the BatchNorm shift, for the rounding bound of
+    :func:`_batchnorm_single_box`.
+
+    It is 0 exactly where both folded terms are exact zeros of the
+    real-number layer (``beta = 0``, and ``mean = 0`` or ``gamma = 0``), and
+    at least the smallest subnormal elsewhere, so a folded term whose
+    computed product underflowed to 0 still gets a rounding margin.
+
+    Args:
+        layer: PyTorch BatchNorm layer (eval mode)
+        scale: The folded scale from :func:`_get_bn_params`
+
+    Returns:
+        1D array of shape ``(num_features,)``
+    """
+    mu = layer.running_mean.detach().cpu().double().numpy()
+    gamma = (layer.weight.detach().cpu().double().numpy()
+             if layer.weight is not None else np.ones_like(mu))
+    beta = (layer.bias.detach().cpu().double().numpy()
+            if layer.bias is not None else np.zeros_like(mu))
+    mag = np.abs(beta) + np.abs(scale * mu)
+    exact_zero = (beta == 0.0) & ((mu == 0.0) | (gamma == 0.0))
+    return np.where(exact_zero, 0.0, np.maximum(mag, _ETA))
 
 
 def batchnorm_star(
@@ -247,10 +288,11 @@ def batchnorm_box(
         List of output Box sets
     """
     scale, shift = _get_bn_params(layer)
+    fold_mag = _bn_fold_mag(layer, scale)
 
     output_boxes = []
     for box in input_boxes:
-        output_box = _batchnorm_single_box(box, scale, shift)
+        output_box = _batchnorm_single_box(box, scale, shift, fold_mag)
         output_boxes.append(output_box)
 
     return output_boxes
@@ -259,7 +301,8 @@ def batchnorm_box(
 def _batchnorm_single_box(
     box: Box,
     scale: np.ndarray,
-    shift: np.ndarray
+    shift: np.ndarray,
+    fold_mag: np.ndarray,
 ) -> Box:
     """
     Apply BatchNorm to a single Box.
@@ -270,10 +313,19 @@ def _batchnorm_single_box(
         new_ub[i] = scale[i] * box.ub[i] + shift[i]  if scale[i] >= 0
                    = scale[i] * box.lb[i] + shift[i]  if scale[i] < 0
 
+    The bounds are rounded outward by a rigorous bound on the rounding of
+    the map and of the folded scale and shift (a few roundings each, against
+    the real-number layer), so the Box contains the layer's exact image.
+
     Args:
         box: Input Box
         scale: Per-feature scale factors (dim,)
         shift: Per-feature shift values (dim,)
+        fold_mag: Per-feature ``|beta| + |scale * mean|``, the magnitude of
+            the terms folded into ``shift``, 0 only where those terms are
+            exact zeros (:func:`_bn_fold_mag`). ``|shift|`` would not do:
+            the rounding of ``beta - scale * mean`` scales with the terms,
+            not with their difference.
 
     Returns:
         Output Box
@@ -288,5 +340,20 @@ def _batchnorm_single_box(
     # Element-wise min/max to handle negative scales
     new_lb = np.minimum(prod_lb, prod_ub) + shift_col
     new_ub = np.maximum(prod_lb, prod_ub) + shift_col
+
+    # Rounding: gamma_8 over the magnitudes of every term covers the
+    # add/sqrt/divide of the scale, the multiply/subtract of the shift and
+    # the two roundings of the map. Each direction is charged for the input
+    # endpoint it uses, so an infinite endpoint on one side leaves the other
+    # bound finite, and a bound whose terms are all exact zeros stays exact.
+    fold_col = np.asarray(fold_mag, dtype=np.float64).reshape(-1, 1)
+    x_lo = np.where(scale_col >= 0, box.lb, box.ub)   # endpoint of the min
+    x_hi = np.where(scale_col >= 0, box.ub, box.lb)   # endpoint of the max
+    mag_lo = np.abs(scale_col) * np.abs(x_lo) + fold_col
+    mag_hi = np.abs(scale_col) * np.abs(x_hi) + fold_col
+    count_lo = np.where((x_lo == 0) & (fold_col == 0), 0, 6)
+    count_hi = np.where((x_hi == 0) & (fold_col == 0), 0, 6)
+    new_lb = _widen_sum(new_lb, new_lb, mag_lo, count_lo)[0]
+    new_ub = _widen_sum(new_ub, new_ub, mag_hi, count_hi)[1]
 
     return Box(new_lb, new_ub)

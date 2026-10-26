@@ -288,8 +288,10 @@ def _reach_layer_star(layer: nn.Module, input_sets: List, method: str, **kwargs)
             layer, input_sets, method=method, **kwargs)
 
     elif isinstance(layer, nn.MaxPool2d):
-        lp_solver = _resolve_lp(kwargs.get('lp_solver', LPSolver.DEFAULT))
-        verbose = kwargs.get('verbose', False)
+        # popped, not read: they are passed by name below, and passing them
+        # through **kwargs as well would be a TypeError
+        lp_solver = _resolve_lp(kwargs.pop('lp_solver', LPSolver.DEFAULT))
+        verbose = kwargs.pop('verbose', False)
         return maxpool2d_reach.maxpool2d_star(
             layer, input_sets, method=method, lp_solver=lp_solver,
             verbose=verbose, **kwargs
@@ -525,10 +527,11 @@ def _reach_layer_hexatope(layer: nn.Module, input_sets: List, method: str, **kwa
 
     elif isinstance(layer, (nn.BatchNorm1d, nn.BatchNorm2d)):
         scale, shift = batchnorm_reach._get_bn_params(layer)
-        dummy = nn.Linear(len(scale), len(scale), bias=True)
+        # float64: a float32 layer would round the folded scale and shift.
+        dummy = nn.Linear(len(scale), len(scale), bias=True, dtype=torch.float64)
         with torch.no_grad():
-            dummy.weight.copy_(torch.from_numpy(np.diag(scale)).float())
-            dummy.bias.copy_(torch.from_numpy(shift).float())
+            dummy.weight.copy_(torch.from_numpy(np.diag(scale)))
+            dummy.bias.copy_(torch.from_numpy(shift))
         return linear_reach.linear_hexatope(dummy, input_sets)
 
     elif isinstance(layer, _ONNX_NEG_TYPES):
@@ -571,10 +574,11 @@ def _reach_layer_octatope(layer: nn.Module, input_sets: List, method: str, **kwa
 
     elif isinstance(layer, (nn.BatchNorm1d, nn.BatchNorm2d)):
         scale, shift = batchnorm_reach._get_bn_params(layer)
-        dummy = nn.Linear(len(scale), len(scale), bias=True)
+        # float64: a float32 layer would round the folded scale and shift.
+        dummy = nn.Linear(len(scale), len(scale), bias=True, dtype=torch.float64)
         with torch.no_grad():
-            dummy.weight.copy_(torch.from_numpy(np.diag(scale)).float())
-            dummy.bias.copy_(torch.from_numpy(shift).float())
+            dummy.weight.copy_(torch.from_numpy(np.diag(scale)))
+            dummy.bias.copy_(torch.from_numpy(shift))
         return linear_reach.linear_octatope(dummy, input_sets)
 
     elif isinstance(layer, _ONNX_NEG_TYPES):

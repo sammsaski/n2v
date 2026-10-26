@@ -89,6 +89,11 @@ def _prepend_const_token(s, cls_vec: np.ndarray):
 class ViTReacher:
     def __init__(self, model, mode: str = "concretize", relax_factor: float = 0.5,
                  set_type=Star):
+        # relax_factor 0 makes relu_star_approx hand off to the exact
+        # (splitting) ReLU; this reacher carries one star, so that would drop
+        # the other pieces' states.
+        if not 0.0 < relax_factor <= 1.0:
+            raise ValueError(f"relax_factor must be in (0, 1], got {relax_factor}")
         self.m = model
         self.mode = mode
         self.relax_factor = relax_factor
@@ -112,7 +117,10 @@ class ViTReacher:
 
     def _relu(self, s):
         if self.set_type is Star:
-            return relu_star_approx([s], relax_factor=self.relax_factor)[0]
+            out = relu_star_approx([s], relax_factor=self.relax_factor)
+            if len(out) != 1:
+                raise RuntimeError(f"ReLU produced {len(out)} stars, expected 1")
+            return out[0]
         if self.set_type is Zono:
             return relu_zono_approx([s])[0]
         return relu_box([s])[0]

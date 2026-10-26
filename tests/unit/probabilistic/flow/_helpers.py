@@ -10,12 +10,27 @@ majority of call sites.
 """
 from __future__ import annotations
 
+import copy
+import functools
+
 import numpy as np
 import torch
 
 
 def _train_small_2d_flow(seed: int = 0):
     """Tiny 2D flow trained on N(0, I_2), reused across flow unit tests.
+
+    Training is deterministic in ``seed`` and costs about 3 s, so the flow is
+    trained once per seed per process and every caller gets its own deep
+    copy: a test that mutates its copy (``train()`` mode, a device move)
+    cannot affect the next test.
+    """
+    return copy.deepcopy(_train_small_2d_flow_cached(seed))
+
+
+@functools.lru_cache(maxsize=None)
+def _train_small_2d_flow_cached(seed: int = 0):
+    """The trained flow for ``seed`` (see ``_train_small_2d_flow``).
 
     The output distribution is Gaussian by construction (toy target).
     Uses sinkhorn OT coupling with auto regularization, EMA weights, and

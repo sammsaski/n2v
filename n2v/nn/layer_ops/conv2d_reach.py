@@ -10,13 +10,86 @@ Supports both ImageStar (4D V) and Star (2D V) inputs with optimized paths for e
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
-from typing import List
+from typing import Callable, List, Optional, Tuple
 from n2v.sets import Star, Zono, ImageStar, ImageZono, Hexatope, Octatope
 
 # Profiler hook (no-op when profiling is disabled)
 from n2v.profiling import region, count, OPERATION, is_enabled
+
+
+# Rough cap, in bytes, on the float64 temporaries of one batch of basis
+# columns in map_basis_columns (the batch's input copy, the op's internal
+# scratch and its output), so they stay small next to V itself.
+_COLUMN_BATCH_BYTES = 1 << 28
+
+
+def float64_params(layer: nn.Module) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """The layer's weight and bias as CPU float64 tensors (bias may be None).
+
+    Widening float32 parameters to float64 is exact, so the set arithmetic
+    that uses them runs on the same network the layer computes."""
+    weight = layer.weight.detach().to(device='cpu', dtype=torch.float64)
+    bias = (layer.bias.detach().to(device='cpu', dtype=torch.float64)
+            if layer.bias is not None else None)
+    return weight, bias
+
+
+def kernel_area(layer: nn.Module) -> int:
+    """kh * kw of a conv, conv-transpose or pooling layer."""
+    k = layer.kernel_size
+    if isinstance(k, (tuple, list)):
+        return int(np.prod(k))
+    return int(k) ** 2
+
+
+def map_basis_columns(op: Callable[[torch.Tensor], torch.Tensor],
+                      V: np.ndarray, scratch_factor: int = 1) -> np.ndarray:
+    """Apply a linear torch image op to every basis column of a 4D V.
+
+    ``V`` has the ImageStar layout (H, W, C, n): column ``V[..., j]`` is one
+    image. ``op`` maps a float64 (k, C, H, W) batch to (k, C', H', W') and
+    must be linear (no bias; callers add the bias to the center column).
+    Returns the float64 (H', W', C', n) result.
+
+    The op runs in float64. Rounding the center or the generators to
+    float32 would move the set by about one float32 ulp of their magnitude
+    (relative 6e-8), far more than the float64-level outward slack the
+    downstream bounds and emptiness checks allow, so the output set could
+    miss real outputs. A float64 convolution on the CPU unfolds its input
+    (``scratch_factor`` times the larger of a column's input and output, the
+    kernel area for a convolution), so the columns go through in batches
+    written into one preallocated output: the extra memory is one batch,
+    not full-size copies of V and of the result.
+    """
+    V = np.asarray(V, dtype=np.float64)
+    h, w, c, n = V.shape
+    with torch.no_grad():
+        out_chw = tuple(op(torch.zeros((0, c, h, w), dtype=torch.float64)).shape[1:])
+        c_out, h_out, w_out = out_chw
+        out = np.empty((h_out, w_out, c_out, n), dtype=np.float64)
+        in_elems, out_elems = h * w * c, h_out * w_out * c_out
+        col_bytes = 8 * (in_elems + out_elems
+                         + max(int(scratch_factor), 1) * max(in_elems, out_elems))
+        batch = max(1, _COLUMN_BATCH_BYTES // max(col_bytes, 1))
+        for start in range(0, n, batch):
+            stop = min(n, start + batch)
+            x = torch.from_numpy(np.ascontiguousarray(
+                V[:, :, :, start:stop].transpose(3, 2, 0, 1)))
+            out[:, :, :, start:stop] = op(x).permute(2, 3, 1, 0).numpy()
+    return out
+
+
+def _conv2d_op(layer: nn.Conv2d,
+               weight: torch.Tensor) -> Callable[[torch.Tensor], torch.Tensor]:
+    """The layer's convolution, without bias, as a function of an NCHW
+    batch. ``_conv_forward`` applies the layer's own padding mode: a mode
+    other than 'zeros' copies border entries before a padding-free
+    convolution (still linear), and zero-padding instead would convolve a
+    different function."""
+    def conv(x: torch.Tensor) -> torch.Tensor:
+        return layer._conv_forward(x, weight, None)
+    return conv
 
 
 def conv2d_star(
@@ -83,10 +156,10 @@ def _conv2d_imagestar_4d(layer: nn.Conv2d, input_star: ImageStar) -> ImageStar:
     Works directly on the 4D V tensor (H, W, C, nVar+1) without reshaping.
 
     Algorithm:
-    1. Extract center (V[:,:,:,0]) and generators (V[:,:,:,1:])
-    2. Apply convolution to center (with bias)
-    3. Apply convolution to all generators at once (without bias)
-    4. Construct output ImageStar with 4D V
+    1. Convolve every column of V (center and generators) without bias,
+       in float64 (see :func:`map_basis_columns`)
+    2. Add the bias to the center column only
+    3. Construct output ImageStar with 4D V
 
     Args:
         layer: Conv2D layer
@@ -97,8 +170,7 @@ def _conv2d_imagestar_4d(layer: nn.Conv2d, input_star: ImageStar) -> ImageStar:
     """
     # V is already 4D: (H, W, C_in, nVar+1)
     V = input_star.V
-    h_in, w_in, c_in, n_cols = V.shape
-    n_pred = n_cols - 1
+    c_in = V.shape[2]
 
     # Verify channel consistency
     if c_in != layer.in_channels:
@@ -106,56 +178,13 @@ def _conv2d_imagestar_4d(layer: nn.Conv2d, input_star: ImageStar) -> ImageStar:
             f"Input has {c_in} channels but Conv2D expects {layer.in_channels}"
         )
 
-    # Extract center and generators
-    center = V[:, :, :, 0]    # (H, W, C_in)
-    generators = V[:, :, :, 1:]  # (H, W, C_in, nVar)
+    weight, bias = float64_params(layer)
 
-    # Convert center to PyTorch format: (1, C_in, H, W)
-    center_torch = torch.from_numpy(center).permute(2, 0, 1).unsqueeze(0).float()
-
-    # Apply convolution to center (with bias)
-    with torch.no_grad():
-        c_out = F.conv2d(
-            center_torch,
-            layer.weight,
-            layer.bias,
-            stride=layer.stride,
-            padding=layer.padding,
-            dilation=layer.dilation,
-            groups=layer.groups
-        )
-
-    # c_out shape: (1, C_out, H_out, W_out)
-    c_out_np = c_out.squeeze(0).permute(1, 2, 0).cpu().numpy()  # (H_out, W_out, C_out)
-    h_out, w_out, c_out_channels = c_out_np.shape
-
-    # Apply convolution to generators (all at once, without bias)
-    if n_pred > 0:
-        # Convert generators to PyTorch: (nVar, C_in, H, W)
-        generators_torch = torch.from_numpy(generators).permute(3, 2, 0, 1).float()
-
-        with torch.no_grad():
-            V_conv = F.conv2d(
-                generators_torch,
-                layer.weight,
-                None,  # No bias for generators
-                stride=layer.stride,
-                padding=layer.padding,
-                dilation=layer.dilation,
-                groups=layer.groups
-            )
-
-        # V_conv shape: (nVar, C_out, H_out, W_out)
-        # Convert to (H_out, W_out, C_out, nVar)
-        generators_out = V_conv.permute(2, 3, 1, 0).cpu().numpy()
-    else:
-        generators_out = np.zeros((h_out, w_out, c_out_channels, 0))
-
-    # Assemble output V as 4D directly
-    V_out = np.zeros((h_out, w_out, c_out_channels, n_cols))
-    V_out[:, :, :, 0] = c_out_np
-    if n_pred > 0:
-        V_out[:, :, :, 1:] = generators_out
+    # (H_out, W_out, C_out, nVar+1); the bias belongs to the center only
+    V_out = map_basis_columns(_conv2d_op(layer, weight), V, kernel_area(layer))
+    if bias is not None:
+        V_out[:, :, :, 0] += bias.numpy()
+    h_out, w_out, c_out_channels = V_out.shape[:3]
 
     # Create output ImageStar (V is already 4D)
     output_star = ImageStar(
@@ -222,49 +251,20 @@ def _conv2d_single_imagezono(layer: nn.Conv2d, input_zono: ImageZono) -> ImageZo
 
     n_gen = input_zono.V.shape[1]
 
-    # Reshape to image format
-    c_img = input_zono.c.reshape(h_in, w_in, c_in)
-    V_img = input_zono.V.reshape(h_in, w_in, c_in, n_gen)
+    weight, bias = float64_params(layer)
+    conv = _conv2d_op(layer, weight)
 
-    # Apply convolution to center
-    c_torch = torch.from_numpy(c_img).permute(2, 0, 1).unsqueeze(0).float()
-
-    with torch.no_grad():
-        c_out = F.conv2d(
-            c_torch,
-            layer.weight,
-            layer.bias,
-            stride=layer.stride,
-            padding=layer.padding,
-            dilation=layer.dilation,
-            groups=layer.groups
-        )
-
-    c_out = c_out.squeeze(0).permute(1, 2, 0).cpu().numpy()
-    h_out, w_out, c_out_channels = c_out.shape
-
-    # Apply convolution to generators
-    if n_gen > 0:
-        V_torch = torch.from_numpy(V_img).permute(3, 2, 0, 1).float()
-
-        with torch.no_grad():
-            V_conv = F.conv2d(
-                V_torch,
-                layer.weight,
-                None,
-                stride=layer.stride,
-                padding=layer.padding,
-                dilation=layer.dilation,
-                groups=layer.groups
-            )
-
-        V_out = V_conv.permute(2, 3, 1, 0).cpu().numpy()
-    else:
-        V_out = np.zeros((h_out, w_out, c_out_channels, 0))
+    # Convolve center (plus bias) and generators in float64, image layout
+    c_out = map_basis_columns(conv, input_zono.c.reshape(h_in, w_in, c_in, 1))
+    if bias is not None:
+        c_out[:, :, :, 0] += bias.numpy()
+    h_out, w_out, c_out_channels = c_out.shape[:3]
+    V_out = map_basis_columns(conv, input_zono.V.reshape(h_in, w_in, c_in, n_gen),
+                              kernel_area(layer))
 
     # Flatten back
     c_flat = c_out.reshape(-1, 1)
-    V_flat = V_out.reshape(-1, n_gen)
+    V_flat = V_out.reshape(h_out * w_out * c_out_channels, n_gen)
 
     # Create output ImageZono
     output_zono = ImageZono(c_flat, V_flat, h_out, w_out, c_out_channels)

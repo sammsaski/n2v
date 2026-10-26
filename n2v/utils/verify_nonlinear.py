@@ -9,14 +9,17 @@ structure the reach->verify pipeline normally consumes. This module supplies
 the missing verify path:
 
   * :func:`verify_nonlinear_reach` — sound UNSAT/UNKNOWN over a computed
-    reach set. Each output ``Star`` and the input set share predicate
-    variables (n2v star kernels are append-only on predicates, so the input
-    predicates are an aligned prefix of every output star). We build a joint
-    affine model ``[x; y] = c + V @ alpha`` over those shared predicates and
+    reach set. We build an affine model ``[x; y] = c + V @ alpha`` and
     evaluate the assertion conjunction with three-valued interval/affine
     arithmetic. If the conjunction (the *unsafe* region, per the SAT/UNSAT
     convention) is provably FALSE over the predicate box, no reachable point
-    violates the spec -> ``UNSAT`` (safe). Otherwise ``UNKNOWN``.
+    violates the spec -> ``UNSAT`` (safe). Otherwise ``UNKNOWN``. By default
+    ``x`` and ``y`` get disjoint predicate variables (``x`` over the input
+    box, ``y`` over the output star), which is sound for any reach set. The
+    caller may assert that the input predicates are an aligned prefix of every
+    output star (true for the append-only kernels, see
+    :func:`network_keeps_input_predicates`); ``x`` and ``y`` then share those
+    predicates, which keeps their correlation.
 
   * :func:`falsify_nonlinear` — concrete counterexample search: sample inputs
     in the box, forward through a caller-supplied backend (the runner passes
@@ -27,7 +30,12 @@ Soundness rests on two over-approximations, both in the safe direction:
 dropping the predicate constraints ``C alpha <= d`` (enlarges the region)
 and interval arithmetic on products (encloses the true range). A three-valued
 FALSE therefore means "provably false for every alpha in the predicate box",
-which is exactly what certifies the unsafe region empty.
+which is exactly what certifies the unsafe region empty. Sharing predicates
+between ``x`` and ``y`` adds a third premise: every true pair ``(x, f(x))``
+must be reachable with the input's own predicate values in the shared prefix.
+Equal predicate bounds do not establish that (a star rebuilt from bounds,
+e.g. by ``Star.from_bounds``, has ``[-1, 1]`` predicates whatever it came
+from), so the shared model is used only when the caller asserts it.
 """
 
 import logging
@@ -277,18 +285,77 @@ def _input_affine(input_set):
     return V[:, 0], basis, n_in, n_pred
 
 
-def verify_nonlinear_reach(reach_sets, input_set, result):
+def network_keeps_input_predicates(network):
+    """True iff a flat-``Star`` ``'approx'``/``'exact'`` reach of ``network``
+    keeps the input predicates as an aligned prefix of every output star, so
+    that :func:`verify_nonlinear_reach` may share them between ``x`` and ``y``
+    (``input_predicates_shared=True``).
+
+    Decided from the traced graph: every node must be the input, the output,
+    or a call to an ``nn.Linear``, ``nn.ReLU`` or ``nn.Identity`` module. Their
+    star kernels only rewrite the basis ``V`` (affine map), add rows to
+    ``C``/``d`` (exact ReLU split), append one predicate per unstable neuron
+    (ReLU relaxation) or return the set unchanged. Any other node (a function
+    call, a constant, another module type) returns False: a kernel such as
+    softmax re-encodes its output with ``Star.fresh_from_bounds`` and mints
+    fresh predicates in the prefix. ``network`` is an ``n2v.nn.NeuralNetwork`` or a
+    ``torch.nn.Module``; an untraceable model returns False."""
+    import torch.fx as fx
+    import torch.nn as nn
+    from n2v.nn import NeuralNetwork
+
+    # Unwrap only a real NeuralNetwork. A plain torch module may have its own
+    # submodule called ``model``; vetting just that submodule would skip the
+    # rest of its forward (e.g. a softmax head after it).
+    model = network.model if isinstance(network, NeuralNetwork) else network
+    if not isinstance(model, nn.Module):
+        return False
+    if not isinstance(model, fx.GraphModule):
+        try:
+            model = fx.symbolic_trace(model)
+        except Exception:  # noqa: BLE001
+            return False
+    modules = dict(model.named_modules())
+    for node in model.graph.nodes:
+        if node.op in ("placeholder", "output"):
+            continue
+        if node.op != "call_module" or not isinstance(
+                modules.get(node.target), (nn.Linear, nn.ReLU, nn.Identity)):
+            return False
+    return True
+
+
+def verify_nonlinear_reach(reach_sets, input_set, result, *,
+                           input_predicates_shared=False):
     """Sound verdict for a ``format='nonlinear'`` spec over a reach set.
 
     Returns ``'UNSAT'`` (provably safe) when every output ``Star`` is
     provably free of any point satisfying the assertion conjunction (the
     unsafe region), else ``'UNKNOWN'``. Never returns ``'SAT'`` — concrete
     violations come from :func:`falsify_nonlinear`.
+
+    By default the input ``x`` and the output ``y`` are modelled over disjoint
+    predicate variables: ``x`` over the input set's predicate box and ``y``
+    over the output star's. Every true pair ``(x, f(x))`` lies in that product,
+    so the verdict is sound for any reach set, but a conjunct that needs the
+    ``x``/``y`` correlation (e.g. ``y - x >= 0.5`` with ``y == x``) is only
+    decided through the output star's own bounds.
+
+    ``input_predicates_shared=True`` is the caller's guarantee that the input
+    set's predicates are the first ``n_pred`` predicates of every output star
+    (the reach sets came from an ``'approx'``/``'exact'`` reach of this input
+    set through append-only kernels; see
+    :func:`network_keeps_input_predicates`). ``x`` is then read from that
+    shared prefix. An output star whose prefix bounds differ from the input's
+    falls back to disjoint variables.
     """
     assertions = result["assertions"]
     aff = _input_affine(input_set)
     if aff is None:
         logger.debug("nonlinear verify: input set is not a flat box Star -> unknown")
+        return "UNKNOWN"
+    if input_set.predicate_lb is None or input_set.predicate_ub is None:
+        logger.debug("nonlinear verify: input set has no predicate box -> unknown")
         return "UNKNOWN"
     in_center, in_basis, n_in, n_pred = aff
     in_plb = np.asarray(input_set.predicate_lb, dtype=np.float64).ravel()
@@ -302,39 +369,58 @@ def verify_nonlinear_reach(reach_sets, input_set, result):
         return "UNSAT"
 
     for out in reach_sets:
-        if not isinstance(out, Star) or out.predicate_lb is None:
+        if not isinstance(out, Star) or out.predicate_lb is None \
+                or out.predicate_ub is None:
             return "UNKNOWN"
         nVar = out.nVar
-        plb = np.asarray(out.predicate_lb, dtype=np.float64).ravel()
-        pub = np.asarray(out.predicate_ub, dtype=np.float64).ravel()
-        # The input predicates must be the aligned prefix of this output star's
-        # predicates (append-only kernels). We can only check the NECESSARY
-        # condition that the first n_pred predicate BOUNDS still equal the
-        # input's: a kernel that REBUILT the basis (e.g. softmax via
-        # Star.from_bounds) produces different bounds and is rejected here.
-        # Column provenance is not tracked, so a hypothetical kernel minting
-        # fresh [-1,1] predicates in the prefix would slip through -- no such
-        # kernel exists in n2v; this is the residual assumption of the joint
-        # model. Anything off -> conservative UNKNOWN.
-        if nVar < n_pred or not (
-            np.allclose(plb[:n_pred], in_plb) and np.allclose(pub[:n_pred], in_pub)
-        ):
-            logger.debug("nonlinear verify: input-prefix mismatch -> unknown")
-            return "UNKNOWN"
+        out_plb = np.asarray(out.predicate_lb, dtype=np.float64).ravel()
+        out_pub = np.asarray(out.predicate_ub, dtype=np.float64).ravel()
+        out_V = out.V
 
-        out_center = out.V[:, 0].astype(np.float64)
-        out_basis = out.V[:, 1:].astype(np.float64)
-        in_basis_padded = np.zeros((n_in, nVar), dtype=np.float64)
-        in_basis_padded[:, :n_pred] = in_basis
+        # Sharing the input predicates with this star needs the caller's
+        # guarantee: equal bounds alone prove nothing, since a star rebuilt
+        # from bounds (e.g. by Star.from_bounds) has [-1, 1] predicates
+        # whatever it came from, and reading them as the input would invent an
+        # x<->y correlation (a false UNSAT). Equal prefix bounds stay a
+        # necessary condition on top of the guarantee.
+        shared = input_predicates_shared and nVar >= n_pred and (
+            np.allclose(out_plb[:n_pred], in_plb)
+            and np.allclose(out_pub[:n_pred], in_pub))
+        if shared:
+            plb, pub = out_plb, out_pub
+            in_off = 0
+        else:
+            if input_predicates_shared:
+                logger.debug("nonlinear verify: input-prefix mismatch -> "
+                             "disjoint input predicates")
+            # x over its own predicate columns appended after the star's.
+            plb = np.concatenate([out_plb, in_plb])
+            pub = np.concatenate([out_pub, in_pub])
+            in_off = nVar
 
-        # Bind every per-star value as a default arg so the closure cannot pick
-        # up a later iteration's state (the closure is only called synchronously
-        # today, but the defensive binding keeps it correct if that changes).
-        def var_aff(kind, idx, _oc=out_center, _ob=out_basis,
-                    _ic=in_center, _ib=in_basis_padded, _plb=plb, _pub=pub):
-            if kind == "in":
-                return _Aff.affine(_ic[idx], _ib[idx], _plb, _pub)
-            return _Aff.affine(_oc[idx], _ob[idx], _plb, _pub)
+        # Coefficient rows over the combined predicate vector are built only
+        # for the variables the spec reads, once per star (a spec reads each
+        # input bound twice), so no padded (dim, nVar + n_pred) basis is
+        # materialised. Sharing the cached value is safe because no operation
+        # mutates an _Aff in place. Bind every per-star value as a default arg
+        # so the closure cannot pick up a later iteration's state (the closure
+        # is only called synchronously today, but the defensive binding keeps
+        # it correct if that changes).
+        star_cache = {}
+
+        def var_aff(kind, idx, _V=out_V, _nv=nVar, _off=in_off,
+                    _plb=plb, _pub=pub, _cache=star_cache):
+            aff_v = _cache.get((kind, idx))
+            if aff_v is None:
+                lin = np.zeros(len(_plb), dtype=np.float64)
+                if kind == "in":
+                    lin[_off:_off + n_pred] = in_basis[idx]
+                    aff_v = _Aff.affine(in_center[idx], lin, _plb, _pub)
+                else:
+                    lin[:_nv] = _V[idx, 1:]
+                    aff_v = _Aff.affine(float(_V[idx, 0]), lin, _plb, _pub)
+                _cache[(kind, idx)] = aff_v
+            return aff_v
 
         # The unsafe region is the conjunction of all assertions. Provably
         # false over the predicate box => this star cannot witness it.

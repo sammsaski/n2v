@@ -17,13 +17,18 @@ Fusion formula (Conv2d + BatchNorm2d):
     W_fused = scale.reshape(-1, 1, 1, 1) * W_conv
     b_fused = scale * (b_conv - running_mean) + beta
 
-For Linear + BatchNorm1d, the scale reshape is (-1, 1).
+For Linear + BatchNorm1d, the scale reshape is (-1, 1). The fused parameters
+are computed and kept in float64 (see _fold_batchnorm).
 """
 
 import copy
+import logging
+from typing import Tuple
 
 import torch
 import torch.nn as nn
+
+logger = logging.getLogger(__name__)
 
 # onnx2torch converts an ONNX Softmax at opset <= 11 to OnnxSoftmaxV1V11, which
 # is NOT an nn.Softmax subclass (opset >= 13 maps to nn.Softmax). Import it so
@@ -114,6 +119,122 @@ def has_softmax(model: nn.Module) -> bool:
     return False
 
 
+def _bn_affine(bn: nn.Module):
+    """(gamma, beta) of a BatchNorm layer; a layer built with affine=False
+    has neither and applies gamma = 1, beta = 0."""
+    gamma = bn.weight if bn.weight is not None else torch.ones_like(bn.running_mean)
+    beta = bn.bias if bn.bias is not None else torch.zeros_like(bn.running_mean)
+    return gamma, beta
+
+
+def _fold_batchnorm(weight: torch.Tensor, bias, bn: nn.Module):
+    """
+    Fold an eval-mode BatchNorm into the weight and bias of the layer before
+    it, in float64.
+
+    ``gamma / sqrt(running_var + eps)`` is irrational in general, so the
+    folded parameters are rounded in any precision. Rounded to the layer's
+    float32 they moved the fused layer by about 6e-8 relative, and a Box,
+    Star or ImageStar reach from a point missed the original network's real
+    output by up to 1.5e-6. In float64 each fused weight is off by a few
+    units of 1e-16 relative to itself. The fused bias is off by a few units
+    of 1e-16 relative to ``|scale * (b - mean)| + |beta|``, the size of the
+    terms folded into it, not to its own value: when those terms cancel,
+    its relative error is large.
+
+    This rounding is not bounded anywhere downstream. Box reach rounds
+    outward only for the parameters it is given, so a Box through a fused
+    layer is not a rigorous enclosure of the original network: from a zero
+    point input, or from any Box for an output whose weight row is all
+    zeros (a pruned neuron), it is the rounded bias as a single point, which
+    cannot contain the irrational real value, and a later large weight
+    scales that miss up in absolute terms. verify_specification can then
+    return a false UNSAT under real-number semantics. The standalone
+    BatchNorm Box reach (batchnorm_reach.batchnorm_box) bounds the rounding
+    of its own fold, so a rigorous Box reach needs the BatchNorm left
+    unfused.
+
+    Args:
+        weight: The Conv2d/Linear weight (output channels first).
+        bias: The Conv2d/Linear bias, or None.
+        bn: The batch normalization layer (must be in eval mode).
+
+    Returns:
+        (fused_weight, fused_bias) as float64 tensors on the weight's device.
+    """
+    def f64(t):
+        return t.detach().to(dtype=torch.float64)
+
+    gamma, beta = _bn_affine(bn)
+    # Compute scale factor: gamma / sqrt(var + eps)
+    scale = f64(gamma) / torch.sqrt(f64(bn.running_var) + bn.eps)
+
+    # Fused weight: scale broadcast over the output-channel axis
+    fused_weight = scale.reshape((-1,) + (1,) * (weight.dim() - 1)) * f64(weight)
+
+    # Fused bias: scale * (b - mean) + beta
+    mean = f64(bn.running_mean)
+    shifted = f64(bias) - mean if bias is not None else -mean
+    fused_bias = scale * shifted + f64(beta)
+    return fused_weight, fused_bias
+
+
+def _cast_input_to_weight_dtype(
+        module: nn.Module, args: Tuple[torch.Tensor]) -> Tuple[torch.Tensor]:
+    """Forward pre-hook of a fused layer: cast its input (a Conv2d/Linear
+    takes one tensor) to the dtype of its (float64) parameters.
+
+    Typed so that torch.jit.script accepts the hook. The cast is skipped
+    when the dtypes already match (e.g. after ``.float()`` of the fused
+    model), so tracing or ONNX export then records no cast here.
+    """
+    x = args[0]
+    if x.dtype != module.weight.dtype:
+        x = x.to(module.weight.dtype)
+    return (x,)
+
+
+def _cast_output_to_network_dtype(
+        module: nn.Module, args: Tuple[torch.Tensor],
+        output: torch.Tensor) -> torch.Tensor:
+    """Forward hook of a fused layer: cast the output back to the dtype of
+    the BatchNorm it replaced, recorded as the dtype of the empty buffer
+    ``network_dtype``. Typed and skipped on a dtype match, like
+    _cast_input_to_weight_dtype."""
+    if output.dtype != module.network_dtype.dtype:
+        output = output.to(module.network_dtype.dtype)
+    return output
+
+
+def _with_float64_parameters(fused: nn.Module, fused_weight: torch.Tensor,
+                             fused_bias: torch.Tensor,
+                             bn: nn.Module) -> nn.Module:
+    """
+    Give a fused layer its float64 parameters, keeping it callable inside a
+    network of the BatchNorm's dtype.
+
+    The layer stays a plain Conv2d/Linear, so reachability reads the float64
+    parameters directly. When the BatchNorm is not float64, two forward hooks
+    let the torch forward (used for shape inference and by callers of
+    fuse_batchnorm) take and return that dtype: the input is cast to float64
+    and the output back. Reachability does not run the hooks; it treats
+    float32/float64 casts as the identity. The dtype is kept as an empty,
+    non-persistent buffer so that converting the whole fused model (e.g.
+    ``.double()``) keeps the output cast consistent with the other layers.
+    """
+    fused.weight = nn.Parameter(fused_weight)
+    fused.bias = nn.Parameter(fused_bias)
+    dtype = bn.running_mean.dtype
+    if dtype != torch.float64:
+        fused.register_buffer(
+            'network_dtype',
+            torch.empty(0, dtype=dtype, device=fused_weight.device),
+            persistent=False)
+        fused.register_forward_pre_hook(_cast_input_to_weight_dtype)
+        fused.register_forward_hook(_cast_output_to_network_dtype)
+    return fused
+
+
 def _fuse_conv_bn(conv: nn.Conv2d, bn: nn.BatchNorm2d) -> nn.Conv2d:
     """
     Fuse a Conv2d layer with a following BatchNorm2d layer.
@@ -123,27 +244,10 @@ def _fuse_conv_bn(conv: nn.Conv2d, bn: nn.BatchNorm2d) -> nn.Conv2d:
         bn: The batch normalization layer (must be in eval mode).
 
     Returns:
-        A new Conv2d layer with fused weights and bias.
+        A new Conv2d layer with fused float64 weights and bias.
     """
-    # Extract BN parameters
-    gamma = bn.weight  # scale
-    beta = bn.bias  # shift
-    running_mean = bn.running_mean
-    running_var = bn.running_var
-    eps = bn.eps
-
-    # Compute scale factor: gamma / sqrt(var + eps)
-    scale = gamma / torch.sqrt(running_var + eps)
-
-    # Fused weight: scale reshaped for broadcasting over conv weight dims
     # Conv weight shape: (out_channels, in_channels/groups, kH, kW)
-    fused_weight = scale.reshape(-1, 1, 1, 1) * conv.weight
-
-    # Fused bias: scale * (b_conv - mean) + beta
-    if conv.bias is not None:
-        fused_bias = scale * (conv.bias - running_mean) + beta
-    else:
-        fused_bias = scale * (-running_mean) + beta
+    fused_weight, fused_bias = _fold_batchnorm(conv.weight, conv.bias, bn)
 
     # Create new Conv2d with same configuration but with bias
     fused_conv = nn.Conv2d(
@@ -157,11 +261,7 @@ def _fuse_conv_bn(conv: nn.Conv2d, bn: nn.BatchNorm2d) -> nn.Conv2d:
         bias=True,
         padding_mode=conv.padding_mode,
     )
-
-    fused_conv.weight = nn.Parameter(fused_weight)
-    fused_conv.bias = nn.Parameter(fused_bias)
-
-    return fused_conv
+    return _with_float64_parameters(fused_conv, fused_weight, fused_bias, bn)
 
 
 def _fuse_linear_bn(linear: nn.Linear, bn: nn.BatchNorm1d) -> nn.Linear:
@@ -173,26 +273,10 @@ def _fuse_linear_bn(linear: nn.Linear, bn: nn.BatchNorm1d) -> nn.Linear:
         bn: The batch normalization layer (must be in eval mode).
 
     Returns:
-        A new Linear layer with fused weights and bias.
+        A new Linear layer with fused float64 weights and bias.
     """
-    # Extract BN parameters
-    gamma = bn.weight
-    beta = bn.bias
-    running_mean = bn.running_mean
-    running_var = bn.running_var
-    eps = bn.eps
-
-    # Compute scale factor
-    scale = gamma / torch.sqrt(running_var + eps)
-
     # Linear weight shape: (out_features, in_features)
-    fused_weight = scale.reshape(-1, 1) * linear.weight
-
-    # Fused bias
-    if linear.bias is not None:
-        fused_bias = scale * (linear.bias - running_mean) + beta
-    else:
-        fused_bias = scale * (-running_mean) + beta
+    fused_weight, fused_bias = _fold_batchnorm(linear.weight, linear.bias, bn)
 
     # Create new Linear with same configuration but with bias
     fused_linear = nn.Linear(
@@ -200,23 +284,38 @@ def _fuse_linear_bn(linear: nn.Linear, bn: nn.BatchNorm1d) -> nn.Linear:
         out_features=linear.out_features,
         bias=True,
     )
+    return _with_float64_parameters(fused_linear, fused_weight, fused_bias, bn)
 
-    fused_linear.weight = nn.Parameter(fused_weight)
-    fused_linear.bias = nn.Parameter(fused_bias)
 
-    return fused_linear
+def _computes_stock_function(module: nn.Module, base: type) -> bool:
+    """True if ``module``'s class does not override ``base``'s forward (nor,
+    for a conv, ``_conv_forward``). Fusion rebuilds the layer as a plain
+    ``base`` from its parameters, which drops any overriding code (e.g. a
+    weight-standardized conv)."""
+    cls = type(module)
+    return (cls.forward is base.forward
+            and getattr(cls, '_conv_forward', None)
+            is getattr(base, '_conv_forward', None))
 
 
 def _is_fusable_pair(layer_a: nn.Module, layer_b: nn.Module) -> bool:
     """
     Check if two adjacent layers form a fusable pair.
 
-    Returns True for Conv2d+BatchNorm2d or Linear+BatchNorm1d pairs.
+    Returns True for Conv2d+BatchNorm2d or Linear+BatchNorm1d pairs whose
+    classes compute the stock torch function. A BatchNorm without running
+    statistics (track_running_stats=False) normalizes each batch by its own
+    statistics even in eval mode, so it is not an affine layer and is never
+    fused.
     """
-    if isinstance(layer_a, nn.Conv2d) and isinstance(layer_b, nn.BatchNorm2d):
-        return True
-    if isinstance(layer_a, nn.Linear) and isinstance(layer_b, nn.BatchNorm1d):
-        return True
+    if (getattr(layer_b, 'running_mean', None) is None
+            or getattr(layer_b, 'running_var', None) is None):
+        return False
+    for conv_type, bn_type in ((nn.Conv2d, nn.BatchNorm2d),
+                               (nn.Linear, nn.BatchNorm1d)):
+        if isinstance(layer_a, conv_type) and isinstance(layer_b, bn_type):
+            return (_computes_stock_function(layer_a, conv_type)
+                    and _computes_stock_function(layer_b, bn_type))
     return False
 
 
@@ -254,10 +353,11 @@ def _fuse_sequential(seq: nn.Sequential) -> nn.Sequential:
     children = list(seq.children())
     num_children = len(children)
 
-    # First, recurse into any child Sequential modules
+    # First, recurse into any child Sequential modules (a subclass with its
+    # own forward is traced, see _fuse_generic_module)
     for i, child in enumerate(children):
         if isinstance(child, nn.Sequential):
-            children[i] = _fuse_sequential(child)
+            children[i] = _fuse_generic_module(child)
 
     # Now fuse adjacent pairs at this level
     i = 0
@@ -285,9 +385,12 @@ def _fuse_generic_module(module: nn.Module) -> nn.Module:
     """
     Fuse BatchNorm layers in an arbitrary module (not just Sequential).
 
-    For Sequential submodules, uses _fuse_sequential.
-    For other modules with named_children, recurses and replaces children.
-    Also handles torch.fx.GraphModule via graph-based fusion.
+    A Sequential uses _fuse_sequential (its children run in order). A
+    torch.fx.GraphModule, or any other module after tracing, uses graph-based
+    fusion; a module that cannot be traced is returned unfused. A Sequential
+    subclass that overrides forward counts as "any other module":
+    _fuse_sequential rebuilds a plain nn.Sequential, which would drop the
+    overriding forward.
 
     Args:
         module: A module (already deep-copied).
@@ -296,7 +399,8 @@ def _fuse_generic_module(module: nn.Module) -> nn.Module:
         The module with fused layers (modified in-place on the copy).
     """
     # Handle Sequential directly
-    if isinstance(module, nn.Sequential):
+    if (isinstance(module, nn.Sequential)
+            and type(module).forward is nn.Sequential.forward):
         return _fuse_sequential(module)
 
     # Handle torch.fx.GraphModule
@@ -304,36 +408,19 @@ def _fuse_generic_module(module: nn.Module) -> nn.Module:
     if isinstance(module, torch.fx.GraphModule):
         return _fuse_graph_module(module)
 
-    # For generic modules, recurse into children
-    for name, child in module.named_children():
-        fused_child = _fuse_generic_module(child)
-        if fused_child is not child:
-            setattr(module, name, fused_child)
-
-    # Now attempt to fuse adjacent children at this level
-    # Get ordered children and look for fusable pairs
-    child_names = []
-    child_modules = []
-    for name, child in module.named_children():
-        child_names.append(name)
-        child_modules.append(child)
-
-    i = 0
-    while i < len(child_modules) - 1:
-        layer_a = child_modules[i]
-        layer_b = child_modules[i + 1]
-
-        if _is_fusable_pair(layer_a, layer_b):
-            fused = _fuse_pair(layer_a, layer_b)
-            setattr(module, child_names[i], fused)
-            setattr(module, child_names[i + 1], nn.Identity())
-            child_modules[i] = fused
-            child_modules[i + 1] = nn.Identity()
-            i += 2
-        else:
-            i += 1
-
-    return module
+    # A generic module's children are not necessarily applied in the order
+    # they are registered (a registered BN may normalize a different tensor,
+    # or the conv's output may also feed another op), so pairing adjacent
+    # children could fuse a BN into a conv it never follows -- the fused model
+    # would then compute a different function. Trace it and fuse along the
+    # graph instead. An untraceable module is left unfused: its BatchNorms
+    # are reached as standalone layers.
+    try:
+        gm = torch.fx.symbolic_trace(module)
+    except Exception as e:  # noqa: BLE001 - fusion is only an optimization
+        logger.debug(f'BatchNorm fusion skipped: tracing failed ({e})')
+        return module
+    return _fuse_graph_module(gm)
 
 
 def _fuse_graph_module(gm: 'torch.fx.GraphModule') -> 'torch.fx.GraphModule':
@@ -341,7 +428,9 @@ def _fuse_graph_module(gm: 'torch.fx.GraphModule') -> 'torch.fx.GraphModule':
     Fuse BatchNorm layers in a torch.fx.GraphModule by iterating over graph nodes.
 
     Finds sequential call_module pairs where the first is Conv2d/Linear and
-    the second is the corresponding BatchNorm, fuses them, and recompiles.
+    the second is the corresponding BatchNorm, fuses them, and recompiles. A
+    pair is fused only when the BatchNorm is the conv/linear output's single
+    user and each of the two modules is called once.
 
     Args:
         gm: A torch.fx.GraphModule (already deep-copied).
@@ -372,6 +461,18 @@ def _fuse_graph_module(gm: 'torch.fx.GraphModule') -> 'torch.fx.GraphModule':
         if not hasattr(prev_node, 'op') or prev_node.op != 'call_module':
             continue
 
+        # The fused layer computes BN(conv), so the conv's output must feed
+        # only this BN and the conv module must be called only here; any
+        # other user would otherwise read BN(conv) in place of conv. The BN
+        # module must be called only here too: fusion replaces it with an
+        # identity, which would drop the normalization at its other calls.
+        if len(prev_node.users) != 1:
+            continue
+        if any(sum(1 for n in graph.nodes if n.op == 'call_module'
+                   and n.target == target) != 1
+               for target in (prev_node.target, node.target)):
+            continue
+
         prev_mod = modules.get(prev_node.target)
         if prev_mod is None:
             continue
@@ -386,6 +487,10 @@ def _fuse_graph_module(gm: 'torch.fx.GraphModule') -> 'torch.fx.GraphModule':
 
             # Replace BN with Identity
             _set_module_by_name(gm, node.target, nn.Identity())
+            # Keep the lookup current: a second BN on this conv (now fed by
+            # the conv node) must fuse into the fused layer, not the original.
+            modules[prev_node.target] = fused
+            modules[node.target] = nn.Identity()
 
             # Redirect BN's output users to point to the Identity
             # (the Identity will just pass through the conv/linear output)
@@ -421,6 +526,29 @@ def fuse_batchnorm(model: nn.Module) -> nn.Module:
 
     The fused model produces numerically identical outputs (within floating
     point tolerance) to the original model in eval mode.
+
+    The fused layers keep float64 parameters (the fold is rounded at float64
+    precision rather than float32's, see _fold_batchnorm) and compute in
+    float64; they take and return the dtype of the BatchNorm they replace,
+    so the fused model accepts the same inputs as the original. The fold is
+    still rounded, so a Box reach of the fused model does not rigorously
+    enclose the original network (see _fold_batchnorm).
+
+    The float64 layers make the torch forward of the fused model about an
+    order of magnitude slower on a GPU, and an ONNX export of it has Cast
+    nodes around each fused layer. For torch use where speed
+    matters more than the fold's precision (attacks, sampling, export to
+    another tool), call ``.float()`` on the fused model: the fused layers
+    then run in float32 like the rest of the network, with no casts, and
+    the fold is rounded to float32.
+
+    Linear+BatchNorm1d fusion assumes the Linear's output is 2-D (N,
+    features). The input rank is not known here, so it is not checked: on a
+    3-D (N, C, L) tensor BatchNorm1d normalizes axis 1 rather than the
+    Linear's output features, and the fused model computes a different
+    function. (n2v's Linear reach needs a set of dimension in_features, and
+    a 3-D input with C > 1 has dimension C * in_features, so reach refuses
+    such a model whether or not it is fused.)
 
     Args:
         model: PyTorch model to preprocess. Must be in eval mode or will

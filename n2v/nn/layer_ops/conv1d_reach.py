@@ -5,12 +5,12 @@ Conv1D layer reachability operations.
 and apply it as an affine map, reusing existing Star/Zono/Box affine_map methods.
 
 This avoids needing a 1D analogue of ImageStar — the Conv1d weight matrix
-is constructed via F.conv1d on identity columns.
+is constructed by applying the layer's ``_conv_forward`` (its own padding
+mode) to identity columns.
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 from typing import List, Optional, Tuple
 
@@ -23,7 +23,8 @@ def _build_conv1d_matrix(layer: nn.Conv1d, input_length: int) -> Tuple[np.ndarra
 
     For Conv1d with C_in input channels and input length L, the flattened input
     has dimension C_in * L. We construct the (C_out * L_out, C_in * L) matrix
-    by applying F.conv1d to each standard basis vector.
+    by applying the layer's ``_conv_forward`` (without bias) to each standard
+    basis vector.
 
     Args:
         layer: PyTorch nn.Conv1d layer
@@ -36,21 +37,16 @@ def _build_conv1d_matrix(layer: nn.Conv1d, input_length: int) -> Tuple[np.ndarra
     c_in = layer.in_channels
     flat_dim = c_in * input_length
 
-    # Build identity matrix and reshape to (flat_dim, C_in, L)
-    eye = torch.eye(flat_dim, dtype=torch.float32)
+    # Build identity matrix and reshape to (flat_dim, C_in, L). float64, so
+    # each entry of the matrix is a weight copied exactly whatever the
+    # layer's dtype.
+    eye = torch.eye(flat_dim, dtype=torch.float64)
     eye_3d = eye.reshape(flat_dim, c_in, input_length)
 
-    # Apply conv1d (without bias) to get the weight matrix rows
+    # Apply conv1d (without bias) to get the weight matrix rows.
+    # ``_conv_forward`` applies the layer's own padding mode.
     with torch.no_grad():
-        out = F.conv1d(
-            eye_3d,
-            layer.weight,
-            bias=None,
-            stride=layer.stride,
-            padding=layer.padding,
-            dilation=layer.dilation,
-            groups=layer.groups,
-        )
+        out = layer._conv_forward(eye_3d, layer.weight.detach().cpu().double(), None)
     # out shape: (flat_dim, C_out, L_out)
     # Flatten spatial dims and transpose to get (C_out * L_out, flat_dim)
     W = out.reshape(flat_dim, -1).T.numpy()

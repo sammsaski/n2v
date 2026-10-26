@@ -25,6 +25,8 @@ if TYPE_CHECKING:
 # Import LP solver utilities
 from n2v.utils.lpsolver import solve_lp, check_feasibility, solve_lp_batch
 from n2v.utils.lp_solver_enum import LPSolver, resolve as _resolve_lp
+from n2v.utils.ns_certificate import outward_interval_bounds as _outward_bounds
+from n2v.utils.ns_certificate import outward_center_radius
 
 from n2v.config import config as global_config
 
@@ -143,6 +145,11 @@ class ImageStar:
             raise ValueError(
                 f"C has {nC} rows but d has {nd} rows"
             )
+
+        # No constraint rows (C omitted or empty): store a (0, nVar) matrix so
+        # rows can be stacked onto it (same rule as Star).
+        if C.size == 0 and (C.ndim != 2 or C.shape[0] == 0):
+            C = np.zeros((0, self.nVar))
 
         # Store constraints
         self.C = C
@@ -275,10 +282,12 @@ class ImageStar:
         if ub_flat.shape[0] != dim:
             raise ValueError(f"ub has {ub_flat.shape[0]} elements but expected {dim}")
 
-        # Center and generators (only for dimensions with nonzero range)
-        center = 0.5 * (lb_flat + ub_flat)
-        ranges = ub_flat - lb_flat
-        nonzero_mask = ranges != 0
+        # Center and generators (only for dimensions with nonzero range). The
+        # half-widths are rounded outward so ``center +- radius`` contains the
+        # box exactly; a point dimension keeps its value as the center.
+        nonzero_mask = ub_flat != lb_flat
+        center, radius = outward_center_radius(lb_flat, ub_flat)
+        center = np.where(nonzero_mask, center, lb_flat)
         nVar = int(nonzero_mask.sum())
 
         if nVar == 0:
@@ -293,7 +302,7 @@ class ImageStar:
             generators = np.zeros((dim, nVar))
             nonzero_idx = np.where(nonzero_mask)[0]
             for j, idx in enumerate(nonzero_idx):
-                generators[idx, j] = 0.5 * ranges[idx]
+                generators[idx, j] = radius[idx]
 
             V_2d = np.hstack([center.reshape(-1, 1), generators])
 
@@ -311,34 +320,24 @@ class ImageStar:
         """
         Fast over-approximate range estimation using interval arithmetic.
 
-        Uses vectorized 4D operations with einsum for efficiency.
+        Vectorized over all pixels (see ``outward_interval_bounds``).
         This is an over-approximation; for exact bounds use get_ranges().
 
         Returns:
             Tuple of (lb, ub) arrays, each shape (dim, 1)
         """
         if self.predicate_lb is None or self.predicate_ub is None:
-            # Fall back to LP-based computation
-            return self.get_ranges()
+            # No predicate box: the flat star's padded HiGHS LP bounds (HWC
+            # rows, the same order as this set's flat indices).
+            lb, ub = self.to_star()._lp_enclosure(np.arange(self.dim))
+            return lb.reshape(-1, 1), ub.reshape(-1, 1)
 
-        # Extract center and generators from 4D V
-        center = self.V[:, :, :, 0]        # (H, W, C)
-        generators = self.V[:, :, :, 1:]   # (H, W, C, nVar)
-
-        # Separate positive and negative parts
-        pos_gens = np.maximum(generators, 0)
-        neg_gens = np.minimum(generators, 0)
-
-        pred_lb_flat = self.predicate_lb.flatten()
-        pred_ub_flat = self.predicate_ub.flatten()
-
-        # Vectorized computation using einsum
-        # lb = center + pos_gens @ pred_lb + neg_gens @ pred_ub
-        # ub = center + pos_gens @ pred_ub + neg_gens @ pred_lb
-        lb_3d = center + np.einsum('hwcn,n->hwc', pos_gens, pred_lb_flat) + \
-                         np.einsum('hwcn,n->hwc', neg_gens, pred_ub_flat)
-        ub_3d = center + np.einsum('hwcn,n->hwc', pos_gens, pred_ub_flat) + \
-                         np.einsum('hwcn,n->hwc', neg_gens, pred_lb_flat)
+        # SOUNDNESS: rigorous outward enclosure of the round-to-nearest
+        # interval sums, each bound charged only for its own terms, with
+        # 0 * inf masked and bounded temporaries (see
+        # ``outward_interval_bounds``; same computation as Star).
+        lb_3d, ub_3d = _outward_bounds(self.V[:, :, :, 0], self.V[:, :, :, 1:],
+                                       self.predicate_lb, self.predicate_ub)
 
         # Flatten to (dim, 1)
         self.state_lb = lb_3d.reshape(-1, 1)
@@ -357,7 +356,8 @@ class ImageStar:
             Tuple of (min_estimate, max_estimate)
         """
         if self.predicate_lb is None or self.predicate_ub is None:
-            return self.get_range_flat(index)
+            lb, ub = self.to_star()._lp_enclosure(np.array([index]))
+            return float(lb[0]), float(ub[0])
 
         # Convert flat index to (h, w, c) coordinates
         h = index // (self.width * self.num_channels)
@@ -365,25 +365,11 @@ class ImageStar:
         w = remainder // self.num_channels
         c = remainder % self.num_channels
 
-        # Get center and generators for this pixel
-        center_val = self.V[h, w, c, 0]
-        generators = self.V[h, w, c, 1:]  # (nVar,)
-
-        pred_lb_flat = self.predicate_lb.flatten()
-        pred_ub_flat = self.predicate_ub.flatten()
-
-        # Interval arithmetic
-        lb_contrib = 0.0
-        ub_contrib = 0.0
-        for i, g in enumerate(generators):
-            if g >= 0:
-                lb_contrib += g * pred_lb_flat[i]
-                ub_contrib += g * pred_ub_flat[i]
-            else:
-                lb_contrib += g * pred_ub_flat[i]
-                ub_contrib += g * pred_lb_flat[i]
-
-        return center_val + lb_contrib, center_val + ub_contrib
+        # SOUNDNESS: outward enclosure of the round-to-nearest sum (see
+        # ``outward_interval_bounds``).
+        lb, ub = _outward_bounds(self.V[h, w, c, 0], self.V[h, w, c, 1:],
+                                 self.predicate_lb, self.predicate_ub)
+        return float(lb), float(ub)
 
     def get_ranges(self, lp_solver: Union[LPSolver, str, None] = LPSolver.DEFAULT,
                    parallel: bool = None,

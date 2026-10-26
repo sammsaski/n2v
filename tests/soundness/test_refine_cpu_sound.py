@@ -1,5 +1,5 @@
 """
-Soundness of the Phase-1 refinement BaB.
+Soundness of the refinement branch-and-bound (verify_refine).
 
 The critical claims under test:
 
@@ -21,12 +21,9 @@ from n2v.nn.reach import reach_pytorch_model
 from n2v.sets.star import Star
 from n2v.utils.lpsolver import check_feasibility
 from n2v.refine import (
-    BoundWidthSelector,
-    BoxCornerSelector,
-    ExactStarSBSelector,
     FaithfulSelector,
+    LayerOrderSelector,
     LinearSpec,
-    RandomSelector,
     Status,
     verify_refine,
 )
@@ -68,13 +65,12 @@ def _rand_net(seed, dims=(2, 5, 5, 2)):
     return nn.Sequential(*layers).double()
 
 
-ALL_SELECTORS = [
-    FaithfulSelector,
-    BoxCornerSelector,
-    BoundWidthSelector,
-    ExactStarSBSelector,
-    lambda: RandomSelector(seed=47),
-]
+ALL_SELECTORS = [FaithfulSelector, LayerOrderSelector]
+
+# The exact CPU configuration, pinned so a CUDA host does not switch these
+# tests to the GPU defaults.
+CPU_CONFIG = dict(bound_mode="box", prune_mode="exact", witness_mode="exact",
+                  frontier_width=1)
 
 
 @pytest.mark.parametrize("seed", range(8))
@@ -97,7 +93,8 @@ def test_verdict_matches_exact_oracle_all_selectors(seed):
     oracle = _oracle_verdict(net, S_in, spec)
 
     for make in ALL_SELECTORS:
-        res = verify_refine(S_in, net, spec, make(), node_budget=20000)
+        res = verify_refine(S_in, net, spec, make(), node_budget=20000,
+                            **CPU_CONFIG)
         assert res.status != Status.UNKNOWN, "ran out of budget on a tiny net"
         assert res.status == oracle, (
             f"selector {make().name}: BaB={res.status} oracle={oracle} (seed={seed})"
@@ -128,7 +125,8 @@ def test_no_false_unsat_against_sampling(seed):
     assert np.any(Y[:, 0] <= tau), "test setup: sampling found no CE"
 
     for make in ALL_SELECTORS:
-        res = verify_refine(S_in, net, spec, make(), node_budget=20000)
+        res = verify_refine(S_in, net, spec, make(), node_budget=20000,
+                            **CPU_CONFIG)
         assert res.status == Status.SAT, (
             f"false non-SAT ({res.status}) by {make().name} despite sampled CE (seed={seed})"
         )
@@ -154,9 +152,11 @@ def test_incremental_reach_matches_from_scratch(seed, bound_mode):
 
     for make in ALL_SELECTORS:
         full = verify_refine(S_in, net, spec, make(), node_budget=20000,
-                             bound_mode=bound_mode, incremental=False)
+                             incremental=False,
+                             **{**CPU_CONFIG, "bound_mode": bound_mode})
         incr = verify_refine(S_in, net, spec, make(), node_budget=20000,
-                             bound_mode=bound_mode, incremental=True)
+                             incremental=True,
+                             **{**CPU_CONFIG, "bound_mode": bound_mode})
         assert incr.status == full.status, f"{make().name}: verdict differs (seed={seed})"
         assert incr.nodes == full.nodes, (
             f"{make().name}: node count {incr.nodes} != {full.nodes} (seed={seed})"
@@ -170,7 +170,7 @@ def test_returned_counterexample_lies_in_input_box():
     S_in = Star.from_bounds(np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
     # A loose spec that is almost surely SAT: y_0 <= large.
     spec = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([1e3]))
-    res = verify_refine(S_in, net, spec, FaithfulSelector())
+    res = verify_refine(S_in, net, spec, FaithfulSelector(), **CPU_CONFIG)
     assert res.status == Status.SAT
     assert np.all(res.counterexample_x >= -1.0 - 1e-9)
     assert np.all(res.counterexample_x <= 1.0 + 1e-9)
@@ -205,3 +205,76 @@ def test_theorem1_zero_epsilon_leaf_is_real_ce():
     assert epsilon_vector(alpha, meta).size == 0  # eps vacuously zero
     is_ce, x_in, y = is_true_counterexample(alpha, S_in, net, spec)
     assert is_ce, "Theorem 1 violated: exact feasible leaf is not a real CE"
+
+
+# --------------------------------------------------------------------------- #
+# Input star whose predicate box is +/-inf (bounded only by its C/d rows).     #
+# --------------------------------------------------------------------------- #
+@pytest.fixture(scope="module")
+def diamond():
+    """y = |x1| + |x2| over the diamond |a1| + |a2| <= 1, carried ONLY by
+    C/d rows (predicate box +/-inf everywhere). True output range [0, 1].
+    The instance that made verify_refine collapse to y = 0 (all four ReLUs
+    silently identity-passed) and return a 1-node false UNSAT."""
+    net = nn.Sequential(nn.Linear(2, 4), nn.ReLU(), nn.Linear(4, 1)).double()
+    with torch.no_grad():
+        net[0].weight.copy_(torch.tensor(
+            [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]],
+            dtype=torch.float64))
+        net[0].bias.zero_()
+        net[2].weight.copy_(torch.ones((1, 4), dtype=torch.float64))
+        net[2].bias.zero_()
+    V = np.hstack([np.zeros((2, 1)), np.eye(2)])
+    C = np.array([[1.0, 1.0], [1.0, -1.0], [-1.0, 1.0], [-1.0, -1.0]])
+    d = np.ones((4, 1))
+    S = Star(V, C, d, np.full((2, 1), -np.inf), np.full((2, 1), np.inf))
+    spec_sat = LinearSpec(G=np.array([[-1.0]]), g=np.array([-0.5]))
+    spec_unsat = LinearSpec(G=np.array([[-1.0]]), g=np.array([-3.0]))
+    return net, S, spec_sat, spec_unsat
+
+
+def test_verify_refine_no_false_unsat_on_diamond(diamond):
+    """Regression for the demonstrated verify_refine 1-node false UNSAT."""
+    from n2v.refine.bab import verify_refine
+
+    net, S, spec_sat, spec_unsat = diamond
+    for bound_mode in ("box", "lp_cpu"):
+        config = {**CPU_CONFIG, "bound_mode": bound_mode}
+        res = verify_refine(S, net, spec_sat, **config)
+        assert res.status.value == "SAT", bound_mode
+        res = verify_refine(S, net, spec_unsat, **config)
+        assert res.status.value == "UNSAT", bound_mode
+
+
+# --------------------------------------------------------------------------- #
+# LP failure is not a certificate of emptiness                                #
+# --------------------------------------------------------------------------- #
+_FAILURE_STATUSES = ["unbounded", "failed: iteration limit", "error: numerical"]
+
+
+def _input_star():
+    return Star.from_bounds(np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
+
+
+# A spec every output satisfies: the whole reach is "unsafe", so any honest
+# run must find a counterexample (SAT).
+_EVERYTHING = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([1e9]))
+
+
+@pytest.mark.parametrize("status", _FAILURE_STATUSES)
+def test_verify_refine_degrades_to_unknown_when_the_witness_lp_fails(
+        status, monkeypatch):
+    """The headline regression: on a SAT instance, a failing witness LP must
+    never yield UNSAT. UNKNOWN (or SAT from another path) is the sound outcome.
+    """
+    import n2v.refine.witness as wmod
+    from n2v.refine.reach_relaxed import extract_layers
+
+    net, S_in = _rand_net(5, dims=(2, 6, 6, 2)), _input_star()
+    layers = extract_layers(net)
+    monkeypatch.setattr(wmod, "solve_lp",
+                        lambda **k: (None, None, status, None))
+    res = verify_refine(S_in, net, _EVERYTHING, FaithfulSelector(),
+                        layers=layers, bound_mode="box", witness_mode="exact",
+                        prune_mode="exact", frontier_width=1, node_budget=200)
+    assert res.status != Status.UNSAT

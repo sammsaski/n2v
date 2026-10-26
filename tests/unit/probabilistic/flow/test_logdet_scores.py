@@ -220,6 +220,7 @@ def test_rk4_matches_dopri5_on_linear_flow():
     assert torch.allclose(dopri5_scores, rk4_scores, atol=1e-3)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(),
                     reason='requires CUDA GPU')
 def test_cpu_input_gpu_flow_returns_cpu_scores():
@@ -238,6 +239,7 @@ def test_cpu_input_gpu_flow_returns_cpu_scores():
     assert torch.allclose(scores, expected, atol=1e-5)
 
 
+@pytest.mark.gpu
 @pytest.mark.skipif(not torch.cuda.is_available(),
                     reason='requires CUDA GPU')
 def test_gpu_input_gpu_flow_returns_gpu_scores():

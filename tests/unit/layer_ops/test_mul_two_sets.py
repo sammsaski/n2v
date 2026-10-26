@@ -1,7 +1,6 @@
 """Tests for element-wise Mul of two computed sets (Tasks 9-10)."""
 
 import numpy as np
-import pytest
 from n2v.sets import Star, Zono, Box
 from n2v.nn.reach import _mul_sets
 
@@ -61,24 +60,25 @@ class TestMulTwoSetsBox:
             assert np.all(z <= result[0].ub + 1e-10), "Product above upper bound"
 
     def test_multiple_pairs(self):
+        # Boxes carry no input-region information, so every piece of one
+        # operand is multiplied with every piece of the other.
         a1 = Box(np.array([[1.0]]), np.array([[2.0]]))
         b1 = Box(np.array([[3.0]]), np.array([[4.0]]))
         a2 = Box(np.array([[0.0]]), np.array([[1.0]]))
         b2 = Box(np.array([[-1.0]]), np.array([[1.0]]))
         results = _mul_sets([a1, a2], [b1, b2])
-        assert len(results) == 2
-        np.testing.assert_allclose(results[0].lb, np.array([[3.0]]), atol=1e-10)
-        np.testing.assert_allclose(results[0].ub, np.array([[8.0]]), atol=1e-10)
-        np.testing.assert_allclose(results[1].lb, np.array([[-1.0]]), atol=1e-10)
-        np.testing.assert_allclose(results[1].ub, np.array([[1.0]]), atol=1e-10)
+        assert len(results) == 4
+        got = [(r.lb.item(), r.ub.item()) for r in results]
+        np.testing.assert_allclose(
+            got, [(3.0, 8.0), (-2.0, 2.0), (0.0, 4.0), (-1.0, 1.0)],
+            atol=1e-10)
 
-    def test_true_mismatch_raises(self):
-        # A genuine N-vs-M mismatch (neither side a singleton) is still
-        # unsupported and raises.
+    def test_n_vs_m_pieces_form_every_pair(self):
+        # N-vs-M pieces (neither side a singleton) used to raise; every
+        # pair is a sound cover.
         a = Box(np.array([[1.0]]), np.array([[2.0]]))
         b = Box(np.array([[1.0]]), np.array([[2.0]]))
-        with pytest.raises(ValueError, match="different lengths"):
-            _mul_sets([a, a], [b, b, b])
+        assert len(_mul_sets([a, a], [b, b, b])) == 6
 
     def test_singleton_broadcasts(self):
         # A residual Mul where one branch split (N sets) and the other stayed

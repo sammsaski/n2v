@@ -23,6 +23,8 @@ from tests.differential.test_parser_differential import (
 )
 from tests.differential.canon import materialize
 
+pytestmark = pytest.mark.corpus
+
 
 def _check_nonlinear(text, parsed, n_points=120, seed=0):
     amap = point_agreement.atom_index_map(text)
@@ -49,18 +51,20 @@ def _check_nonlinear(text, parsed, n_points=120, seed=0):
 
 
 @needs_corpus
+@pytest.mark.slow
 def test_point_agreement_corpus():
-    checked, skipped, failures = 0, 0, []
+    checked, rejected, failures = 0, [], []
     for rel in _subset():
         path = _resolve(rel)
-        if path is None:
-            continue
+        assert path is not None, rel
         local, cleanup = materialize(path)
         try:
             try:
                 parsed = load_vnnlib(local)
-            except Exception:  # noqa: BLE001 — rejected specs not in scope
-                skipped += 1
+            except Exception as e:  # noqa: BLE001
+                # A corpus spec our parser rejects is a parser bug (every
+                # corpus spec is valid), not a file to leave out of the check.
+                rejected.append(f"{rel}: {type(e).__name__}: {e}")
                 continue
             with open(local) as f:
                 text = f.read()
@@ -81,6 +85,8 @@ def test_point_agreement_corpus():
                     f"(first: naive={naive} ours={ours})")
         finally:
             cleanup()
+    assert not rejected, (
+        "our parser rejected corpus specs:\n  " + "\n  ".join(rejected))
     assert checked > 0
     assert not failures, (
         f"representation disagrees with naive evaluation on "

@@ -6,6 +6,7 @@ computation based on set type and handles both standard PyTorch models
 and ONNX GraphModules.
 """
 
+import itertools
 import logging
 import operator
 import time
@@ -22,10 +23,13 @@ import torch.nn.functional as F
 from n2v.sets import Star, Zono, Box, Hexatope, Octatope
 from n2v.sets.image_star import ImageStar
 from n2v.sets.image_zono import ImageZono
+from n2v.sets.star import fresh_predicate_tag
 from n2v.nn.layer_ops.dispatcher import reach_layer
 from n2v.nn.layer_ops.linear_reach import linear_hexatope, linear_octatope
 from n2v.utils.model_preprocessing import fuse_batchnorm, has_batchnorm
 from n2v.utils.bounds_precomputation import compute_intermediate_bounds
+from n2v.utils.ns_certificate import _add_dir, _div_dir, _mul_dir
+from n2v.utils.lpsolver import _bound_lp_solver, _outward_lp_ranges
 
 # Profiler hooks (no-op when profiling is disabled)
 from n2v.profiling import region, PHASE
@@ -39,7 +43,10 @@ from onnx2torch.node_converters.reduce import (
     OnnxReduceStaticAxes,
     OnnxReduceSumStaticAxes,
 )
-from n2v.nn.layer_ops.batchnorm_reach import _get_bn_params
+from n2v.nn.layer_ops.batchnorm_reach import (
+    _batchnorm_single_box, _bn_fold_mag, _get_bn_params,
+)
+from n2v.nn.layer_ops.flatten_reach import _flatten_imagezono_chw
 from n2v.nn.layer_ops.bilinear_matmul_reach import (
     bilinear_matmul_star,
     bilinear_matmul_zono,
@@ -320,8 +327,25 @@ def reach_pytorch_model(
             'relax_method': config.relax_method,
         }
 
-    # Auto-fuse BatchNorm layers if present
-    if has_batchnorm(model):
+    if method in ('exact', 'approx') and isinstance(input_set, Star) \
+            and not isinstance(input_set, ImageStar):
+        # SOUNDNESS: a predicate box with +-inf entries makes the interval
+        # bounds NaN (0 * inf), which the ReLU classifiers read as "stably
+        # active" -- measured as an unsound reach set and a false UNSAT via
+        # verify_specification. Replace non-finite entries with exact-LP
+        # bounds over the full polytope (a sound no-op for finite boxes); an
+        # infeasible input set reaches nothing. Runs after the config is
+        # unpacked so the caller's LP solver is used.
+        from n2v.sets.predicate_box import ensure_finite_predicate_box
+        input_set, _empty = ensure_finite_predicate_box(
+            input_set, lp_solver=kwargs.get('lp_solver', 'default'))
+        if _empty:
+            return []
+
+    # Auto-fuse BatchNorm layers if present. A Box reach keeps BatchNorm
+    # unfused: batchnorm_box rounds its own folding outward, while the rounding
+    # of a pre-fused layer's parameters would escape the Box's outward bounds.
+    if has_batchnorm(model) and not isinstance(input_set, Box):
         model = fuse_batchnorm(model)
 
     # Validate method for set type
@@ -431,6 +455,21 @@ def _handle_graphmodule(
     # Handle precompute_bounds option ('ibp', 'zono', True, or False)
     precompute = kwargs.pop('precompute_bounds', False)
     layer_bounds = kwargs.pop('_precomputed_layer_bounds', None)
+    # Optional callback(node_name, module, input_sets), called before every
+    # standard layer is reached; the zonotope bound pre-pass uses it to
+    # record the sets entering each nonlinear layer.
+    on_layer_input = kwargs.pop('_on_layer_input', None)
+
+    # The one input set feeds every placeholder, so a second graph input
+    # would be read as the same set over the same predicate variables as the
+    # first (X1 - X2 came out a single point: a false UNSAT).
+    graph_inputs = [n for n in graph_module.graph.nodes
+                    if n.op == 'placeholder' and n.users]
+    if len(graph_inputs) > 1:
+        raise NotImplementedError(
+            f"graph has {len(graph_inputs)} inputs "
+            f"({', '.join(n.name for n in graph_inputs)}); reachability "
+            f"takes one input set, so only single-input graphs are supported")
 
     # Best-effort tensor-shape annotation (for shape-dependent exact ops:
     # Gather, Slice, Transpose on flat sets). Absence of a shape makes
@@ -441,7 +480,9 @@ def _handle_graphmodule(
 
     if precompute and layer_bounds is None:
         precompute_method = precompute if isinstance(precompute, str) else 'ibp'
-        layer_bounds = compute_intermediate_bounds(graph_module, input_sets[0], method=precompute_method)
+        layer_bounds = compute_intermediate_bounds(
+            graph_module, input_sets[0], method=precompute_method,
+            input_shape=input_shape)
 
     # Get the set type from the first input
     set_type = type(input_sets[0])
@@ -451,11 +492,27 @@ def _handle_graphmodule(
 
     # Store intermediate values for each node
     node_values = _new_node_values()
+    # Nodes whose value is tensor-shape metadata (``x.size()``,
+    # ``x.shape[0]``), not a set: they only feed the batch entry of a
+    # view/reshape target, which the reshape handler strips.
+    shape_nodes = set()
     verbose = kwargs.get('verbose', None)
     current_sets = input_sets
+    # In a graph that combines branches, the ops that pair two set lists
+    # read identical predicate systems as the same variables; the new
+    # predicate variables of each node get a tag of their own so that two
+    # nodes never look alike (see _tag_new_predicates).
+    tag_new_predicates = _graph_joins_branches(graph_module, const_names)
+    tag_pending = None
 
     # Process each node in the computational graph
     for node in graph_module.graph.nodes:
+        # Nodes come in topological order: tagging the previous node's sets
+        # here happens before any consumer reads them.
+        if tag_pending is not None:
+            _tag_new_predicates(tag_pending, node_values)
+        tag_pending = node if tag_new_predicates else None
+
         if node.op == 'placeholder':
             # Input node
             node_values[node.name] = current_sets
@@ -467,7 +524,11 @@ def _handle_graphmodule(
         elif node.op == 'call_module':
             module = named_modules.get(node.target)
             if module is None:
-                continue
+                if node.name in const_names:
+                    continue
+                raise NotImplementedError(
+                    f"graph node {node.name!r} refers to module "
+                    f"{node.target!r}, which the graph module does not have")
 
             module_type = type(module).__name__
 
@@ -476,11 +537,10 @@ def _handle_graphmodule(
 
             # Handle OnnxReshape
             if isinstance(module, OnnxReshape):
-                first_arg = node.args[0]
-                if hasattr(first_arg, 'name') and first_arg.name in node_values:
-                    input_sets_op = node_values[first_arg.name]
-                else:
-                    input_sets_op = current_sets
+                input_sets_op = _resolve_set_input(
+                    node.args[0], node, node_values, const_names)
+                if input_sets_op is None:
+                    continue  # constant reshape: folded by its consumers
 
                 # Get target shape from second argument (frozen parameter)
                 shape_node = node.args[1]
@@ -539,24 +599,32 @@ def _handle_graphmodule(
             # attribute); resolve them from node.args[1] and stash on the
             # module so the pad handler can read them. Without this the
             # handler would silently apply zero padding (wrong output).
-            if module_type == 'OnnxPadDynamic' and not hasattr(
-                    module, 'pads'):
-                if len(node.args) > 1:
-                    module.pads = _get_parameter(
-                        graph_module, node.args[1]).numpy().astype(
-                            int).tolist()
-                # a 3rd input (constant pad value) other than 0 is not a
-                # zero-pad and would be unsound to treat as one
-                if len(node.args) > 2:
+            # A Pad of a constant tensor never reaches the pad handler: its
+            # consumers fold it with torch (_const_eval), whatever its value.
+            if (module_type == 'OnnxPadDynamic'
+                    and node.name not in const_names):
+                # The pad handler reaches only zero padding, so a 3rd input
+                # (constant pad value) must resolve to 0. Checked on every
+                # visit, not only when the pads are first stashed: a later
+                # reach of the same model skips that branch. A value that
+                # cannot be resolved raises rather than being taken as 0.
+                if len(node.args) > 2 and node.args[2] is not None:
                     try:
                         pv = _get_parameter(
                             graph_module, node.args[2]).numpy()
-                        if np.any(np.asarray(pv) != 0):
-                            raise NotImplementedError(
-                                "Pad with non-zero constant value is not "
-                                "supported")
-                    except (KeyError, AttributeError):
-                        pass
+                    except Exception as exc:  # noqa: BLE001 — re-raised below
+                        raise NotImplementedError(
+                            f"Pad constant value ({node.args[2]}) could not "
+                            f"be resolved to a constant; only zero padding "
+                            f"is supported") from exc
+                    if np.any(np.asarray(pv) != 0):
+                        raise NotImplementedError(
+                            "Pad with non-zero constant value is not "
+                            "supported")
+                if not hasattr(module, 'pads') and len(node.args) > 1:
+                    module.pads = _get_parameter(
+                        graph_module, node.args[1]).numpy().astype(
+                            int).tolist()
 
             # Handle OnnxSplit / OnnxSplit13
             if isinstance(module, (OnnxSplit, OnnxSplit13)):
@@ -618,7 +686,7 @@ def _handle_graphmodule(
             if module_type == 'OnnxBinaryMathOperation':
                 current_sets = _handle_onnx_binary_op(
                     module, node, node_values, graph_module, set_type,
-                    node_shapes,
+                    node_shapes, lp_solver=kwargs.get('lp_solver', 'default'),
                 )
                 if current_sets is not None:
                     node_values[node.name] = current_sets
@@ -649,6 +717,8 @@ def _handle_graphmodule(
                     # scale factors instead of guessing them from a probe.
                     if module_type == 'OnnxResize':
                         _add_resize_scale_kwargs(graph_module, node, layer_kwargs)
+                    if on_layer_input is not None:
+                        on_layer_input(node.name, module, input_sets_op)
                     output_sets = reach_layer(module, input_sets_op, method, **layer_kwargs)
                     node_values[node.name] = output_sets
                     current_sets = output_sets
@@ -665,29 +735,50 @@ def _handle_graphmodule(
                 )
 
         elif node.op == 'call_function':
-            # Handle operator.getitem for multi-output ops (e.g., Split)
+            # No silent skips here either (see the call_module guard): a
+            # function node without a reach rule (operator.add, torch.cat,
+            # torch.clamp, ...) must raise, or its consumers would compute on
+            # the sets of whatever node ran before it.
+            src_node = node.args[0] if node.args else None
             if node.target is operator.getitem:
-                args = node.args
-                if len(args) >= 2:
-                    src_node = args[0]
-                    index = args[1]
-                    if hasattr(src_node, 'name') and src_node.name in node_values:
-                        src_val = node_values[src_node.name]
-                        # Multi-output: list-of-lists from Split
-                        if (isinstance(src_val, list) and len(src_val) > 0
-                                and isinstance(src_val[0], list)):
-                            node_values[node.name] = src_val[index]
-                            current_sets = src_val[index]
+                # Multi-output ops (e.g. Split) store a list of set lists
+                src_val = (node_values.get(src_node.name)
+                           if isinstance(src_node, fx.Node) else None)
+                if (len(node.args) >= 2 and isinstance(src_val, list)
+                        and len(src_val) > 0
+                        and isinstance(src_val[0], list)):
+                    node_values[node.name] = src_val[node.args[1]]
+                    current_sets = src_val[node.args[1]]
+                elif (isinstance(src_node, fx.Node)
+                        and src_node.name in shape_nodes):
+                    shape_nodes.add(node.name)  # e.g. x.shape[0]
+                elif node.name not in const_names:
+                    raise NotImplementedError(
+                        f"graph node {node.name!r} (getitem on "
+                        f"{getattr(src_node, 'name', src_node)!r}) is not "
+                        f"supported by reachability: the source is not a "
+                        f"multi-output op")
+            elif (node.target is getattr and len(node.args) >= 2
+                    and node.args[1] == 'shape'
+                    and isinstance(src_node, fx.Node)
+                    and src_node.name in node_values):
+                shape_nodes.add(node.name)  # x.shape
+            elif _is_inference_identity_function(node):
+                # Dropout traced in eval mode: the input passes through.
+                input_sets_op = _resolve_set_input(
+                    src_node, node, node_values, const_names)
+                if input_sets_op is None:
+                    continue  # constant subgraph
+                node_values[node.name] = input_sets_op
+                current_sets = input_sets_op
             else:
                 # Try to convert function to module equivalent
                 equiv_module = _function_node_to_module(node)
                 if equiv_module is not None:
-                    # Resolve input from first argument
-                    first_arg = node.args[0]
-                    if hasattr(first_arg, 'name') and first_arg.name in node_values:
-                        input_sets_op = node_values[first_arg.name]
-                    else:
-                        input_sets_op = current_sets
+                    input_sets_op = _resolve_set_input(
+                        src_node, node, node_values, const_names)
+                    if input_sets_op is None:
+                        continue  # constant subgraph
 
                     layer_kwargs = dict(kwargs)
                     if layer_bounds is not None and node.name in layer_bounds:
@@ -695,6 +786,8 @@ def _handle_graphmodule(
                     else:
                         layer_kwargs.pop('precomputed_bounds', None)
 
+                    if on_layer_input is not None:
+                        on_layer_input(node.name, equiv_module, input_sets_op)
                     output_sets = reach_layer(
                         equiv_module, input_sets_op,
                         method, **layer_kwargs,
@@ -702,23 +795,42 @@ def _handle_graphmodule(
                     node_values[node.name] = output_sets
                     current_sets = output_sets
 
-                elif verbose:
-                    logger.debug(
-                        f'  Skipping call_function: '
-                        f'{node.target}'
-                    )
+                elif node.name not in const_names:
+                    raise NotImplementedError(
+                        f"graph node {node.name!r} (call_function "
+                        f"{_fx_target_name(node.target)}) is not supported "
+                        f"by reachability")
 
         elif node.op == 'call_method':
             method_name = node.target  # e.g., 'flatten', 'view', 'reshape'
+            first_arg = node.args[0] if node.args else None
+
+            if method_name in ('size', 'dim') \
+                    and isinstance(first_arg, fx.Node) \
+                    and first_arg.name in node_values:
+                shape_nodes.add(node.name)  # x.size(), x.size(0), x.dim()
+                continue
+            identity = _is_identity_method(node)
+            if not identity and method_name not in ('flatten', 'view',
+                                                    'reshape'):
+                if node.name in const_names:
+                    continue
+                raise NotImplementedError(
+                    f"graph node {node.name!r} (call_method "
+                    f"{method_name!r}) is not supported by reachability")
 
             # Resolve input from first argument (the tensor/self)
-            first_arg = node.args[0]
-            if hasattr(first_arg, 'name') and first_arg.name in node_values:
-                input_sets_op = node_values[first_arg.name]
-            else:
-                input_sets_op = current_sets
+            input_sets_op = _resolve_set_input(
+                first_arg, node, node_values, const_names)
+            if input_sets_op is None:
+                continue  # constant subgraph
 
-            if method_name == 'flatten':
+            if identity:
+                # Copy, layout or float32/float64 cast: values unchanged.
+                node_values[node.name] = input_sets_op
+                current_sets = input_sets_op
+
+            elif method_name == 'flatten':
                 start_dim = (
                     node.args[1]
                     if len(node.args) > 1
@@ -751,23 +863,125 @@ def _handle_graphmodule(
                     target_shape = tuple(shape_args[0])
                 else:
                     target_shape = tuple(shape_args)
+                # _handle_reshape strips the batch entry, so only that entry
+                # may be a traced value (x.view(x.size(0), -1)).
+                kept = target_shape[1:] if len(target_shape) >= 2 \
+                    else target_shape
+                if not all(isinstance(v, (int, np.integer)) for v in kept):
+                    raise NotImplementedError(
+                        f"graph node {node.name!r} ({method_name}) has a "
+                        f"non-constant target shape {target_shape}")
                 force_flat = not _reshape_feeds_spatial(node, graph_module)
                 result_sets = _handle_reshape(
                     input_sets_op, target_shape, force_flat=force_flat)
                 node_values[node.name] = result_sets
                 current_sets = result_sets
 
-            elif verbose:
-                logger.debug(f'  Skipping call_method: {method_name}')
-
         elif node.op == 'output':
-            # Output node - extract final result
-            if node.args and len(node.args) > 0:
-                output_node = node.args[0]
-                if hasattr(output_node, 'name') and output_node.name in node_values:
-                    current_sets = node_values[output_node.name]
+            # Output node - extract final result. It must name a node that
+            # produced sets; anything else would return stale sets.
+            output_node = node.args[0] if node.args else None
+            if isinstance(output_node, (tuple, list)) \
+                    and len(output_node) == 1:
+                output_node = output_node[0]
+            if not (isinstance(output_node, fx.Node)
+                    and output_node.name in node_values):
+                raise NotImplementedError(
+                    f"graph output {output_node!r} has no reachable sets "
+                    f"(multiple outputs or an unsupported output node)")
+            current_sets = node_values[output_node.name]
 
     return current_sets
+
+
+def _resolve_set_input(arg: Any, node: fx.Node,
+                       node_values: Dict[str, List],
+                       const_names: set) -> Optional[List]:
+    """Sets that ``arg`` feeds into ``node``, or None if ``node`` belongs
+    to a constant subgraph (its consumers fold it via _const_eval).
+
+    Raises instead of falling back to the most recently computed sets: an
+    input that produced no sets (an unsupported upstream op) would
+    otherwise be replaced by an unrelated node's sets.
+    """
+    if isinstance(arg, fx.Node) and arg.name in node_values:
+        return node_values[arg.name]
+    if node.name in const_names:
+        return None
+    raise NotImplementedError(
+        f"graph node {node.name!r} ({node.op} "
+        f"{_fx_target_name(node.target)}): its input "
+        f"{getattr(arg, 'name', arg)!r} has no reachable sets (an "
+        f"unsupported upstream op?)")
+
+
+def _fx_target_name(target: Any) -> str:
+    """Readable name of an fx node target, for error messages."""
+    if isinstance(target, str):
+        return target
+    return getattr(target, '__name__', repr(target))
+
+
+# Dropout functions, with the keyword, position and default of their
+# training flag. Traced in eval mode (``training=self.training``) the flag is
+# the literal False and the function returns its input unchanged.
+_DROPOUT_FUNCTIONS = {
+    F.dropout: ('training', 2, True),
+    F.dropout1d: ('training', 2, True),
+    F.dropout2d: ('training', 2, True),
+    F.dropout3d: ('training', 2, True),
+    F.alpha_dropout: ('training', 2, False),
+    F.feature_alpha_dropout: ('training', 2, False),
+    torch.dropout: ('train', 2, None),
+    torch.alpha_dropout: ('train', 2, None),
+    torch.feature_dropout: ('train', 2, None),
+    torch.feature_alpha_dropout: ('train', 2, None),
+}
+
+
+def _is_inference_identity_function(node: fx.Node) -> bool:
+    """Is ``node`` a dropout call whose training flag is literally False?
+    With the flag True (or traced as a value) dropout is random, so the
+    node is not treated as the identity."""
+    try:
+        spec = _DROPOUT_FUNCTIONS.get(node.target)
+    except TypeError:  # unhashable target
+        return False
+    if spec is None:
+        return False
+    key, pos, default = spec
+    if key in node.kwargs:
+        flag = node.kwargs[key]
+    elif len(node.args) > pos:
+        flag = node.args[pos]
+    else:
+        flag = default
+    return flag is False
+
+
+def _is_identity_method(node: fx.Node) -> bool:
+    """Is ``node`` a tensor method that returns its input's values?
+
+    Covers copies and layout (``clone``, ``detach``, ``contiguous``) and
+    casts between float32 and float64 (``float``, ``double``, ``to`` or
+    ``type`` with a dtype only); reachability already treats the network's
+    floating-point arithmetic as real arithmetic. Casts to other dtypes and
+    device moves are not included.
+    """
+    args, kwargs = node.args[1:], dict(node.kwargs)
+    kwargs.pop('memory_format', None)
+    if node.target in ('clone', 'detach', 'contiguous', 'float', 'double'):
+        return not args and not kwargs
+    if node.target in ('to', 'type'):
+        kwargs.pop('non_blocking', None)
+        kwargs.pop('copy', None)
+        dtypes = list(args)
+        if 'dtype' in kwargs:
+            dtypes.append(kwargs.pop('dtype'))
+        return (not kwargs and len(dtypes) == 1
+                and isinstance(dtypes[0], torch.dtype)
+                and dtypes[0] in (torch.float32, torch.float64))
+    return False
 
 
 def _new_node_values() -> Dict[str, List]:
@@ -788,25 +1002,182 @@ def _constant_node_names(graph_module: fx.GraphModule) -> set:
         if n.op == 'get_attr':
             const.add(n.name)
             continue
-        deps = [a for a in list(n.args) + list(n.kwargs.values())
-                if hasattr(a, 'op')]
+        # all_input_nodes includes nodes nested in list/tuple arguments
+        # (torch.cat((x, y))); scanning only the top-level args would call
+        # such a node constant.
+        deps = n.all_input_nodes
         if all(d.name in const or d.op == 'get_attr' for d in deps) \
                 and n.op in ('call_module', 'call_function', 'call_method'):
             const.add(n.name)
     return const
 
 
+def _graph_joins_branches(graph_module: fx.GraphModule,
+                          const_names: set) -> bool:
+    """Does some node take the sets of two or more different nodes?
+
+    Only such a node (Add, Sub, Mul, Div, Concat, set-by-set MatMul) pairs
+    the predicate systems of two set lists; in a graph without one the
+    systems are never compared. Constants and tensor-shape values
+    (``x.size()``, ``x.shape`` and their items) do not count.
+    """
+    shape_like = set()
+    for n in graph_module.graph.nodes:
+        if n.op == 'call_method' and n.target in ('size', 'dim'):
+            shape_like.add(n.name)
+            continue
+        if n.op == 'call_function' and n.args:
+            src = n.args[0]
+            if (n.target is getattr and len(n.args) >= 2
+                    and n.args[1] == 'shape'):
+                shape_like.add(n.name)
+                continue
+            if (n.target is operator.getitem and isinstance(src, fx.Node)
+                    and src.name in shape_like):
+                shape_like.add(n.name)
+                continue
+        if n.op in ('placeholder', 'get_attr', 'output') \
+                or n.name in const_names:
+            continue
+        sources = {d.name for d in n.all_input_nodes
+                   if d.op != 'get_attr' and d.name not in const_names
+                   and d.name not in shape_like}
+        if len(sources) > 1:
+            return True
+    return False
+
+
+def _node_sets(value: Any) -> List:
+    """The sets a node value holds: a list of sets, or a list of set lists
+    (a multi-output op such as Split); nothing for any other value."""
+    if not isinstance(value, list):
+        return []
+    out = []
+    for v in value:
+        if isinstance(v, list):
+            out.extend(v)
+        else:
+            out.append(v)
+    return out
+
+
+def _tag_new_predicates(node: fx.Node, node_values: Dict[str, List]) -> None:
+    """Give the predicate variables that ``node`` introduced an identity of
+    their own, in place in ``node_values``.
+
+    The ops that pair two set lists (:func:`_same_predicate_system`,
+    :func:`_lineage_groups`) read identical predicate systems as the same
+    variables. That holds for variables that come from the same node, but
+    two nodes can append variables with identical rows and bounds for
+    different functions: a box-only variable (Sin and Cos over a range
+    holding an extremum both give ``z in [-1, 1]``; Sign across 0; an odd
+    Pow across 0; a ReLU neuron kept whole within the LP pad of 0), or rows
+    that do not pin the function (Round(x) and Floor(x + 0.5) both give
+    ``z - x in [-1/2, 1/2]``). Sharing them made Sin(X) - Cos(X) a single
+    point, a false UNSAT.
+
+    A star of the node's output keeps its input's variables when its
+    variable count and predicate box equal those of an input star (an
+    affine map, an exact split's added rows, a pass-through). Every other
+    star (the node appended variables, joined two systems, or rebuilt the
+    star) gets one more variable, unused, with the box ``[0, t]`` for a tag
+    ``t`` unique to this node (:func:`n2v.sets.star.fresh_predicate_tag`).
+    The set is unchanged. The stars of one node share the tag, and the stars
+    derived from them keep it in their system prefix, so they still pair
+    with each other; stars of two different nodes never do. A node whose
+    output only feeds the graph output is left as it is.
+    """
+    out = node_values.get(node.name)
+    if out is None or node.op == 'placeholder' or not node.users \
+            or all(u.op == 'output' for u in node.users):
+        return
+
+    def _key(s):
+        return (int(s.nVar),) + tuple(
+            None if p is None
+            else np.asarray(p, dtype=np.float64).tobytes()
+            for p in (s.predicate_lb, s.predicate_ub))
+
+    kept = {_key(s)
+            for d in node.all_input_nodes
+            for s in _node_sets(node_values.get(d.name))
+            if isinstance(s, (Star, ImageStar))}
+
+    def _is_new(s):
+        return isinstance(s, (Star, ImageStar)) and _key(s) not in kept
+
+    if not any(_is_new(s) for s in _node_sets(out)):
+        return
+    tag = fresh_predicate_tag()
+
+    def _tagged(s):
+        return _with_tag_variable(s, tag) if _is_new(s) else s
+
+    node_values[node.name] = [
+        [_tagged(x) for x in v] if isinstance(v, list) else _tagged(v)
+        for v in out]
+
+
+def _with_tag_variable(s: Union[Star, ImageStar], tag: float):
+    """``s`` with one more predicate variable, last, that no basis vector
+    uses, bounded to ``[0, tag]``: the same set, over a system that holds
+    ``tag``. The bounds go in the predicate box, and also in two rows when
+    ``s`` has no complete predicate box.
+    """
+    n = int(s.nVar)
+    V = np.concatenate([s.V, np.zeros(s.V.shape[:-1] + (1,))], axis=-1)
+    C = np.asarray(s.C, dtype=np.float64)
+    if C.ndim != 2 or C.shape[1] != n:
+        C = C.reshape(-1, n) if C.size else np.zeros((0, n))
+    d = np.asarray(s.d, dtype=np.float64).reshape(-1, 1)
+    C = np.hstack([C, np.zeros((C.shape[0], 1))])
+    plb, pub = s.predicate_lb, s.predicate_ub
+    if plb is None or pub is None:
+        rows = np.zeros((2, n + 1))
+        rows[0, n], rows[1, n] = -1.0, 1.0
+        C = np.vstack([C, rows])
+        d = np.vstack([d, [[0.0], [tag]]])
+    if plb is not None:
+        plb = np.vstack([np.asarray(plb, dtype=np.float64).reshape(-1, 1),
+                         [[0.0]]])
+    if pub is not None:
+        pub = np.vstack([np.asarray(pub, dtype=np.float64).reshape(-1, 1),
+                         [[tag]]])
+    if isinstance(s, ImageStar):
+        out = ImageStar(V, C, d, plb, pub)
+    else:
+        out = Star(V, C, d, plb, pub, outer_zono=s.Z)
+    out.state_lb, out.state_ub = s.state_lb, s.state_ub
+    return out
+
+
+class _ShapeRecorder(fx.Interpreter):
+    """Runs a graph module and records the shape of every tensor-valued
+    node. Unlike torch.fx ShapeProp it neither prints a traceback when the
+    forward fails (failing candidate inputs are expected, see
+    :func:`_propagate_shapes`) nor writes into ``node.meta``."""
+
+    def __init__(self, module: fx.GraphModule):
+        super().__init__(module)
+        self.shapes: Dict[str, Tuple[int, ...]] = {}
+
+    def run_node(self, n: fx.Node) -> Any:
+        result = super().run_node(n)
+        if isinstance(result, torch.Tensor):
+            self.shapes[n.name] = tuple(int(x) for x in result.shape)
+        return result
+
+
 def _propagate_shapes(graph_module: fx.GraphModule, input_sets: List,
                       input_shape=None) -> Dict[str, Tuple[int, ...]]:
-    """Annotate fx nodes with tensor shapes via torch.fx ShapeProp.
+    """Tensor shape of every fx node, from one forward on a dummy input.
 
     Runs the model's REAL forward on a dummy input — a wrong dummy shape
-    crashes the propagation and we return {} (consumers then raise when
+    crashes the forward and we return {} (consumers then raise when
     they need a shape). ``input_shape`` is the batch-stripped model input
     shape (threaded from the runner); heuristic fallback otherwise.
     """
     try:
-        from torch.fx.passes.shape_prop import ShapeProp
         # Candidate dummy shapes, tried in order. The batch-prefixed form is
         # tried first (the common case: ``input_shape`` is batch-stripped, so
         # the model wants the batch back). A rank-1-native model — e.g. one
@@ -822,17 +1193,21 @@ def _propagate_shapes(graph_module: fx.GraphModule, input_sets: List,
                 candidates = [(1, s0.num_channels, s0.height, s0.width)]
             else:
                 candidates = [(1, int(s0.dim)), (int(s0.dim),)]
-        for dummy_shape in candidates:
+        # The dummy must match the model's floating dtype (a float64 ONNX
+        # model rejects a float32 input).
+        dtype = next((t.dtype for t in itertools.chain(
+            graph_module.parameters(), graph_module.buffers())
+            if t.is_floating_point()), torch.float32)
+        dtypes = [dtype] if dtype == torch.float32 else [dtype, torch.float32]
+        for dtype, dummy_shape in itertools.product(dtypes, candidates):
+            dummy = torch.zeros(dummy_shape, dtype=dtype)
+            recorder = _ShapeRecorder(graph_module)
             try:
-                ShapeProp(graph_module).propagate(torch.zeros(dummy_shape))
+                with torch.no_grad():
+                    recorder.run(dummy)
             except Exception:  # noqa: BLE001 — try the next candidate shape
                 continue
-            shapes = {}
-            for n in graph_module.graph.nodes:
-                tm = n.meta.get('tensor_meta')
-                if tm is not None and hasattr(tm, 'shape'):
-                    shapes[n.name] = tuple(int(x) for x in tm.shape)
-            return shapes
+            return recorder.shapes
         return {}
     except Exception:  # noqa: BLE001 — absence is handled loudly downstream
         return {}
@@ -859,7 +1234,12 @@ def _handle_onnx_reduce_flat(
     if not (hasattr(first_arg, 'name') and first_arg.name in node_values):
         return None
     input_sets = node_values[first_arg.name]
-    if not input_sets or not isinstance(input_sets[0], (Star, Zono, Box)):
+    # ImageZono is a Zono subclass, so it must be excluded by name: its rows
+    # are in HWC order, and the reduction matrix below assumes the tensor's
+    # row-major (CHW) order.
+    if (not input_sets
+            or isinstance(input_sets[0], (ImageStar, ImageZono))
+            or not isinstance(input_sets[0], (Star, Zono, Box))):
         return None
     in_shape = (node_shapes or {}).get(first_arg.name)
     if in_shape is None or len(in_shape) == 0:
@@ -1021,6 +1401,9 @@ def _add_resize_scale_kwargs(graph_module: fx.GraphModule, node: Any,
 
 
 def _const_eval(graph_module: fx.GraphModule, node: Any, memo: dict) -> torch.Tensor:
+    """Value of a constant node, folded with torch (see _get_parameter). The
+    node of a multi-output op (e.g. Split) evaluates to a tuple of tensors,
+    which its getitem consumers index."""
     if not hasattr(node, 'op'):
         return torch.tensor(node)  # literal arg
     if node.name in memo:
@@ -1037,19 +1420,37 @@ def _const_eval(graph_module: fx.GraphModule, node: Any, memo: dict) -> torch.Te
         elif module is not None:
             args = [_const_eval(graph_module, a, memo) for a in node.args]
             with torch.no_grad():
-                result = module(*args).detach().cpu()
+                result = module(*args)
+            # A multi-output module (e.g. Split) returns a tuple of tensors,
+            # which its getitem consumers index; keep it as a tuple.
+            result = (_detach_outputs(result)
+                      if isinstance(result, (tuple, list))
+                      else result.detach().cpu())
         else:
             raise ValueError(f"not a constant subgraph: {node.name}")
     elif node.op == 'call_function':
         args = [_const_eval(graph_module, a, memo) for a in node.args]
         with torch.no_grad():
             result = node.target(*args, **node.kwargs)
-        result = result.detach().cpu() if isinstance(result, torch.Tensor) \
-            else torch.tensor(result)
+        if isinstance(result, torch.Tensor):
+            result = result.detach().cpu()
+        elif (isinstance(result, (tuple, list)) and result
+                and all(isinstance(r, torch.Tensor) for r in result)):
+            result = _detach_outputs(result)  # e.g. torch.split
+        else:
+            result = torch.tensor(result)
     else:
         raise ValueError(f"not a constant node: {node.name} ({node.op})")
     memo[node.name] = result
     return result
+
+
+def _detach_outputs(outputs) -> tuple:
+    """The outputs of a multi-output op on constants, detached and on the
+    CPU. The tuple is what _const_eval returns for the op's own node; a
+    caller that needs a tensor from it fails on the missing tensor methods
+    instead of reading the wrong value."""
+    return tuple(t.detach().cpu() for t in outputs)
 
 
 def _handle_reshape(input_sets: List, target_shape: tuple,
@@ -1335,6 +1736,7 @@ def _handle_onnx_binary_op(
     graph_module: fx.GraphModule,
     set_type: Type,
     node_shapes: Optional[Dict[str, Tuple[int, ...]]] = None,
+    lp_solver: str = 'default',
 ) -> Optional[List]:
     """Handle ONNX binary math operations (Add, Sub, etc.)."""
     input_nodes = node.args
@@ -1375,9 +1777,9 @@ def _handle_onnx_binary_op(
             sets_b = _expand(sets_b, shape_b)
 
         if op_name == 'mul':
-            return _mul_sets(sets_a, sets_b)
+            return _mul_sets(sets_a, sets_b, lp_solver)
         elif op_name == '_onnx_div':
-            return _div_sets(sets_a, sets_b)
+            return _div_sets(sets_a, sets_b, lp_solver)
 
         return _add_sets(sets_a, sets_b, op_name)
 
@@ -1399,67 +1801,14 @@ def _handle_onnx_binary_op(
     except Exception:  # noqa: BLE001
         return None
 
+    negate_input = False
     if mirrored and hasattr(module, 'math_op_function'):
         op = module.math_op_function.__name__
         if 'sub' in op:
-            # param - x = (-x) + param
-            negated = _mul_sets_by_constant(
-                node_values[first_input.name], np.array(-1.0))
-            saved = node_values[first_input.name]
-            node_values[first_input.name] = negated
-            try:
-                # re-dispatch as (neg_x) ADD param
-                bias = param_value.flatten()
-
-                def _bcast(b, dim):
-                    if b.size != dim and dim % max(b.size, 1) == 0:
-                        return np.tile(b, dim // b.size)
-                    return b
-
-                out = []
-                for s in negated:
-                    if isinstance(s, ImageStar):
-                        h, w, ch = s.height, s.width, s.num_channels
-                        if bias.size == h * w * ch:
-                            bhwc = bias.reshape(ch, h, w).transpose(1, 2, 0)
-                        elif bias.size == ch:
-                            bhwc = np.broadcast_to(
-                                bias.reshape(1, 1, ch), (h, w, ch))
-                        else:
-                            bhwc = np.full((h, w, ch), bias.flatten()[0])
-                        V = s.V.copy()
-                        V[:, :, :, 0] = V[:, :, :, 0] + bhwc
-                        out.append(ImageStar(V, s.C, s.d, s.predicate_lb,
-                                             s.predicate_ub, h, w, ch))
-                    elif isinstance(s, Star):
-                        b = _bcast(bias, s.dim)
-                        V = s.V.copy()
-                        V[:, 0:1] = V[:, 0:1] + b.reshape(-1, 1)
-                        out.append(Star(V, s.C, s.d,
-                                        s.predicate_lb, s.predicate_ub))
-                    elif isinstance(s, ImageZono):
-                        h, w, ch = s.height, s.width, s.num_channels
-                        if bias.size == h * w * ch:
-                            bf = bias.reshape(ch, h, w).transpose(
-                                1, 2, 0).reshape(-1, 1)
-                        else:
-                            bf = _bcast(bias, s.c.size).reshape(-1, 1)
-                        out.append(ImageZono(s.c + bf, s.V, h, w, ch))
-                    elif isinstance(s, Zono):
-                        b = _bcast(bias, s.c.size).reshape(-1, 1)
-                        out.append(Zono(s.c + b, s.V))
-                    elif isinstance(s, Box):
-                        b = _bcast(bias, s.lb.size)
-                        out.append(Box(s.lb + b.reshape(s.lb.shape),
-                                       s.ub + b.reshape(s.ub.shape)))
-                    else:
-                        raise NotImplementedError(
-                            f"mirrored Sub not implemented for "
-                            f"{type(s).__name__}")
-                return out
-            finally:
-                node_values[first_input.name] = saved
-        if '_onnx_div' in op:
+            # param - x = (-x) + param: negate the sets below and add the
+            # constant through the same layout-aware path as x + param.
+            negate_input = True
+        elif '_onnx_div' in op:
             raise NotImplementedError(
                 "division BY a computed set is not supported")
         # add / mul are commutative: fall through with swapped operands
@@ -1469,6 +1818,8 @@ def _handle_onnx_binary_op(
         return None
 
     input_sets_op = node_values[first_input.name]
+    if negate_input:
+        input_sets_op = _mul_sets_by_constant(input_sets_op, np.array(-1.0))
 
     # ONNX broadcasting: a (M,) parameter applied to a (1, R, M) tensor
     # repeats across leading dims. On the flat set this is a tile —
@@ -1497,6 +1848,17 @@ def _handle_onnx_binary_op(
             param_value = np.broadcast_to(
                 param_value, out_shape).flatten().copy()
         elif set_dim % max(param_value.size, 1) == 0:
+            # Without shape metadata a tile is the broadcast only when the
+            # constant has no size-1 axis after its leading ones: (1, C, 1, 1)
+            # against (1, C, H, W) repeats each entry H*W times instead.
+            core = np.shape(param_value)
+            while core and core[0] == 1:
+                core = core[1:]
+            if param_value.size != 1 and 1 in core:
+                raise NotImplementedError(
+                    f"constant of shape {np.shape(param_value)} cannot be "
+                    f"broadcast against a flat set of dim {set_dim} without "
+                    f"tensor-shape metadata for {first_input.name!r}")
             param_value = np.tile(param_value.flatten(),
                                   set_dim // param_value.size)
 
@@ -1504,12 +1866,12 @@ def _handle_onnx_binary_op(
     if not hasattr(module, 'math_op_function'):
         return None
 
-    op_name = module.math_op_function.__name__
+    op_name = 'add' if negate_input else module.math_op_function.__name__
 
     if op_name == 'mul':
         return _mul_sets_by_constant(input_sets_op, param_value)
     elif op_name == '_onnx_div':
-        return _mul_sets_by_constant(input_sets_op, 1.0 / param_value)
+        return _div_sets_by_constant(input_sets_op, param_value)
     elif 'add' in op_name:
         bias = param_value
     elif 'sub' in op_name:
@@ -1520,27 +1882,17 @@ def _handle_onnx_binary_op(
         )
 
     # Apply translation based on set type
-    if set_type == Star:
-        # Optimized: directly modify center
-        output_sets = []
-        bias_reshaped = bias.reshape(-1, 1)
-        for s in input_sets_op:
-            new_V = s.V.copy()
-            new_V[:, 0:1] = new_V[:, 0:1] + bias_reshaped
-            output_set = Star(new_V, s.C, s.d, s.predicate_lb, s.predicate_ub)
-            output_sets.append(output_set)
-        return output_sets
-
-    elif set_type in (Hexatope, Octatope):
+    if set_type in (Hexatope, Octatope):
         # Apply via dummy linear layer with identity + bias
         linear_fn = linear_hexatope if set_type == Hexatope else linear_octatope
 
         output_sets = []
-        bias_tensor = torch.tensor(bias, dtype=torch.float32).reshape(-1)
+        # float64: a float32 layer would round the constant.
+        bias_tensor = torch.tensor(bias, dtype=torch.float64).reshape(-1)
 
         for s in input_sets_op:
-            dummy_linear = nn.Linear(s.dim, s.dim, bias=True)
-            dummy_linear.weight.data = torch.eye(s.dim)
+            dummy_linear = nn.Linear(s.dim, s.dim, bias=True, dtype=torch.float64)
+            dummy_linear.weight.data = torch.eye(s.dim, dtype=torch.float64)
             dummy_linear.bias.data = bias_tensor
             result = linear_fn(dummy_linear, [s])
             output_sets.extend(result)
@@ -1552,11 +1904,23 @@ def _handle_onnx_binary_op(
         bias_reshaped = bias.reshape(-1, 1)
         for s in input_sets_op:
             if isinstance(s, ImageZono):
+                # ImageZono.c is flat in HWC order; the ONNX constant is
+                # flat in (C, H, W) order (same layout rule as the
+                # ImageStar branch below).
                 h, w, c_ch = s.height, s.width, s.num_channels
-                if bias_reshaped.size == c_ch:
-                    bias_flat = np.tile(bias.flatten(), h * w).reshape(-1, 1)
+                b = np.asarray(bias, dtype=np.float64).flatten()
+                if b.size == 1:
+                    bias_flat = np.full((h * w * c_ch, 1), b[0])
+                elif b.size == h * w * c_ch:
+                    bias_flat = b.reshape(c_ch, h, w).transpose(
+                        1, 2, 0).reshape(-1, 1)
+                elif b.size == c_ch:
+                    bias_flat = np.tile(b, h * w).reshape(-1, 1)
                 else:
-                    bias_flat = bias_reshaped
+                    raise NotImplementedError(
+                        f"ImageZono add/sub: constant of size {b.size} "
+                        f"does not broadcast against (C,H,W)="
+                        f"({c_ch},{h},{w})")
                 new_c = s.c + bias_flat
                 out = ImageZono(new_c, s.V, h, w, c_ch)
             else:
@@ -1569,13 +1933,16 @@ def _handle_onnx_binary_op(
         output_sets = []
         bias_reshaped = bias.reshape(-1, 1)
         for s in input_sets_op:
-            out = Box(s.lb + bias_reshaped, s.ub + bias_reshaped)
+            # Rounded outward, so the Box contains every x + bias.
+            out = Box(_add_dir(s.lb, bias_reshaped, -1.0),
+                      _add_dir(s.ub, bias_reshaped, 1.0))
             output_sets.append(out)
         return output_sets
 
-    elif set_type == ImageStar:
-        # set_type reflects the graph's INPUT set; mid-graph sets can
-        # be flat Stars (e.g. after a flatten), so dispatch per element.
+    elif set_type in (Star, ImageStar):
+        # set_type reflects the graph's INPUT set; mid-graph sets can be
+        # flat Stars (e.g. after a flatten) or ImageStars (a reshape that
+        # feeds a conv), so dispatch per element.
         output_sets = []
         b = np.asarray(bias, dtype=np.float64).flatten()
         for s in input_sets_op:
@@ -1611,8 +1978,8 @@ def _handle_onnx_binary_op(
                     new_V, s.C, s.d, s.predicate_lb, s.predicate_ub))
             else:
                 raise NotImplementedError(
-                    f"add/sub not supported for {type(s).__name__} in an "
-                    f"ImageStar graph")
+                    f"add/sub not supported for {type(s).__name__} in a "
+                    f"{set_type.__name__} graph")
         return output_sets
 
     else:
@@ -1727,6 +2094,11 @@ def _handle_bilinear_matmul(
             f"not infer shapes for node {node.name!r})")
     left_shape = tuple(int(s) for s in left_shape)
     right_shape = tuple(int(s) for s in right_shape)
+    # The bilinear kernels combine the two lists index by index; pair the
+    # pieces first so every input's left and right pieces meet.
+    pairs = _pair_set_lists([left_sets, right_sets])
+    left_sets = [p[0] for p in pairs]
+    right_sets = [p[1] for p in pairs]
     first = left_sets[0]
     if isinstance(first, Star):
         return bilinear_matmul_star(
@@ -1878,8 +2250,9 @@ def _handle_onnx_matmul(
 
         output_sets = []
         for s in input_sets_op:
-            dummy_linear = nn.Linear(s.dim, weight_matrix.shape[0], bias=False)
-            dummy_linear.weight.data = torch.tensor(weight_matrix.T, dtype=torch.float32)
+            dummy_linear = nn.Linear(s.dim, weight_matrix.shape[0], bias=False,
+                                     dtype=torch.float64)
+            dummy_linear.weight.data = torch.tensor(weight_matrix.T, dtype=torch.float64)
             result = linear_fn(dummy_linear, [s])
             output_sets.extend(result)
 
@@ -1921,11 +2294,12 @@ def _coerce_set_types(sa: Any, sb: Any) -> Tuple[Any, Any]:
     if isinstance(sb, ImageStar) and isinstance(sa, Star) and not isinstance(sa, ImageStar):
         return sa, sb.flatten_to_star()
 
-    # ImageZono + Zono -> convert ImageZono to plain Zono
+    # ImageZono + Zono -> flatten ImageZono in CHW order, like
+    # flatten_to_star above (its c/V are stored in HWC order)
     if isinstance(sa, ImageZono) and isinstance(sb, Zono) and not isinstance(sb, ImageZono):
-        return Zono(sa.c, sa.V), sb
+        return _flatten_imagezono_chw(sa), sb
     if isinstance(sb, ImageZono) and isinstance(sa, Zono) and not isinstance(sa, ImageZono):
-        return sa, Zono(sb.c, sb.V)
+        return sa, _flatten_imagezono_chw(sb)
 
     return sa, sb
 
@@ -1939,6 +2313,15 @@ def _same_predicate_system(sa, sb) -> bool:
     not sufficient: two branches can each append one ReLU-relaxation
     predicate (same nVar) with different constraints, and sharing those
     would be unsound.
+
+    Equal systems are read as the same predicate variables. Equal rows
+    and bounds alone do not make that true: two different ops can append
+    variables with the same rows and bounds for different functions (e.g.
+    a box-only Sin and Cos variable). The graph reach makes it hold by
+    giving each node's new variables a tag of their own
+    (:func:`_tag_new_predicates`), and ops that re-encode their output
+    from bounds use ``Star.fresh_from_bounds``, so equal systems come from
+    the same node.
     """
     if sa.nVar != sb.nVar:
         return False
@@ -2072,6 +2455,158 @@ def _join_star_systems(sets: List) -> Tuple[
     return V_list, joint_C, joint_d, pred_lb, pred_ub
 
 
+def _pair_set_lists(set_lists: List[List]) -> List[tuple]:
+    """Operand tuples for an element-wise op over set lists (one list per
+    operand, each a union of pieces).
+
+    Each input value lies in some piece of every operand's list, and the op
+    must see those pieces together. Index i of one list says nothing about
+    index i of another (a parallel reach returns pieces in completion
+    order), so:
+
+      * a list with one set is broadcast across the others;
+      * with several multi-piece lists, one of them is the reference. Each
+        reference piece is combined, in every other list, with the pieces
+        it descends from: those whose predicate system is identical to, or
+        a prefix of, its own (:func:`_lineage_groups`);
+      * a reference piece without such a match in a list is combined with
+        every piece of that list (the lists were split independently).
+        The per-tuple op joins differing predicate systems
+        block-diagonally, which is sound.
+
+    The reference is the list that gives the fewest tuples. An empty list
+    (an operand that reaches nothing) gives no tuples.
+    """
+    lists = [list(sl) for sl in set_lists]
+    if not lists or any(len(sl) == 0 for sl in lists):
+        return []
+    multi = [i for i, sl in enumerate(lists) if len(sl) > 1]
+    if len(multi) <= 1:
+        n = max(len(sl) for sl in lists)
+        return [tuple(sl[j] if len(sl) > 1 else sl[0] for sl in lists)
+                for j in range(n)]
+
+    best = None
+    for r in multi:
+        groups = {m: _lineage_groups(lists[r], lists[m])
+                  for m in multi if m != r}
+        n_tuples = sum(int(np.prod([len(groups[m][p]) for m in groups]))
+                       for p in range(len(lists[r])))
+        if best is None or n_tuples < best[0]:
+            best = (n_tuples, r, groups)
+    n_tuples, r, groups = best
+
+    tuples = []
+    for p, piece in enumerate(lists[r]):
+        choices = []
+        for i, sl in enumerate(lists):
+            if i == r:
+                choices.append([piece])
+            elif len(sl) == 1:
+                choices.append(sl)
+            else:
+                choices.append([sl[q] for q in groups[i][p]])
+        tuples.extend(itertools.product(*choices))
+    if len(tuples) > max(len(sl) for sl in lists):
+        logger.warning(
+            "pieces of set lists of sizes %s do not descend from one "
+            "another; combining them gives %d sets",
+            [len(sl) for sl in lists], len(tuples))
+    return tuples
+
+
+def _predicate_system(s: Any) -> Optional[Tuple[np.ndarray, ...]]:
+    """(C, d, lb, ub) of a star's predicate system as float64 arrays of
+    shapes (m, n), (m,), (n,), (n,); None for a set without one."""
+    if not isinstance(s, (Star, ImageStar)):
+        return None
+    n = int(s.nVar)
+    C = np.asarray(s.C if s.C is not None else np.zeros((0, n)),
+                   dtype=np.float64)
+    C = C.reshape(-1, n) if C.size else np.zeros((0, n))
+    d = np.asarray(s.d if s.d is not None else np.zeros(0),
+                   dtype=np.float64).reshape(-1)
+    if d.size != C.shape[0]:
+        return None
+
+    def _box(p, fill):
+        if p is None:
+            return np.full(n, fill)
+        return np.asarray(p, dtype=np.float64).reshape(-1)
+
+    lb, ub = _box(s.predicate_lb, -np.inf), _box(s.predicate_ub, np.inf)
+    if lb.size != n or ub.size != n:
+        return None
+    # + 0.0 turns -0.0 into 0.0 so equal systems give equal bytes
+    return C + 0.0, d + 0.0, lb + 0.0, ub + 0.0
+
+
+def _system_key(C: np.ndarray, d: np.ndarray, lb: np.ndarray,
+                ub: np.ndarray) -> tuple:
+    """Hashable key of a predicate system: equal systems, equal keys."""
+    return (C.shape, np.ascontiguousarray(C).tobytes(),
+            np.ascontiguousarray(d).tobytes(),
+            np.ascontiguousarray(lb).tobytes(),
+            np.ascontiguousarray(ub).tobytes())
+
+
+def _lineage_groups(ref: List, other: List) -> List[List[int]]:
+    """For each piece of ``ref``, the indices of the ``other`` pieces it is
+    combined with (see :func:`_pair_set_lists`).
+
+    Set ops keep a star's predicate system in front and append to it: new
+    constraint rows, and new predicate variables with zero coefficients in
+    the old rows (relaxation variables, McCormick products, the second
+    operand of a block-diagonal join); an exact split appends one row to
+    each child. A piece derived from an ``other`` piece therefore has that
+    piece's system as a prefix: the leading rows and variables, and the
+    predicate box on those variables, agree exactly. This relies on the
+    same premise as :func:`_same_predicate_system`: equal systems are the
+    same predicate variables, which the per-node tags of
+    :func:`_tag_new_predicates` make hold in the graph reach.
+
+    When exactly one distinct system in ``other`` is identical to, or a
+    prefix of, the piece's system, the piece is combined with every
+    ``other`` piece that has it. A strict prefix must have at least one
+    constraint row. A re-boxing op builds its fresh variables with
+    ``Star.fresh_from_bounds``, whose leading tag variable keeps its system
+    from equalling or extending any system built elsewhere (a plain
+    ``Star.from_bounds`` system depends only on how many widths are
+    nonzero). With no match, or several (split children differ in the row
+    their split added, so this is rare), the piece is combined with all of
+    ``other``.
+    """
+    every = list(range(len(other)))
+    systems = [_predicate_system(s) for s in other]
+    if any(sy is None for sy in systems):
+        return [every] * len(ref)
+    by_shape: Dict[Tuple[int, int], Dict[tuple, List[int]]] = {}
+    for q, (C, d, lb, ub) in enumerate(systems):
+        by_shape.setdefault(C.shape, {}).setdefault(
+            _system_key(C, d, lb, ub), []).append(q)
+
+    groups = []
+    for s in ref:
+        sy = _predicate_system(s)
+        if sy is None:
+            groups.append(every)
+            continue
+        C, d, lb, ub = sy
+        m_s, n_s = C.shape
+        found = []
+        for (m, n), keyed in by_shape.items():
+            if m > m_s or n > n_s:
+                continue
+            if (m, n) != (m_s, n_s):
+                if m == 0 or np.any(C[:m, n:] != 0):
+                    continue
+            hit = keyed.get(_system_key(C[:m, :n], d[:m], lb[:n], ub[:n]))
+            if hit is not None:
+                found.append(hit)
+        groups.append(found[0] if len(found) == 1 else every)
+    return groups
+
+
 def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
     """
     Element-wise addition or subtraction of two lists of sets.
@@ -2104,29 +2639,14 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
     Returns:
         List of output sets
     """
-    # Residual branches can carry different set counts: one branch may split
+    # Residual branches can carry different pieces: one branch may split
     # (exact-star ReLU -> N sets partitioning the input) while the other stays
-    # affine (a single set over the whole input, same predicate variables).
-    # Broadcast the singleton across the split pieces: for input-region piece
-    # A_i, the output is A_i + g, and the per-pair add below stays sound (exact
-    # when the predicate systems match, Minkowski-join otherwise). This only
-    # triggers where the old code raised (so it cannot regress an instance that
-    # already reached without error). A genuine N-vs-M (both split) mismatch is
-    # still unsupported and raises.
-    if len(sets_a) != len(sets_b):
-        if len(sets_a) == 1:
-            sets_a = sets_a * len(sets_b)
-        elif len(sets_b) == 1:
-            sets_b = sets_b * len(sets_a)
-        else:
-            raise ValueError(
-                f"Cannot {op_name} set lists of different lengths: "
-                f"{len(sets_a)} vs {len(sets_b)}"
-            )
-
+    # affine, or both may split independently. _pair_set_lists forms the
+    # pairs that cover every input; the per-pair add below stays sound (exact
+    # when the predicate systems match, Minkowski-join otherwise).
     output_sets = []
 
-    for sa, sb in zip(sets_a, sets_b):
+    for sa, sb in _pair_set_lists([sets_a, sets_b]):
         # Coerce mismatched types (e.g., ImageStar + Star)
         sa, sb = _coerce_set_types(sa, sb)
         sign = 1.0 if 'add' in op_name else -1.0
@@ -2191,12 +2711,13 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
 
         elif isinstance(sa, Box) and isinstance(sb, Box):
             # Box: interval arithmetic
+            # (rounded outward)
             if op_name == 'add' or 'add' in op_name:
-                lb_out = sa.lb + sb.lb
-                ub_out = sa.ub + sb.ub
+                lb_out = _add_dir(sa.lb, sb.lb, -1.0)
+                ub_out = _add_dir(sa.ub, sb.ub, 1.0)
             else:
-                lb_out = sa.lb - sb.ub
-                ub_out = sa.ub - sb.lb
+                lb_out = _add_dir(sa.lb, -sb.ub, -1.0)
+                ub_out = _add_dir(sa.ub, -sb.lb, 1.0)
 
             out = Box(lb_out, ub_out)
             output_sets.append(out)
@@ -2210,7 +2731,8 @@ def _add_sets(sets_a: List, sets_b: List, op_name: str) -> List:
     return output_sets
 
 
-def _mul_sets(sets_a: List, sets_b: List) -> List:
+def _mul_sets(sets_a: List, sets_b: List,
+              lp_solver: str = 'default') -> List:
     """
     Element-wise multiplication of two lists of computed sets.
 
@@ -2221,29 +2743,20 @@ def _mul_sets(sets_a: List, sets_b: List) -> List:
     Args:
         sets_a: List of sets from the first operand
         sets_b: List of sets from the second operand
+        lp_solver: LP solver for the McCormick operand ranges (a solver
+            outside the HiGHS family is replaced by HiGHS, see
+            ``n2v.utils.lpsolver._bound_lp_solver``)
 
     Returns:
         List of output sets
     """
-    # Broadcast a singleton branch across a split branch (see _add_sets): a
-    # bilinear Mul(f, g) where f split into N input-region pieces and g stayed
-    # affine (1 set) is, per piece, A_i * g over A_i's constraints — the
-    # McCormick relaxation below stays sound. Only triggers where the old code
-    # raised, so it cannot regress an instance that already reached.
-    if len(sets_a) != len(sets_b):
-        if len(sets_a) == 1:
-            sets_a = sets_a * len(sets_b)
-        elif len(sets_b) == 1:
-            sets_b = sets_b * len(sets_a)
-        else:
-            raise ValueError(
-                f"Cannot multiply set lists of different lengths: "
-                f"{len(sets_a)} vs {len(sets_b)}"
-            )
-
+    # Pieces are paired as in _add_sets: a bilinear Mul(f, g) where f split
+    # into N input-region pieces and g stayed affine (1 set) is, per piece,
+    # A_i * g over A_i's constraints; independently split operands get every
+    # pair. The McCormick relaxation below stays sound for each pair.
     output_sets = []
 
-    for sa, sb in zip(sets_a, sets_b):
+    for sa, sb in _pair_set_lists([sets_a, sets_b]):
         # Coerce mismatched types (e.g., ImageStar * Star)
         sa, sb = _coerce_set_types(sa, sb)
 
@@ -2252,7 +2765,7 @@ def _mul_sets(sets_a: List, sets_b: List) -> List:
         elif isinstance(sa, Zono) and isinstance(sb, Zono):
             output_sets.append(_mul_zonos(sa, sb))
         elif isinstance(sa, Star) and isinstance(sb, Star):
-            output_sets.append(_mul_stars_mccormick(sa, sb))
+            output_sets.append(_mul_stars_mccormick(sa, sb, lp_solver))
         else:
             raise NotImplementedError(
                 f"Element-wise mul not supported for "
@@ -2263,9 +2776,12 @@ def _mul_sets(sets_a: List, sets_b: List) -> List:
 
 
 def _mul_boxes(a: 'Box', b: 'Box') -> 'Box':
-    """Element-wise multiplication of two Boxes via interval arithmetic."""
-    products = np.stack([a.lb * b.lb, a.lb * b.ub, a.ub * b.lb, a.ub * b.ub])
-    return Box(products.min(axis=0), products.max(axis=0))
+    """Element-wise multiplication of two Boxes via interval arithmetic,
+    with each product rounded outward."""
+    pairs = [(a.lb, b.lb), (a.lb, b.ub), (a.ub, b.lb), (a.ub, b.ub)]
+    lo = np.min([_mul_dir(x, y, -1.0) for x, y in pairs], axis=0)
+    hi = np.max([_mul_dir(x, y, 1.0) for x, y in pairs], axis=0)
+    return Box(lo, hi)
 
 
 def _mul_zonos(a: 'Zono', b: 'Zono') -> 'Zono':
@@ -2281,6 +2797,37 @@ def _mul_zonos(a: 'Zono', b: 'Zono') -> 'Zono':
     out_lb = products.min(axis=0)
     out_ub = products.max(axis=0)
     return Zono.from_bounds(out_lb, out_ub)
+
+
+def _mccormick_operand_ranges(star: 'Star', solver,
+                              operand: str) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-dimension ranges of one operand of a McCormick Mul/Div, before
+    the outward pad the callers apply.
+
+    The ranges come from ``Star.get_ranges``: the LP range, or the rigorous
+    interval estimate ``Star.estimate_range`` on a dimension whose LP
+    returns no optimum (a solver failure, or a presolve 'infeasible' that is
+    not a certificate). The envelopes need a bounded box, so a range that is
+    still not finite raises.
+
+    Args:
+        star: the operand
+        solver: LP solver (already mapped by ``_bound_lp_solver``)
+        operand: the operand's name, for the error message
+
+    Returns:
+        ``(lo, hi)``, 1-D float64 arrays of length ``star.dim``.
+    """
+    lo, hi = star.get_ranges(lp_solver=solver)
+    lo = np.asarray(lo, dtype=np.float64).reshape(-1)
+    hi = np.asarray(hi, dtype=np.float64).reshape(-1)
+    bad = ~(np.isfinite(lo) & np.isfinite(hi))
+    if np.any(bad):
+        i = int(np.argmax(bad))
+        raise ValueError(
+            f"McCormick: no LP optimum and no finite interval estimate for "
+            f"dimension {i} of the {operand} ([{lo[i]}, {hi[i]}])")
+    return lo, hi
 
 
 def _mul_stars_mccormick(sa: 'Star', sb: 'Star', lp_solver: str = 'default') -> 'Star':
@@ -2331,38 +2878,22 @@ def _mul_stars_mccormick(sa: 'Star', sb: 'Star', lp_solver: str = 'default') -> 
                           np.zeros((sb.V.shape[0], n1)),
                           sb.V[:, 1:]])
 
-    # Get bounds for both operands via LP
-    lbs_a = np.zeros(N)
-    ubs_a = np.zeros(N)
-    lbs_b = np.zeros(N)
-    ubs_b = np.zeros(N)
+    # Get bounds for both operands via LP (HiGHS whatever lp_solver is: the
+    # outward pad below is sized for it, see _bound_lp_solver)
+    solver = _bound_lp_solver(lp_solver)
+    lbs_a, ubs_a = _mccormick_operand_ranges(sa, solver, "first operand")
+    lbs_b, ubs_b = _mccormick_operand_ranges(sb, solver, "second operand")
 
-    for i in range(N):
-        lb_val, ub_val = sa.get_range(i, lp_solver)
-        if lb_val is None or ub_val is None:
-            raise ValueError(
-                f"LP solver returned None for dimension {i} of first operand. "
-                f"Star may be infeasible."
-            )
-        lbs_a[i] = lb_val
-        ubs_a[i] = ub_val
+    # SOUNDNESS: the envelopes and the z box below are valid only on a box
+    # that contains the operands; pad the LP ranges outward.
+    a, b = _outward_lp_ranges(lbs_a, ubs_a, sa_V[:, :n + 1])  # bounds on x
+    c, d = _outward_lp_ranges(lbs_b, ubs_b, sb_V[:, :n + 1])  # bounds on y
 
-        lb_val, ub_val = sb.get_range(i, lp_solver)
-        if lb_val is None or ub_val is None:
-            raise ValueError(
-                f"LP solver returned None for dimension {i} of second operand. "
-                f"Star may be infeasible."
-            )
-        lbs_b[i] = lb_val
-        ubs_b[i] = ub_val
-
-    a, b = lbs_a, ubs_a  # bounds on x
-    c, d = lbs_b, ubs_b  # bounds on y
-
-    # Interval arithmetic for z predicate bounds
-    products = np.stack([a * c, a * d, b * c, b * d])
-    z_lb = products.min(axis=0)
-    z_ub = products.max(axis=0)
+    # Interval arithmetic for z predicate bounds (rounded outward: the
+    # verification LP enforces the predicate box without slack)
+    pairs = [(a, c), (a, d), (b, c), (b, d)]
+    z_lb = np.min([_mul_dir(x, y, -1.0) for x, y in pairs], axis=0)
+    z_ub = np.max([_mul_dir(x, y, 1.0) for x, y in pairs], axis=0)
 
     # Build new V matrix: [constant_col | old_pred_cols | new_z_cols]
     # The output is z_i, so V maps the new z predicate variables to output.
@@ -2455,10 +2986,12 @@ def _div_sets(sets_a: List, sets_b: List, lp_solver: str = 'default') -> List:
     Element-wise division z = a / b of two lists of computed sets.
 
     Raises if any denominator range straddles zero — there is no sound
-    convex over-approximation in that case.
+    convex over-approximation in that case. Pieces are paired as in
+    :func:`_add_sets` (a split numerator against a single denominator set
+    gives one quotient per numerator piece).
     """
     output_sets = []
-    for sa, sb in zip(sets_a, sets_b):
+    for sa, sb in _pair_set_lists([sets_a, sets_b]):
         sa, sb = _coerce_set_types(sa, sb)
 
         if isinstance(sa, Box) and isinstance(sb, Box):
@@ -2469,8 +3002,10 @@ def _div_sets(sets_a: List, sets_b: List, lp_solver: str = 'default') -> List:
                     "Element-wise Div: denominator range straddles zero")
             alb = np.asarray(sa.lb, dtype=np.float64).flatten()
             aub = np.asarray(sa.ub, dtype=np.float64).flatten()
-            q = np.stack([alb / blb, alb / bub, aub / blb, aub / bub])
-            output_sets.append(Box(q.min(axis=0), q.max(axis=0)))
+            pairs = [(alb, blb), (alb, bub), (aub, blb), (aub, bub)]
+            q_lo = np.min([_div_dir(x, y, -1.0) for x, y in pairs], axis=0)
+            q_hi = np.max([_div_dir(x, y, 1.0) for x, y in pairs], axis=0)
+            output_sets.append(Box(q_lo, q_hi))
         elif isinstance(sa, Star) and isinstance(sb, Star):
             output_sets.append(_div_stars_mccormick(sa, sb, lp_solver))
         else:
@@ -2519,24 +3054,17 @@ def _div_stars_mccormick(sa: 'Star', sb: 'Star', lp_solver: str = 'default') -> 
                           np.zeros((sb.V.shape[0], n1)),
                           sb.V[:, 1:]])
 
-    # Per-dimension ranges of numerator x and denominator y via LP
-    a = np.zeros(N)
-    b = np.zeros(N)
-    c = np.zeros(N)
-    d = np.zeros(N)
-    for i in range(N):
-        lb_val, ub_val = sa.get_range(i, lp_solver)
-        if lb_val is None or ub_val is None:
-            raise ValueError(
-                f"LP solver returned None for dimension {i} of numerator. "
-                f"Star may be infeasible.")
-        a[i], b[i] = lb_val, ub_val
-        lb_val, ub_val = sb.get_range(i, lp_solver)
-        if lb_val is None or ub_val is None:
-            raise ValueError(
-                f"LP solver returned None for dimension {i} of "
-                f"denominator. Star may be infeasible.")
-        c[i], d[i] = lb_val, ub_val
+    # Per-dimension ranges of numerator x and denominator y via LP (HiGHS,
+    # see _mul_stars_mccormick)
+    solver = _bound_lp_solver(lp_solver)
+    a, b = _mccormick_operand_ranges(sa, solver, "numerator")
+    c, d = _mccormick_operand_ranges(sb, solver, "denominator")
+
+    # SOUNDNESS: pad the LP ranges outward (see _mul_stars_mccormick),
+    # before the zero-straddle check so a denominator that reaches zero
+    # within the LP tolerance is rejected.
+    a, b = _outward_lp_ranges(a, b, sa_V[:, :n + 1])
+    c, d = _outward_lp_ranges(c, d, sb_V[:, :n + 1])
 
     if np.any((c <= 0) & (d >= 0)):
         bad = int(np.argmax((c <= 0) & (d >= 0)))
@@ -2544,10 +3072,10 @@ def _div_stars_mccormick(sa: 'Star', sb: 'Star', lp_solver: str = 'default') -> 
             f"Element-wise Div: denominator range [{c[bad]}, {d[bad]}] "
             f"(dimension {bad}) straddles zero")
 
-    # Interval division bounds for the quotient z
-    q = np.stack([a / c, a / d, b / c, b / d])
-    z_lb = q.min(axis=0)
-    z_ub = q.max(axis=0)
+    # Interval division bounds for the quotient z (rounded outward)
+    pairs = [(a, c), (a, d), (b, c), (b, d)]
+    z_lb = np.min([_div_dir(x, y, -1.0) for x, y in pairs], axis=0)
+    z_ub = np.max([_div_dir(x, y, 1.0) for x, y in pairs], axis=0)
 
     # Output star: z variables only
     new_V = np.hstack([np.zeros((N, n + 1)), np.eye(N)])
@@ -2626,7 +3154,8 @@ def _mul_sets_by_constant(input_sets: List, scale: np.ndarray) -> List:
     Element-wise multiplication of sets by a constant scale vector.
 
     Used for ONNX Mul/Div operations where one operand is a frozen parameter
-    (constant). Division is handled by the caller passing 1/constant.
+    (constant). Division of non-Box sets is handled by
+    :func:`_div_sets_by_constant` passing 1/constant.
 
     For Star/ImageStar: V_out = diag(scale) * V. Constraints (C, d,
     predicate_lb, predicate_ub) are unchanged because the predicate
@@ -2724,11 +3253,11 @@ def _mul_sets_by_constant(input_sets: List, scale: np.ndarray) -> List:
 
         elif isinstance(s, Box):
             # Box: handle negative scale by taking min/max
-            scale_col = scale.reshape(-1, 1)
-            prod_lb = scale_col * s.lb
-            prod_ub = scale_col * s.ub
-            new_lb = np.minimum(prod_lb, prod_ub)
-            new_ub = np.maximum(prod_lb, prod_ub)
+            scale_col = np.asarray(scale, dtype=np.float64).reshape(-1, 1)
+            new_lb = np.minimum(_mul_dir(scale_col, s.lb, -1.0),
+                                _mul_dir(scale_col, s.ub, -1.0))
+            new_ub = np.maximum(_mul_dir(scale_col, s.lb, 1.0),
+                                _mul_dir(scale_col, s.ub, 1.0))
             out = Box(new_lb, new_ub)
             output_sets.append(out)
 
@@ -2740,13 +3269,47 @@ def _mul_sets_by_constant(input_sets: List, scale: np.ndarray) -> List:
     return output_sets
 
 
+def _div_sets_by_constant(input_sets: List, divisor: np.ndarray) -> List:
+    """Element-wise division of sets by a constant (ONNX Div whose second
+    operand is a parameter).
+
+    A Box is divided directly, each quotient rounded outward (the scale by
+    ``1 / divisor`` would round the reciprocal to nearest, which the outward
+    product does not cover, so the Box could miss the exact quotient). Other
+    set types are scaled by ``1 / divisor`` (:func:`_mul_sets_by_constant`).
+
+    Args:
+        input_sets: List of input sets
+        divisor: Divisor, scalar or one entry per flat dimension
+
+    Returns:
+        List of output sets
+    """
+    divisor = np.asarray(divisor, dtype=np.float64).flatten()
+    if not any(isinstance(s, Box) for s in input_sets):
+        return _mul_sets_by_constant(input_sets, 1.0 / divisor)
+    if np.any(divisor == 0):
+        raise NotImplementedError("Div by a constant with a zero entry")
+    output_sets = []
+    for s in input_sets:
+        if isinstance(s, Box):
+            c = divisor.reshape(-1, 1)
+            q_lo = np.minimum(_div_dir(s.lb, c, -1.0), _div_dir(s.ub, c, -1.0))
+            q_hi = np.maximum(_div_dir(s.lb, c, 1.0), _div_dir(s.ub, c, 1.0))
+            output_sets.append(Box(q_lo, q_hi))
+        else:
+            output_sets.extend(_mul_sets_by_constant([s], 1.0 / divisor))
+    return output_sets
+
+
 def _concat_sets(set_lists: List[List], axis: int) -> List:
     """
     Concatenate multiple lists of sets along a specified axis.
 
-    All branches in a single reachability pass share the same predicate
-    variables (same C, d, pred bounds). Concat is just vertical stacking
-    of V matrices -- no Minkowski sum needed.
+    Inputs whose predicate systems are identical share predicate
+    variables and are stacked exactly; distinct systems are joined
+    block-diagonally (:func:`_join_star_systems`). The pieces of the input
+    lists are combined as in :func:`_add_sets` (:func:`_pair_set_lists`).
 
     Args:
         set_lists: List of lists of sets, one list per concat input,
@@ -2757,25 +3320,10 @@ def _concat_sets(set_lists: List[List], axis: int) -> List:
     Returns:
         List of concatenated output sets
     """
-    if not set_lists or not any(set_lists):
-        return []
-
-    # Determine max length across input lists for broadcasting
-    max_len = max(len(sl) for sl in set_lists)
-
-    # Broadcast: if a list has length 1 and others have length N, repeat it
-    broadcast_lists = []
-    for sl in set_lists:
-        if len(sl) == 1 and max_len > 1:
-            broadcast_lists.append(sl * max_len)
-        else:
-            broadcast_lists.append(sl)
-
     output_sets = []
 
-    for idx in range(max_len):
-        # Collect one set from each broadcast list at this index
-        sets_to_concat = [bl[idx] for bl in broadcast_lists]
+    for combo in _pair_set_lists(set_lists):
+        sets_to_concat = list(combo)
 
         first = sets_to_concat[0]
 
@@ -2913,13 +3461,30 @@ def _handle_batchnorm_flat(
     scale, shift = _get_bn_params(module)
     bshape = [1] * len(shape)
     bshape[1] = C
-    full_scale = np.broadcast_to(
-        np.asarray(scale, dtype=np.float64).reshape(bshape), shape).reshape(-1)
-    full_shift = np.broadcast_to(
-        np.asarray(shift, dtype=np.float64).reshape(bshape), shape).reshape(-1)
-    W = np.diag(full_scale)
-    b = full_shift.reshape(-1, 1)
-    return [s.affine_map(W, b) for s in input_sets]
+
+    def _expand(v):
+        return np.broadcast_to(
+            np.asarray(v, dtype=np.float64).reshape(bshape), shape).reshape(-1)
+
+    full_scale = _expand(scale)
+    full_shift = _expand(shift)
+    # A Box takes the elementwise map with the rounding margin of
+    # batchnorm_box, which also covers the rounding of the folded scale and
+    # shift against the real-number layer (affine_map is rigorous only for
+    # the already-rounded ones).
+    full_fold_mag = (_expand(_bn_fold_mag(module, scale))
+                     if any(isinstance(s, Box) for s in input_sets) else None)
+    W = None
+    output_sets = []
+    for s in input_sets:
+        if isinstance(s, Box):
+            output_sets.append(_batchnorm_single_box(
+                s, full_scale, full_shift, full_fold_mag))
+            continue
+        if W is None:
+            W = np.diag(full_scale)
+        output_sets.append(s.affine_map(W, full_shift.reshape(-1, 1)))
+    return output_sets
 
 
 def _handle_softmax_flat(
@@ -3063,13 +3628,18 @@ def _handle_onnx_concat(
             if first_set is None and len(sl) > 0:
                 first_set = sl[0]
         elif template is not None:
+            # An operand with no sets must fold to a constant tensor;
+            # skipping it would undersize the output and shift the operands
+            # after it.
             try:
-                const = _get_parameter(graph_module, arg)
-            except Exception:  # noqa: BLE001 - not a resolvable constant; skip
-                continue
-            const_np = np.asarray(
-                const.numpy() if hasattr(const, 'numpy') else const,
-                dtype=np.float64)
+                const_np = np.asarray(
+                    _get_parameter(graph_module, arg).numpy(),
+                    dtype=np.float64)
+            except Exception as exc:  # noqa: BLE001 — re-raised below
+                raise NotImplementedError(
+                    f"Concat {node.name!r}: operand "
+                    f"{getattr(arg, 'name', arg)!r} has no reachable sets "
+                    f"and could not be folded to a constant") from exc
             set_lists.append([_const_set_like(template, const_np.reshape(-1))])
             shp = (node_shapes or {}).get(arg.name)
             shapes.append(shp if shp is not None else tuple(const_np.shape))
@@ -3118,10 +3688,10 @@ def _slice_set(s: Any, slices_by_axis: Dict[int, slice]) -> Any:
     variables alpha are not affected.
 
     Args:
-        s: Input set (Star, ImageStar, Zono, Box)
+        s: Input set (Star, ImageStar, Zono, ImageZono, Box)
         slices_by_axis: Dict mapping axis (int) to Python slice object.
             For flat sets (Star, Zono, Box), axis 0 is the dimension axis.
-            For ImageStar, axes are in HWC format: 0=H, 1=W, 2=C.
+            For ImageStar/ImageZono, axes are in HWC format: 0=H, 1=W, 2=C.
 
     Returns:
         New set of the same type with sliced dimensions
@@ -3138,6 +3708,24 @@ def _slice_set(s: Any, slices_by_axis: Dict[int, slice]) -> Any:
         c_out = V_out.shape[2]
         return ImageStar(
             V_out, s.C, s.d, s.predicate_lb, s.predicate_ub,
+            h_out, w_out, c_out
+        )
+
+    elif isinstance(s, ImageZono):
+        # Before the Zono branch (ImageZono is a Zono subclass): c and V
+        # are flat in HWC order, so view them as (H, W, C, ...) and slice
+        # the first three axes, as for ImageStar.
+        h, w, c = s.height, s.width, s.num_channels
+        n_gen = s.V.shape[1]
+        idx = [slice(None)] * 4
+        for ax, sl in slices_by_axis.items():
+            if ax < 3:
+                idx[ax] = sl
+        c_img = s.c.reshape(h, w, c, 1)[tuple(idx)]
+        V_img = s.V.reshape(h, w, c, n_gen)[tuple(idx)]
+        h_out, w_out, c_out = c_img.shape[:3]
+        return ImageZono(
+            c_img.reshape(-1, 1), V_img.reshape(-1, n_gen),
             h_out, w_out, c_out
         )
 

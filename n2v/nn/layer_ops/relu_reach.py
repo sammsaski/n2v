@@ -17,6 +17,7 @@ from typing import List, Optional
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from n2v.sets import Star, Zono, Hexatope, Octatope
 from n2v.sets.image_star import ImageStar
+from n2v.sets.image_zono import ImageZono
 
 # Profiler hooks (no-op when profiling is disabled)
 from n2v.profiling import count, is_enabled
@@ -26,8 +27,178 @@ from n2v.nn.layer_ops._profiling import (
     record_relax_outcome,
 )
 from n2v.utils.lp_solver_enum import LPSolver
+from n2v.utils.lpsolver import LPFailure, _bound_lp_solver, _lp_pad
+from n2v.utils.ns_certificate import outward_interval_bounds, outward_interval_slack
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Neuron phase decisions from LP bounds (shared with leakyrelu_reach and
+# sign_reach)
+# ============================================================================
+
+# SOUNDNESS: an LP optimum that decides a neuron's phase is padded outward by
+# _lp_pad and solved with HiGHS (_bound_lp_solver); both live in
+# n2v.utils.lpsolver, shared with every other op that uses LP optima as bounds.
+
+
+def _intersect_precomputed(lb, ub, precomputed_bounds, pad: bool = False):
+    """Intersect a star's interval enclosure ``(lb, ub)`` with precomputed
+    pre-activation bounds (from the bound pre-pass, or a caller such as
+    nn/bab.py). Returns ``(lb, ub)`` in the shape of the inputs.
+
+    ``pad=True`` first widens the precomputed bounds by the LP pad (the exact
+    paths, where they only save LPs); the approximate paths use them as given.
+
+    Both enclosures contain every point of the star, so they have one entry
+    per neuron and overlap up to rounding. An array of another size means the
+    bounds belong to another node, and raises (numpy would broadcast a size-1
+    array to every neuron). An interval that misses the star's own enclosure
+    means the bounds describe other neurons (e.g. a pre-pass that laid an
+    image out in another row order) or that the star is empty. Either way the
+    precomputed bounds of the whole layer are dropped, with a warning, and the
+    star's own enclosure is used, which is sound. A NaN bound is ignored.
+    """
+    shape = np.shape(lb)
+    lb = np.asarray(lb, dtype=np.float64).reshape(-1)
+    ub = np.asarray(ub, dtype=np.float64).reshape(-1)
+    pre_lb, pre_ub = precomputed_bounds
+    pre_lb = np.asarray(pre_lb, dtype=np.float64).reshape(-1)
+    pre_ub = np.asarray(pre_ub, dtype=np.float64).reshape(-1)
+    if pre_lb.size != lb.size or pre_ub.size != lb.size:
+        raise ValueError(
+            f"precomputed bounds have {pre_lb.size}/{pre_ub.size} entries but "
+            f"the layer has {lb.size} neurons")
+    if pad:
+        pre_lb = pre_lb - _lp_pad(pre_lb)
+        pre_ub = pre_ub + _lp_pad(pre_ub)
+    new_lb = np.fmax(lb, pre_lb)
+    new_ub = np.fmin(ub, pre_ub)
+    disjoint = new_lb > new_ub + _lp_pad(np.fmax(np.abs(new_lb), np.abs(new_ub)))
+    if np.any(disjoint):
+        logger.warning(
+            f"precomputed bounds miss the star's own enclosure at "
+            f"{int(np.count_nonzero(disjoint))} of {lb.size} neurons (the "
+            f"bounds describe other neurons, or the star is empty); "
+            f"ignoring them for this layer")
+        return lb.reshape(shape), ub.reshape(shape)
+    return new_lb.reshape(shape), new_ub.reshape(shape)
+
+
+def _certified_empty(I: Star, lp_solver: "LPSolver | str") -> bool:
+    """True only if ``I`` is shown empty by the certified emptiness check
+    (``Star.is_empty_set``, i.e. ``confirm_infeasible``). A solver failure is
+    not evidence of emptiness and gives False."""
+    try:
+        return I.is_empty_set(lp_solver)
+    except LPFailure as e:
+        logger.debug(f'emptiness check undecided ({e}); keeping the star')
+        return False
+
+
+def _phase_range(I: Star, index: int, lp_solver: "LPSolver | str"):
+    """Enclosure of neuron ``index`` over ``I`` for deciding its phase.
+
+    Returns ``None`` when ``I`` is certified empty. Otherwise returns
+    ``(lo, hi, pad_lo, pad_hi)`` with ``lo <= x_index <= hi`` on ``I``:
+
+    - a row with no nonzero generator is the exact constant, with zero pad;
+    - otherwise the HiGHS range, padded outward by ``pad_lo`` / ``pad_hi``;
+    - if the LP returns no optimum (any non-optimal status, including a
+      presolve 'infeasible' on a feasible tiny-scale system) and ``I`` is not
+      certified empty, the star's rigorous interval bound, with zero pad. The
+      neuron is then undecided, never dropped.
+
+    ``pad_lo`` / ``pad_hi`` let a caller tell a bound that is within its own
+    pad of 0 (the raw optimum's sign is not reliable) from a decided one.
+    """
+    row = I.V[index, 1:]
+    if not np.any(row != 0):
+        c = float(I.V[index, 0])
+        return c, c, 0.0, 0.0
+
+    solver = _bound_lp_solver(lp_solver)
+    xmin, xmax = I.get_range(index, solver)
+    if xmin is None or xmax is None:
+        if _certified_empty(I, solver):
+            return None
+        if I.predicate_lb is None or I.predicate_ub is None:
+            return -np.inf, np.inf, 0.0, 0.0
+        lo, hi = I.estimate_range(index)
+        return lo, hi, 0.0, 0.0
+
+    pad_lo, pad_hi = _lp_pad(xmin), _lp_pad(xmax)
+    return xmin - pad_lo, xmax + pad_hi, pad_lo, pad_hi
+
+
+def _phase_sliver_star(I: Star, index: int, row_scale: float, width: float) -> Star:
+    """``I`` with row ``index`` scaled by ``row_scale``, plus one new predicate
+    variable ``t`` in ``[min(0, width), max(0, width)]`` added to that row.
+
+    This is how a neuron whose LP bound lies within its pad of 0 is kept in ONE
+    star: the output row is the stable-phase map of ``x_index`` plus ``t``,
+    which covers the other phase over the ``|width|``-wide band the LP cannot
+    rule out (e.g. ReLU with raw min in ``[-pad, pad)``: ``y = x + t``,
+    ``t in [0, -lo]``, since ``relu(x) - x = max(0, -x) <= -lo``). The result
+    over-approximates by at most ``|width|`` in that one coordinate.
+    """
+    t_lb, t_ub = min(0.0, width), max(0.0, width)
+
+    new_V = np.hstack([I.V, np.zeros((I.dim, 1))])
+    new_V[index, :-1] = row_scale * new_V[index, :-1]
+    new_V[index, -1] = 1.0
+
+    new_C = np.hstack([I.C, np.zeros((I.C.shape[0], 1))])
+    new_d = I.d
+    if I.predicate_lb is not None and I.predicate_ub is not None:
+        new_pred_lb = np.vstack([I.predicate_lb, [[t_lb]]])
+        new_pred_ub = np.vstack([I.predicate_ub, [[t_ub]]])
+    else:
+        # no predicate box to carry the bounds of t: add them as rows
+        rows = np.zeros((2, I.nVar + 1))
+        rows[0, -1] = -1.0
+        rows[1, -1] = 1.0
+        new_C = np.vstack([new_C, rows])
+        new_d = np.vstack([I.d, [[-t_lb], [t_ub]]])
+        new_pred_lb = new_pred_ub = None
+
+    if I.Z is not None:
+        c = I.Z.c.copy()
+        c[index] = row_scale * c[index] + 0.5 * (t_lb + t_ub)
+        V_z = I.Z.V.copy()
+        V_z[index, :] = row_scale * V_z[index, :]
+        gen = np.zeros((I.dim, 1))
+        gen[index] = 0.5 * (t_ub - t_lb)
+        new_Z = Zono(c, np.hstack([V_z, gen]))
+    else:
+        new_Z = None
+
+    return Star(new_V, new_C, new_d, new_pred_lb, new_pred_ub, outer_zono=new_Z)
+
+
+def _thin_neuron_side(I: Star, index: int, xmin: float, xmax: float,
+                      pad_lo: float, pad_hi: float,
+                      lp_solver: "LPSolver | str") -> Optional[int]:
+    """Stable side of a neuron whose whole padded range lies within the pads.
+
+    Such a neuron is split (exact), but when the raw LP range is on one side
+    of 0 the other child is usually empty and would otherwise be carried to
+    the output. Returns +1 (active) / -1 (inactive) only when ``I`` intersected
+    with the other side is certified empty (``_certified_empty``), else None.
+    """
+    solver = _bound_lp_solver(lp_solver)
+    c = I.V[index, 0]
+    row = I.V[index, 1:I.nVar + 1].reshape(1, -1)
+    for side, raw_on_side, a, b in ((1, xmin + pad_lo >= 0, row, -c),
+                                    (-1, xmax - pad_hi <= 0, -row, c)):
+        if raw_on_side:
+            # the other side: row * alpha <= -c (x <= 0) or >= -c (x >= 0)
+            other = Star(I.V, np.vstack([I.C, a]), np.vstack([I.d, [[b]]]),
+                         I.predicate_lb, I.predicate_ub)
+            if _certified_empty(other, solver):
+                return side
+    return None
 
 
 def _preserve_imagestar_type(original: Star, new_star: Star) -> Star:
@@ -58,12 +229,19 @@ def relu_star_exact(
     """
     Exact reachability for ReLU using Star sets.
 
+    The result is exact up to documented slivers: a neuron with one LP bound
+    within the LP pad of 0 and the other outside it is kept in one star with
+    an extra predicate variable of width at most about 2e-7 * (1 + |bound|)
+    (``_step_relu``).
+
     Args:
         input_stars: List of input Star sets
-        lp_solver: LP solver to use
+        lp_solver: LP solver to use (the phase LPs use HiGHS, see
+            ``_bound_lp_solver``)
         verbose: 'display' to show progress
         parallel: Enable parallel Star processing (None = use global config)
         n_workers: Number of parallel workers (None = auto-detect)
+        precomputed_bounds: Optional (lb, ub) from the bound pre-pass
 
     Returns:
         List of output Star sets (may be more than input due to splitting)
@@ -102,12 +280,15 @@ def _relu_single_star_exact(
     Algorithm:
     1. Estimate ranges for all dimensions
     2. Reset neurons that are always ≤ 0
-    3. Split neurons that cross 0 boundary
+    3. Split neurons that cross 0 boundary (``_step_relu``)
 
     Args:
         I: Input Star
         lp_solver: LP solver
         verbose: Display option
+        precomputed_bounds: Optional (lb, ub) from the bound pre-pass. They
+            only save LPs here: each is widened by the LP pad first (see
+            below), so a neuron they leave near 0 goes to ``_step_relu``.
 
     Returns:
         List of output Stars
@@ -121,12 +302,13 @@ def _relu_single_star_exact(
     if lb is None or ub is None:
         return []
 
-    # Refine bounds with precomputed Zono pre-pass bounds if available
+    # Refine bounds with precomputed pre-pass bounds if available
     if precomputed_bounds is not None:
-        pre_lb, pre_ub = precomputed_bounds
-        # Intersect: take the tighter of the two bounds
-        lb = np.maximum(lb, pre_lb.reshape(lb.shape))
-        ub = np.minimum(ub, pre_ub.reshape(ub.shape))
+        # SOUNDNESS: the pre-pass bounds (IBP / zonotope) are round-to-nearest
+        # and can sit ulps inside the true range (measured: IBP upper bound 0.0
+        # for a true max of +2.8e-17, which zeroed the neuron). Widen them by
+        # the LP pad before they may decide a phase, then intersect.
+        lb, ub = _intersect_precomputed(lb, ub, precomputed_bounds, pad=True)
 
     # Neurons always inactive (ub <= 0) - reset to 0
     reset_map = np.where(ub.flatten() <= 0)[0]
@@ -173,19 +355,37 @@ def _step_relu(I: Star, index: int, lp_solver: "LPSolver | str" = LPSolver.DEFAU
     """
     Split a single neuron in ReLU (exact step reach).
 
+    The phase comes from the padded LP range (``_phase_range``):
+
+    - padded min >= 0 / padded max <= 0: stable, one exact star;
+    - one raw bound within its pad of 0 (the LP cannot tell the sign of a
+      band that thin) and the other outside its pad: one star with a sliver
+      variable covering the band (``_phase_sliver_star``), not a split -- a
+      bound of exactly 0 is common (stacked ReLUs, identity layers, zero
+      biases) and splitting on it doubled the star count per such neuron;
+    - otherwise two stars, x <= 0 (zeroed) and x >= 0, which cover ``I``.
+      This includes a neuron whose whole range lies within the pads: the
+      sliver there would be decoupled from x and many times wider than the
+      range (a loss of exactness that shows on small-scale layers), while
+      the split is exact. If the raw range is on one side of 0, the side is
+      kept without a split when the other child is certified empty
+      (``_thin_neuron_side``).
+
     Args:
         I: Input Star
         index: Neuron index to split
-        lp_solver: LP solver
+        lp_solver: LP solver (the phase LPs use HiGHS, see
+            ``_bound_lp_solver``)
 
     Returns:
-        List of 1 or 2 Star sets
+        List of 0, 1 or 2 Star sets (0 only when ``I`` is certified empty)
     """
-    # Get bounds of neuron
-    xmin, xmax = I.get_range(index, lp_solver)
-
-    if xmin is None or xmax is None:
+    rng = _phase_range(I, index, lp_solver)
+    if rng is None:
         return []
+    xmin, xmax, pad_lo, pad_hi = rng
+    max_in_band = xmax <= 2.0 * pad_hi
+    min_in_band = -xmin <= 2.0 * pad_lo
 
     if xmin >= 0:
         # Always active (the exact LP resolved an estimated-unstable neuron)
@@ -195,19 +395,31 @@ def _step_relu(I: Star, index: int, lp_solver: "LPSolver | str" = LPSolver.DEFAU
     elif xmax <= 0:
         # Always inactive - zero out (estimated-unstable resolved by exact LP)
         count("n_resolved", 1)
-        new_V = I.V.copy()
-        new_V[index, :] = 0
+        return [_reset_star_rows(I, np.array([index]))]
 
-        if I.Z is not None:
-            new_c = I.Z.c.copy()
-            new_c[index] = 0
-            new_V_zono = I.Z.V.copy()
-            new_V_zono[index, :] = 0
-            new_Z = Zono(new_c, new_V_zono)
-        else:
-            new_Z = None
+    side = None
+    if max_in_band and min_in_band:
+        side = _thin_neuron_side(I, index, xmin, xmax, pad_lo, pad_hi, lp_solver)
 
-        return [Star(new_V, I.C, I.d, I.predicate_lb, I.predicate_ub, outer_zono=new_Z)]
+    if side == 1:
+        count("n_resolved", 1)
+        return [I]
+
+    elif side == -1:
+        count("n_resolved", 1)
+        return [_reset_star_rows(I, np.array([index]))]
+
+    elif max_in_band and not min_in_band:
+        # Raw max within its pad of 0: zero the row and add y in [0, xmax],
+        # which covers relu(x) whatever the sign of the true max.
+        count("n_resolved", 1)
+        return [_phase_sliver_star(I, index, 0.0, xmax)]
+
+    elif min_in_band and not max_in_band:
+        # Raw min within its pad of 0: y = x + t with t in [0, -xmin], which
+        # covers relu(x) - x = max(0, -x) whatever the sign of the true min.
+        count("n_resolved", 1)
+        return [_phase_sliver_star(I, index, 1.0, -xmin)]
 
     else:
         # Split into two cases
@@ -256,11 +468,21 @@ def relu_star_approx(
     Args:
         input_stars: List of input Stars
         relax_factor: 0 = exact, 1 = maximum relaxation
-        lp_solver: LP solver
+        lp_solver: LP solver (LPs that decide a phase use HiGHS, see
+            ``_bound_lp_solver``)
         relax_method: Relaxation strategy - 'standard', 'range', 'area', 'bound'
+        precomputed_bounds: Optional (lb, ub) of the pre-activations. Unlike
+            the exact path, the approximate paths use them as given (they may
+            decide a phase), so they must enclose the true range; nn/bab.py
+            relies on this to pin a forced neuron's bound to exactly 0. See
+            ``_intersect_precomputed`` for bounds that cannot belong to the
+            layer (another size raises; missing the star's enclosure drops
+            them).
 
     Returns:
-        List of output Stars (no splitting, same count as input)
+        List of output Stars: one per input star for ``relax_factor > 0``.
+        ``relax_factor == 0`` is the exact reach (``relu_star_exact``),
+        which splits and can return several stars per input star.
     """
     if relax_factor == 0.0:
         return relu_star_exact(input_stars, lp_solver, precomputed_bounds=precomputed_bounds)
@@ -343,9 +565,7 @@ def _relu_single_star_approx(
 
     # Refine bounds with precomputed Zono pre-pass bounds
     if precomputed_bounds is not None:
-        pre_lb, pre_ub = precomputed_bounds
-        lb_est = np.maximum(lb_est, pre_lb.flatten())
-        ub_est = np.minimum(ub_est, pre_ub.flatten())
+        lb_est, ub_est = _intersect_precomputed(lb_est, ub_est, precomputed_bounds)
 
     # Classify neurons
     reset_map = np.where(ub_est <= 0)[0]
@@ -484,14 +704,23 @@ def relu_zono_approx(input_zonos: List[Zono]) -> List[Zono]:
         input_zonos: List of input Zonotopes
 
     Returns:
-        List of output Zonotopes (over-approximation)
+        List of output Zonotopes (over-approximation); an ImageZono input
+        gives an ImageZono output
     """
     record_layer_neurons(input_zonos)  # static neuron count, once per layer
 
     output_zonos = []
 
     for zono in input_zonos:
-        output_zonos.append(_relu_single_zono(zono))
+        result = _relu_single_zono(zono)
+        # SOUNDNESS: ReLU is element-wise, so the rows stay in the input's
+        # (H, W, C) order. Returned as a plain Zono, a following Flatten
+        # skipped its HWC -> CHW reorder and the next Linear read the wrong
+        # neurons (measured: a false UNSAT).
+        if isinstance(zono, ImageZono):
+            result = ImageZono(result.c, result.V, zono.height, zono.width,
+                               zono.num_channels)
+        output_zonos.append(result)
 
     return output_zonos
 
@@ -509,50 +738,51 @@ def _relu_single_zono(I: Zono) -> Zono:
         Output Zonotope (over-approximation)
     """
     lb, ub = I.get_bounds()
+    lbf, ubf = lb.flatten(), ub.flatten()
+    inactive = ubf <= 0
+    # ~(lbf >= 0) instead of (lbf < 0): identical for finite bounds, but a NaN
+    # lower bound (inf-inf upstream overflow) must land in CROSSING -- where
+    # the NaN lam/err arithmetic poisons the output loudly, matching the old
+    # per-neuron loop's else-branch -- not in the stably-active catch-all,
+    # which would silently pass a possibly-negative neuron through as identity
+    # (an under-approximation on the sound-reach side).
+    crossing = (~inactive) & ~(lbf >= 0)
 
-    # Profiler: per-zono classification + relaxation, matching the loop logic
-    # below (ub<=0 inactive; else lb>=0 active; else crossing). Guarded because
-    # these two boolean passes + reductions exist ONLY for profiling -- the
-    # per-neuron loop below recomputes classification itself and never reads
-    # them -- so the disabled path must pay nothing (cf. affine_map).
     if is_enabled():
-        _inactive = ub.flatten() <= 0
-        _active = (~_inactive) & (lb.flatten() >= 0)
-        n_inactive = int(_inactive.sum())
-        n_unstable = I.dim - n_inactive - int(_active.sum())
+        n_inactive = int(inactive.sum())
+        n_unstable = int(crossing.sum())
         record_classification(I.dim, n_inactive, n_unstable)
         count("n_relaxed", n_unstable)
 
     new_c = I.c.copy()
     new_V = I.V.copy()
-    n_orig_generators = I.V.shape[1]  # Track original number of generators
 
-    for i in range(I.dim):
-        li, ui = lb[i, 0], ub[i, 0]
+    if inactive.any():
+        new_c[inactive] = 0.0
+        new_V[inactive, :] = 0.0
 
-        if ui <= 0:
-            # Always inactive
-            new_c[i] = 0
-            new_V[i, :] = 0
-
-        elif li >= 0:
-            # Always active - no change
-            pass
-
-        else:
-            # Crosses zero - use over-approximation
-            lambda_val = ui / (ui - li) if (ui - li) != 0 else 0
-
-            new_c[i] = lambda_val * I.c[i, 0] + 0.5 * (1 - lambda_val) * ui
-            # Only modify original generators, not error generators added by previous neurons
-            new_V[i, :n_orig_generators] = lambda_val * I.V[i, :]
-
-            # Add error term as new generator
-            error = 0.5 * (1 - lambda_val) * ui
-            if error > 1e-10:
-                error_gen = np.zeros((I.dim, 1))
-                error_gen[i] = error
-                new_V = np.hstack([new_V, error_gen])
+    # Crossing neurons, vectorized (semantics identical to the former
+    # per-neuron loop): lam-scaled row + center shift, one error generator per
+    # neuron appended in neuron order -- a SINGLE hstack instead of one
+    # whole-matrix copy per neuron.
+    ci = np.flatnonzero(crossing)
+    if ci.size:
+        li, ui = lbf[ci], ubf[ci]
+        den = ui - li
+        lam = np.where(den != 0.0, ui / np.where(den != 0.0, den, 1.0), 0.0)
+        err = 0.5 * (1.0 - lam) * ui
+        new_c[ci, 0] = lam * I.c[ci, 0] + err
+        new_V[ci, :] = lam[:, None] * I.V[ci, :]
+        # SOUNDNESS: the error generator IS the over-approximation of the
+        # ReLU graph for a crossing neuron; dropping it whenever it is merely
+        # small (the old ``err > 1e-10``) under-approximated the set (measured:
+        # false UNSAT). Drop only the exact zero case.
+        keep = err > 0.0
+        if keep.any():
+            k = int(keep.sum())
+            E = np.zeros((I.dim, k))
+            E[ci[keep], np.arange(k)] = err[keep]
+            new_V = np.hstack([new_V, E])
 
     return Zono(new_c, new_V)
 
@@ -619,9 +849,7 @@ def _relu_single_star_relax_range(
 
     # Refine bounds with precomputed Zono pre-pass bounds if available
     if precomputed_bounds is not None:
-        pre_lb, pre_ub = precomputed_bounds
-        lb = np.maximum(lb, pre_lb.flatten())
-        ub = np.minimum(ub, pre_ub.flatten())
+        lb, ub = _intersect_precomputed(lb, ub, precomputed_bounds)
 
     # Step 2: Find and reset neurons with ub <= 0
     map1 = np.where(ub <= 0)[0]
@@ -660,7 +888,7 @@ def _relu_single_star_relax_range(
     ub1 = ub[map22]
 
     # Step 5: Optimize upper bounds of selected neurons
-    xmax = _get_maxs(I, map21, lp_solver) if len(map21) > 0 else np.array([])
+    xmax = _get_maxs(I, map21, lp_solver, ub[map21]) if len(map21) > 0 else np.array([])
 
     # Find neurons that are actually inactive after optimization
     map3 = np.where(xmax <= 0)[0] if len(xmax) > 0 else np.array([], dtype=int)
@@ -675,7 +903,7 @@ def _relu_single_star_relax_range(
     map6 = map21[map5] if len(map5) > 0 else np.array([], dtype=int)
     xmax1 = xmax[map5] if len(map5) > 0 else np.array([])
 
-    xmin = _get_mins(I, map6, lp_solver) if len(map6) > 0 else np.array([])
+    xmin = _get_mins(I, map6, lp_solver, lb[map6]) if len(map6) > 0 else np.array([])
 
     map7 = np.where(xmin < 0)[0] if len(xmin) > 0 else np.array([], dtype=int)
     map8 = map6[map7] if len(map7) > 0 else np.array([], dtype=int)
@@ -734,9 +962,7 @@ def _relu_single_star_relax_area(
 
     # Refine bounds with precomputed Zono pre-pass bounds if available
     if precomputed_bounds is not None:
-        pre_lb, pre_ub = precomputed_bounds
-        lb = np.maximum(lb, pre_lb.flatten())
-        ub = np.minimum(ub, pre_ub.flatten())
+        lb, ub = _intersect_precomputed(lb, ub, precomputed_bounds)
 
     # Reset neurons with ub <= 0
     map1 = np.where(ub <= 0)[0]
@@ -775,7 +1001,7 @@ def _relu_single_star_relax_area(
     ub1 = ub[map22]
 
     # Optimize selected neurons (same process as relax_range)
-    xmax = _get_maxs(I, map21, lp_solver) if len(map21) > 0 else np.array([])
+    xmax = _get_maxs(I, map21, lp_solver, ub[map21]) if len(map21) > 0 else np.array([])
 
     map3 = np.where(xmax <= 0)[0] if len(xmax) > 0 else np.array([], dtype=int)
     map4 = map21[map3] if len(map3) > 0 else np.array([], dtype=int)
@@ -787,7 +1013,7 @@ def _relu_single_star_relax_area(
     map6 = map21[map5] if len(map5) > 0 else np.array([], dtype=int)
     xmax1 = xmax[map5] if len(map5) > 0 else np.array([])
 
-    xmin = _get_mins(I, map6, lp_solver) if len(map6) > 0 else np.array([])
+    xmin = _get_mins(I, map6, lp_solver, lb[map6]) if len(map6) > 0 else np.array([])
 
     map7 = np.where(xmin < 0)[0] if len(xmin) > 0 else np.array([], dtype=int)
     map8 = map6[map7] if len(map7) > 0 else np.array([], dtype=int)
@@ -844,9 +1070,7 @@ def _relu_single_star_relax_bound(
 
     # Refine bounds with precomputed Zono pre-pass bounds if available
     if precomputed_bounds is not None:
-        pre_lb, pre_ub = precomputed_bounds
-        lb = np.maximum(lb, pre_lb.flatten())
-        ub = np.minimum(ub, pre_ub.flatten())
+        lb, ub = _intersect_precomputed(lb, ub, precomputed_bounds)
 
     # Reset neurons with ub <= 0
     map1 = np.where(ub <= 0)[0]
@@ -891,7 +1115,7 @@ def _relu_single_star_relax_bound(
 
     # Optimize upper bounds via LP for the selected neurons.
     if len(map21) > 0:
-        xmax = _get_maxs(I, map21, lp_solver)
+        xmax = _get_maxs(I, map21, lp_solver, ub[map21])
         map3 = np.where(xmax <= 0)[0]
         map4 = map21[map3] if len(map3) > 0 else np.array([], dtype=int)
     else:
@@ -909,7 +1133,7 @@ def _relu_single_star_relax_bound(
 
     # Optimize lower bounds via LP for the selected neurons.
     if len(map23) > 0:
-        xmin = _get_mins(I, map23, lp_solver)
+        xmin = _get_mins(I, map23, lp_solver, lb[map23])
         map9 = np.where(xmin >= 0)[0]
         proven_active = map23[map9] if len(map9) > 0 else np.array([], dtype=int)
     else:
@@ -1022,11 +1246,27 @@ def _apply_triangle_approx_multi(
     C2 = np.hstack([I.V[indices, 1:n+1], -np.eye(m)])
     d2 = -I.V[indices, 0:1]
 
-    # Case 3: y[i] <= (ub[i]/(ub[i]-lb[i]))*(x[i]-lb[i])
-    a = ubs / (ubs - lbs + 1e-10)  # Avoid division by zero
+    # Case 3: y[i] <= a[i]*(x[i]-lb[i]), a[i] = ub[i]/(ub[i]-lb[i])
+    # SOUNDNESS: the face must pass on or above the vertex (u, u). Any slope
+    # a >= u/(u-l) does (a(u-l) >= u at x=u, and a(x-l) >= 0 for x >= l), so
+    # the rounded quotient is raised by 8 units of roundoff (2^-50 relative),
+    # which covers the rounding of u - l and of the division. Callers pass
+    # only crossing neurons (l < 0 < u), so u - l > 0 needs no guard; the old
+    # ``+ 1e-10`` in the denominator lowered the face below (u, u) and cut
+    # true outputs off (measured: a false UNSAT on a 1e-4-wide neuron).
+    lbs = np.asarray(lbs, dtype=np.float64).reshape(-1)
+    ubs = np.asarray(ubs, dtype=np.float64).reshape(-1)
+    a = (ubs / (ubs - lbs)) * (1.0 + 2.0 ** -50)
     b = a * lbs
-    C3 = np.hstack([-a.reshape(-1, 1) * I.V[indices, 1:n+1], np.eye(m)])
-    d3 = (a * I.V[indices, 0] - b).reshape(-1, 1)
+    G3 = a.reshape(-1, 1) * I.V[indices, 1:n+1]
+    C3 = np.hstack([-G3, np.eye(m)])
+    # The row is stored rounded (a*c - a*l and each a*v_j): move its right-hand
+    # side out by a rigorous bound on that rounding over the predicate box.
+    d3 = a * I.V[indices, 0] - b
+    if I.predicate_lb is not None and I.predicate_ub is not None:
+        d3 = d3 + outward_interval_slack(np.abs(a * I.V[indices, 0]) + np.abs(b),
+                                         G3, I.predicate_lb, I.predicate_ub)
+    d3 = d3.reshape(-1, 1)
 
     new_C = np.vstack([C0, C1, C2, C3])
     new_d = np.vstack([d0, d1, d2, d3])
@@ -1038,50 +1278,73 @@ def _apply_triangle_approx_multi(
     return Star(new_V, new_C, new_d, new_pred_lb, new_pred_ub, outer_zono=None)
 
 
-def _get_maxs(star: Star, indices: np.ndarray, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> np.ndarray:
+def _get_maxs(
+    star: Star,
+    indices: np.ndarray,
+    lp_solver: "LPSolver | str",
+    fallback: np.ndarray,
+) -> np.ndarray:
     """
-    Get maximum values for multiple state dimensions.
+    Sound upper bounds for multiple state dimensions, for phase decisions.
 
-    Equivalent to MATLAB Star.getMaxs(map).
+    Equivalent to MATLAB Star.getMaxs(map), made sound: each LP maximum is
+    padded outward (``_lp_pad``, HiGHS via ``_bound_lp_solver``) and capped by
+    ``fallback``. A dimension whose LP returns no optimum (failure, or a
+    presolve 'infeasible') keeps ``fallback`` -- reading it as 0 zeroed a
+    possibly-positive neuron. ``fmin`` lets ``fallback`` govern a NaN.
 
     Args:
         star: Star set
         indices: Array of dimension indices
-        lp_solver: LP solver to use
+        lp_solver: LP solver requested by the caller
+        fallback: Rigorous upper bounds for ``indices`` (the interval
+            estimate), used when the LP does not decide and as a cap
 
     Returns:
-        Array of maximum values, one per index
+        Array of upper bounds, one per index
     """
-    n = len(indices)
-    xmax = np.zeros(n)
+    solver = _bound_lp_solver(lp_solver)
+    fallback = np.asarray(fallback, dtype=np.float64).reshape(-1)
+    xmax = fallback.copy()
 
     for i, idx in enumerate(indices):
-        result = star.get_max(int(idx), lp_solver)
-        xmax[i] = result if result is not None else 0.0
+        result = star.get_max(int(idx), solver)
+        if result is not None:
+            xmax[i] = np.fmin(result + _lp_pad(result), fallback[i])
 
     return xmax
 
 
-def _get_mins(star: Star, indices: np.ndarray, lp_solver: "LPSolver | str" = LPSolver.DEFAULT) -> np.ndarray:
+def _get_mins(
+    star: Star,
+    indices: np.ndarray,
+    lp_solver: "LPSolver | str",
+    fallback: np.ndarray,
+) -> np.ndarray:
     """
-    Get minimum values for multiple state dimensions.
+    Sound lower bounds for multiple state dimensions, for phase decisions.
 
-    Equivalent to MATLAB Star.getMins(map).
+    Equivalent to MATLAB Star.getMins(map), made sound as ``_get_maxs``: LP
+    minima padded outward and floored by ``fallback``; ``fallback`` where the
+    LP returns no optimum.
 
     Args:
         star: Star set
         indices: Array of dimension indices
-        lp_solver: LP solver to use
+        lp_solver: LP solver requested by the caller
+        fallback: Rigorous lower bounds for ``indices``
 
     Returns:
-        Array of minimum values, one per index
+        Array of lower bounds, one per index
     """
-    n = len(indices)
-    xmin = np.zeros(n)
+    solver = _bound_lp_solver(lp_solver)
+    fallback = np.asarray(fallback, dtype=np.float64).reshape(-1)
+    xmin = fallback.copy()
 
     for i, idx in enumerate(indices):
-        result = star.get_min(int(idx), lp_solver)
-        xmin[i] = result if result is not None else 0.0
+        result = star.get_min(int(idx), solver)
+        if result is not None:
+            xmin[i] = np.fmax(result - _lp_pad(result), fallback[i])
 
     return xmin
 
@@ -1213,15 +1476,44 @@ def _relu_star_exact_parallel(
             orig_star = future_to_orig[future]
             try:
                 result = future.result()
-                # Preserve ImageStar type for each output star
-                result = [_preserve_imagestar_type(orig_star, s) for s in result]
-                output_stars.extend(result)
             except Exception as e:
-                if verbose:
-                    logger.error(f'  Error processing Star: {e}')
-                # Continue with other Stars
+                # SOUNDNESS: a failed star (an exception in the worker, or a
+                # worker process that died: BrokenProcessPool) has no output.
+                # Skipping it silently dropped every state it reaches, and a
+                # verdict on the remaining stars was a false UNSAT. Cancel the
+                # pending work and re-raise, as the sequential path does.
+                logger.error(f'Exact ReLU failed on a star in a worker: {e!r}')
+                for pending in future_to_orig:
+                    pending.cancel()
+                raise
+            # Preserve ImageStar type for each output star
+            result = [_preserve_imagestar_type(orig_star, s) for s in result]
+            output_stars.extend(result)
 
     return output_stars
+
+
+def _kernel_phase_ranges(I, solver: str):
+    """Ranges of a Hexatope/Octatope for deciding ReLU phases.
+
+    The LP/MCF optimum is padded outward (``_lp_pad``) and intersected with
+    the rigorous interval bound of ``c + G x`` over the kernel box
+    ``[-1, 1]`` (the bound ``estimate_ranges`` uses when no solver is given).
+    That bound is exact where it can be: a row with no nonzero generator (a
+    dead neuron) stays ``[c, c]``, and a box bound of 0 stays 0. Padding those
+    alone turned each such neuron into a crossing one, split in two with no
+    emptiness check (2^k sets for k of them).
+
+    ``fmax``/``fmin`` let the interval bound govern if an LP bound is NaN.
+    """
+    lb, ub = I.get_ranges(solver=solver)
+    lb = np.asarray(lb, dtype=np.float64).reshape(-1, 1)
+    ub = np.asarray(ub, dtype=np.float64).reshape(-1, 1)
+    lb = lb - _lp_pad(lb)
+    ub = ub + _lp_pad(ub)
+    box = np.ones(I.nVar)
+    elb, eub = outward_interval_bounds(I.center, I.generators, -box, box)
+    return (np.fmax(lb, elb.reshape(-1, 1)), np.fmin(ub, eub.reshape(-1, 1)))
 
 
 def _relu_single_hexatope(I: Hexatope, solver: str = None) -> List[Hexatope]:
@@ -1244,7 +1536,7 @@ def _relu_single_hexatope(I: Hexatope, solver: str = None) -> List[Hexatope]:
         List of Hexatope sets (sound over-approximation of ReLU output)
     """
     if solver is not None:
-        lb, ub = I.get_ranges(solver=solver)
+        lb, ub = _kernel_phase_ranges(I, solver)
     else:
         lb, ub = I.estimate_ranges()
     n = I.dim
@@ -1340,7 +1632,7 @@ def _relu_single_octatope(I: Octatope, solver: str = None) -> List[Octatope]:
         solver: Optional solver method ('lp' or 'mcf').
     """
     if solver is not None:
-        lb, ub = I.get_ranges(solver=solver)
+        lb, ub = _kernel_phase_ranges(I, solver)
     else:
         lb, ub = I.estimate_ranges()
     n = I.dim

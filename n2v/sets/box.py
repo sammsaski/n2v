@@ -8,6 +8,9 @@ Translated from MATLAB NNV Box.m
 import numpy as np
 from typing import Optional, Tuple, List, TYPE_CHECKING
 
+from n2v.utils.ns_certificate import (_add_dir, outward_center_radius,
+                                     outward_interval_bounds)
+
 # TYPE_CHECKING imports for type hints (avoid circular import at runtime)
 if TYPE_CHECKING:
     from n2v.sets.zono import Zono
@@ -65,12 +68,15 @@ class Box:
         self.ub = ub
         self.dim = lb.shape[0]
 
-        # Compute center
-        self.center = 0.5 * (self.lb + self.ub)
+        # Zonotope representation c + G alpha, alpha in [-1, 1] (to_zono).
+        # The half-widths are rounded outward, so [c - r, c + r] contains
+        # [lb, ub] exactly; the round-to-nearest half-width missed an
+        # endpoint by an ulp in about half of all boxes. A coordinate with an
+        # infinite bound gets center 0 and an infinite half-width (see
+        # outward_center_radius).
+        self.center, vec = outward_center_radius(self.lb, self.ub)
 
-        # Compute generators (zonotope representation)
         # Generator matrix: diagonal with half-widths, zero columns removed
-        vec = 0.5 * (self.ub - self.lb)
 
         try:
             # Fast method: create diagonal matrix and remove zero columns
@@ -110,13 +116,19 @@ class Box:
             return [self]
 
         boxes = []
-        interval = (self.ub[part_id] - self.lb[part_id]) / part_num
+        lo, hi = self.lb[part_id, 0], self.ub[part_id, 0]
+        interval = (hi - lo) / part_num
+        # Cut points in round-to-nearest, shared by adjacent pieces so there
+        # are no gaps; the outer ends are the box's own bounds, since
+        # lb + part_num * interval can land an ulp below ub.
+        cuts = np.clip(lo + np.arange(part_num + 1) * interval, lo, hi)
+        cuts[0], cuts[-1] = lo, hi
 
         for i in range(part_num):
             new_lb = self.lb.copy()
             new_ub = self.ub.copy()
-            new_lb[part_id] = self.lb[part_id] + i * interval
-            new_ub[part_id] = self.lb[part_id] + (i + 1) * interval
+            new_lb[part_id] = cuts[i]
+            new_ub[part_id] = cuts[i + 1]
             boxes.append(Box(new_lb, new_ub))
 
         return boxes
@@ -150,6 +162,13 @@ class Box:
         """
         Apply affine transformation to the box: W*x + b.
 
+        Each output bound is ``b_i + sum_j min/max(W_ij lb_j, W_ij ub_j)``,
+        rounded outward (``outward_interval_bounds``), so the result
+        contains the exact image of the box. The earlier center/radius form
+        rounded to nearest and could shrink the box by a few ulps, which the
+        rigorous Box check in ``verify_specification`` then turned into a
+        false UNSAT for a spec touching the true range.
+
         Args:
             W: Mapping matrix (m, n)
             b: Mapping vector (m,) or (m, 1), optional
@@ -157,39 +176,41 @@ class Box:
         Returns:
             New Box object
         """
-        W = np.asarray(W)
-
-        # Transform center
-        new_center = W @ self.center
-        if b is not None:
-            b = np.asarray(b).reshape(-1, 1)
-            new_center = new_center + b
-
-        # Transform generators
-        new_generators = W @ self.generators
-
-        # Compute new bounds using L1 norm
-        new_dim = new_center.shape[0]
-        new_lb = np.zeros((new_dim, 1))
-        new_ub = np.zeros((new_dim, 1))
-
-        for i in range(new_dim):
-            radius = np.sum(np.abs(new_generators[i, :]))
-            new_lb[i] = new_center[i] - radius
-            new_ub[i] = new_center[i] + radius
-
-        return Box(new_lb, new_ub)
+        W = np.asarray(W, dtype=np.float64)
+        if W.ndim == 1:
+            W = W.reshape(1, -1)
+        center = (np.zeros(W.shape[0]) if b is None
+                  else np.asarray(b, dtype=np.float64).reshape(-1))
+        new_lb, new_ub = outward_interval_bounds(
+            center, W, self.lb.reshape(-1), self.ub.reshape(-1))
+        return Box(new_lb.reshape(-1, 1), new_ub.reshape(-1, 1))
 
     # ======================== Conversion Methods ========================
 
     def to_zono(self) -> 'Zono':
-        """Convert Box to Zonotope representation."""
+        """Convert Box to Zonotope representation.
+
+        The zonotope ``center + generators alpha``, ``alpha in [-1, 1]``,
+        contains the box exactly: the half-widths are rounded outward (see
+        ``__init__``).
+        """
         from .zono import Zono
         return Zono(self.center, self.generators)
 
     def to_star(self) -> 'Star':
-        """Convert Box to Star set representation."""
-        return self.to_zono().to_star()
+        """Convert Box to Star set representation.
+
+        The star is in NORMALISED coordinates (``c + rad * alpha``,
+        ``alpha in [-1, 1]``); reconstructing a corner from ``alpha = +-1``
+        reproduces the original bound only to 1 ulp. The exact float64
+        bounds are attached so witness code can snap a point back into the
+        user's box before it is emitted (a zero-tolerance replay rejects a
+        witness 1 ulp outside the box).
+        """
+        S = self.to_zono().to_star()
+        S._raw_lb = np.asarray(self.lb, dtype=np.float64).reshape(-1).copy()
+        S._raw_ub = np.asarray(self.ub, dtype=np.float64).reshape(-1).copy()
+        return S
 
     # ======================== Sampling Methods ========================
 
@@ -280,8 +301,9 @@ class Box:
                 f"Dimension mismatch: self has dim {self.dim}, other has dim {other.dim}"
             )
 
-        new_lb = self.lb + other.lb
-        new_ub = self.ub + other.ub
+        # Rounded outward: the sum contains every x + y.
+        new_lb = _add_dir(self.lb, other.lb, -1.0)
+        new_ub = _add_dir(self.ub, other.ub, 1.0)
         return Box(new_lb, new_ub)
 
     def convex_hull(self, other: 'Box') -> 'Box':

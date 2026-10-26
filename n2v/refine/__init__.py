@@ -1,56 +1,20 @@
 """
-Witness-guided star-set refinement (Phase 1, CPU kill experiment).
+Star-set branch-and-bound verifiers for fully connected ReLU networks.
 
-Public API is intentionally small while Phase 1 is exploratory; see
-``.claude/research/29-RefineStar/`` for the design.
+``verify_refine`` splits ReLU activations over triangle-relaxed stars (exact
+CPU checks, or NS-certified GPU bounds, prune and witnesses when CUDA is
+available). ``verify_refine_input_crown`` bisects the input box with batched
+CROWN bounds, for low-input-dimension networks.
 """
 
-from n2v.refine.types import (
-    LinearSpec,
-    NeuronKey,
-    NeuronMeta,
-    Phase,
-    RefineNode,
-    RefineResult,
-    Status,
-    Witness,
-)
-from n2v.refine.operations import refine, split, witness_phase
+from n2v.refine.types import (LinearSpec, NeuronKey, NeuronMeta, Phase,
+                              RefineResult, Status, Witness)
+from n2v.refine.operations import split, split_wave, witness_phase
 from n2v.refine.bab import verify_refine
-from n2v.refine.input_split import (verify_refine_input, verify_refine_input_crown,
-                                    verify_refine_input_parallel, verify_refine_input_sb)
-from n2v.refine.input_split_gpu import verify_refine_input_gpu
-from n2v.refine.selectors import (
-    BoundWidthSelector,
-    BoxCornerSelector,
-    ExactStarSBSelector,
-    FaithfulSelector,
-    RandomSelector,
-    Selector,
-)
+from n2v.refine.input_split import verify_refine_input_crown
+from n2v.refine.selectors import FaithfulSelector, LayerOrderSelector, Selector
 
-__all__ = [
-    "LinearSpec",
-    "NeuronKey",
-    "NeuronMeta",
-    "Phase",
-    "RefineNode",
-    "RefineResult",
-    "Status",
-    "Witness",
-    "refine",
-    "split",
-    "witness_phase",
-    "verify_refine",
-    "verify_refine_input",
-    "verify_refine_input_crown",
-    "verify_refine_input_parallel",
-    "verify_refine_input_sb",
-    "verify_refine_input_gpu",
-    "Selector",
-    "FaithfulSelector",
-    "BoxCornerSelector",
-    "ExactStarSBSelector",
-    "RandomSelector",
-    "BoundWidthSelector",
-]
+__all__ = ["LinearSpec", "NeuronKey", "NeuronMeta", "Phase", "RefineResult",
+           "Status", "Witness", "split", "split_wave", "witness_phase",
+           "verify_refine", "verify_refine_input_crown", "Selector",
+           "FaithfulSelector", "LayerOrderSelector"]

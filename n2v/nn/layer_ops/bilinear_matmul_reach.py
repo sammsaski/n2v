@@ -34,6 +34,10 @@ from typing import List, Sequence, Tuple
 import numpy as np
 
 from n2v.sets import Star, Zono, Box
+from n2v.utils.lpsolver import _bound_lp_solver, _outward_lp_ranges
+from n2v.utils.ns_certificate import (
+    _ETA, _SAFETY, _add_dir, _gamma, _mul_dir,
+)
 
 
 def _as_flat(lb: np.ndarray, ub: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -43,13 +47,16 @@ def _as_flat(lb: np.ndarray, ub: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
 
 def _star_bounds(star, bounds: str, lp_solver: str):
-    """Per-dim bounds of a Star. ``bounds='lp'`` is exact (``get_ranges``);
+    """Per-dim bounds of a Star. ``bounds='lp'`` is the LP range over the
+    predicate polytope (``get_ranges`` with HiGHS, padded outward by the LP
+    tolerance: ``_bound_lp_solver``, ``_outward_lp_ranges``);
     ``bounds='estimate'`` uses the predicate-box estimate -- pure numpy, a sound
     over-approximation in general and *exact* when the star has no constraint
     rows (the usual case in the concretise pipeline before any relaxation).
     Both are sound (the estimate is a superset)."""
     if bounds == "lp":
-        return _as_flat(*star.get_ranges(lp_solver=lp_solver))
+        lo, hi = star.get_ranges(lp_solver=_bound_lp_solver(lp_solver))
+        return _outward_lp_ranges(lo, hi, star.V)
     if bounds == "estimate":
         return _as_flat(*star.estimate_ranges())
     raise ValueError(f"unknown bounds mode {bounds!r}")
@@ -71,22 +78,39 @@ def _interval_matmul(
     ``|Am|*Br + Ar*|Bm| + Ar*Br``; summing over the contraction index gives
     ``Cr``. The enclosure therefore contains every ``A@B`` with ``A in [al,au]``,
     ``B in [bl,bu]``. Shapes follow ``np.matmul`` broadcasting.
+
+    The computation is round-to-nearest float64, made rigorous against exact
+    arithmetic: the radii are rounded up so that ``[Am - Ar, Am + Ar]``
+    contains ``[al, au]`` exactly, and the result moves outward by a bound on
+    the rounding of the matmuls (Higham's inner-product bound
+    ``gamma_{k+2} (|Am| @ |Bm| + Cr)`` for a contraction of length ``k``,
+    plus half a subnormal per underflowing product, times ``_SAFETY``).
+    Infinite or overflowing entries make the affected bounds infinite.
     """
-    am = 0.5 * (al + au)
-    ar = 0.5 * (au - al)
-    bm = 0.5 * (bl + bu)
-    br = 0.5 * (bu - bl)
-    cm = am @ bm
-    cr = np.abs(am) @ br + ar @ np.abs(bm) + ar @ br
-    return cm - cr, cm + cr
+    al, au, bl, bu = (np.asarray(x, dtype=np.float64) for x in (al, au, bl, bu))
+    k = al.shape[-1]
+    with np.errstate(over='ignore', invalid='ignore'):
+        am = 0.5 * (al + au)
+        ar = np.maximum(_add_dir(au, -am, 1.0), _add_dir(am, -al, 1.0))
+        bm = 0.5 * (bl + bu)
+        br = np.maximum(_add_dir(bu, -bm, 1.0), _add_dir(bm, -bl, 1.0))
+        cm = am @ bm
+        cr = np.abs(am) @ br + ar @ np.abs(bm) + ar @ br
+        cr = cr + _SAFETY * (_gamma(k + 2) * (np.abs(am) @ np.abs(bm) + cr)
+                             + k * _ETA)
+        lo, hi = cm - cr, cm + cr
+    # A NaN (an infinite midpoint or radius) leaves only the infinite bound.
+    return (np.where(np.isnan(lo), -np.inf, lo),
+            np.where(np.isnan(hi), np.inf, hi))
 
 
 def _scaled_bounds(
     cl: np.ndarray, cu: np.ndarray, scale: float,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Multiply an interval by a (possibly negative) scalar, sign-safe."""
-    p, q = scale * cl, scale * cu
-    return np.minimum(p, q), np.maximum(p, q)
+    """Multiply an interval by a (possibly negative) scalar, sign-safe and
+    rounded outward."""
+    return (np.minimum(_mul_dir(scale, cl, -1.0), _mul_dir(scale, cu, -1.0)),
+            np.maximum(_mul_dir(scale, cl, 1.0), _mul_dir(scale, cu, 1.0)))
 
 
 def _check_shapes(dim: int, shape: Sequence[int], which: str) -> Tuple[int, ...]:
@@ -258,11 +282,11 @@ def bilinear_matmul_star(
 ) -> List[Star]:
     """Sound ``scale * (left @ right)`` for Star operands.
 
-    In ``concretize`` mode the operands are reduced to LP-exact per-dimension
-    interval bounds (``get_ranges``), combined with the sound interval matmul,
-    and the result re-encoded as a box-star via ``Star.from_bounds``. This is
-    the CROWN-style concretisation of the bilinear term: sound, and it drops
-    only the operand cross-correlation. Downstream softmax keeps its own
+    In ``concretize`` mode the operands are reduced to per-dimension interval
+    bounds (:func:`_star_bounds`), combined with the sound interval matmul,
+    and the result re-encoded as a box-star over new predicate variables via
+    ``Star.fresh_from_bounds``. This is the CROWN-style concretisation of the
+    bilinear term: sound, and it drops only the operand cross-correlation. Downstream softmax keeps its own
     relaxation symbolic, so this is not a full per-block box-lift.
     """
     _reject_unimplemented_mode(mode)
@@ -277,5 +301,5 @@ def bilinear_matmul_star(
         ll, lu = _star_bounds(ls_star, bounds, lp_solver)
         rl, ru = _star_bounds(rs_star, bounds, lp_solver)
         cl, cu = _concretize_bounds(ll, lu, rl, ru, ls, rs, scale)
-        out.append(Star.from_bounds(cl, cu))
+        out.append(Star.fresh_from_bounds(cl, cu))
     return out

@@ -143,7 +143,6 @@ def test_refine_is_sound_and_not_looser(seed):
 
 @pytest.mark.parametrize("seed", [0, 1, 2])
 def test_alpha_optimized_margin_still_sound(seed):
-    pytest.importorskip("torch")
     rng = np.random.default_rng(300 + seed)
     ops, nin, C = _build_attn_dag(3, 2, rng)
     lb, ub = _box(nin, rng)

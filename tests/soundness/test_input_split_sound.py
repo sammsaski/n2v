@@ -1,5 +1,5 @@
 """
-Soundness of input-space branch-and-bound (n2v.refine.input_split).
+Soundness of the batched-CROWN input-split driver.
 
 Same contract as the activation-split engine: the verdict must equal a trusted
 oracle (exact star reach), the branching axis (input bisection) only affects the
@@ -9,16 +9,12 @@ unsafe region. No false UNSAT.
 
 import numpy as np
 import pytest
-import torch
-import torch.nn as nn
 
 from n2v.nn.reach import reach_pytorch_model
 from n2v.sets.star import Star
 from n2v.utils.lpsolver import check_feasibility
-from n2v.refine.input_split import (
-    verify_refine_input, verify_refine_input_parallel, verify_refine_input_sb,
-)
 from n2v.refine.types import LinearSpec, Status
+from tests.unit.refine.conftest import seq_net
 
 
 def _star_intersects_unsafe(S: Star, spec: LinearSpec) -> bool:
@@ -35,139 +31,6 @@ def _oracle(model, S_in, spec):
         if _star_intersects_unsafe(S, spec):
             return Status.SAT
     return Status.UNSAT
-
-
-def _rand_net(seed, dims=(3, 6, 6, 2)):
-    torch.manual_seed(seed)
-    layers = []
-    for i in range(len(dims) - 2):
-        layers += [nn.Linear(dims[i], dims[i + 1]), nn.ReLU()]
-    layers += [nn.Linear(dims[-2], dims[-1])]
-    return nn.Sequential(*layers).double()
-
-
-@pytest.mark.parametrize("heuristic", ["smear", "widest"])
-@pytest.mark.parametrize("bound_mode", ["box", "lp_cpu", "zono", "zono_lp"])
-@pytest.mark.parametrize("seed", range(6))
-def test_input_split_matches_oracle(seed, bound_mode, heuristic):
-    rng = np.random.default_rng(seed)
-    net = _rand_net(seed)
-    lb = rng.uniform(-1.0, -0.2, size=3); ub = rng.uniform(0.2, 1.0, size=3)
-    S_in = Star.from_bounds(lb, ub)
-    out0 = reach_pytorch_model(net, S_in, method="exact")
-    mins = min(float(S.get_range(0)[0]) for S in out0)
-    maxs = max(float(S.get_range(0)[1]) for S in out0)
-    tau = mins + (maxs - mins) * (0.25 + 0.5 * rng.random())
-    spec = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([tau]))
-
-    oracle = _oracle(net, S_in, spec)
-    res = verify_refine_input(S_in, net, spec, bound_mode=bound_mode,
-                              heuristic=heuristic, node_budget=200000, min_width=1e-7)
-    assert res.status != Status.UNKNOWN, f"ran out of budget (seed={seed})"
-    assert res.status == oracle, f"{heuristic}/{bound_mode}: {res.status} != {oracle} (seed={seed})"
-    if res.status == Status.SAT:
-        assert res.counterexample_x is not None
-        with torch.no_grad():
-            y = net(torch.as_tensor(res.counterexample_x, dtype=torch.float64))
-        assert spec.is_unsafe(y.numpy().flatten()), "returned a fake CE"
-
-
-@pytest.mark.parametrize("bound_mode", ["box", "lp_cpu", "zono_lp"])
-@pytest.mark.parametrize("seed", range(6))
-def test_parallel_frontier_matches_oracle(seed, bound_mode):
-    """The parallel-frontier driver yields the same verdict as the exact oracle
-    (and hence the serial driver) -- threads only change *how* the independent
-    sub-problems are scheduled, never the answer."""
-    rng = np.random.default_rng(seed)
-    net = _rand_net(seed)
-    lb = rng.uniform(-1.0, -0.2, size=3); ub = rng.uniform(0.2, 1.0, size=3)
-    S_in = Star.from_bounds(lb, ub)
-    out0 = reach_pytorch_model(net, S_in, method="exact")
-    mins = min(float(S.get_range(0)[0]) for S in out0)
-    maxs = max(float(S.get_range(0)[1]) for S in out0)
-    tau = mins + (maxs - mins) * (0.25 + 0.5 * rng.random())
-    spec = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([tau]))
-    oracle = _oracle(net, S_in, spec)
-    res = verify_refine_input_parallel(S_in, net, spec, bound_mode=bound_mode,
-                                       node_budget=200000, min_width=1e-7,
-                                       n_workers=4, batch=8)
-    assert res.status != Status.UNKNOWN
-    assert res.status == oracle, f"{bound_mode}: {res.status} != {oracle} (seed={seed})"
-    if res.status == Status.SAT:
-        with torch.no_grad():
-            y = net(torch.as_tensor(res.counterexample_x, dtype=torch.float64))
-        assert spec.is_unsafe(y.numpy().flatten())
-
-
-@pytest.mark.skipif(
-    not __import__("n2v.utils.lpsolver_gpu", fromlist=["gpu_available"]).gpu_available(),
-    reason="no CUDA",
-)
-@pytest.mark.parametrize("seed", range(6))
-def test_input_split_gpu_matches_oracle(seed):
-    """GPU frontier-batched OBBT yields the same verdict as the exact oracle: the
-    NS-certified PDHG bounds are a sound outward enclosure (intersected with the
-    box), so the relaxation stays sound -- only node counts change with tightness."""
-    from n2v.refine.input_split_gpu import verify_refine_input_gpu
-    rng = np.random.default_rng(seed)
-    net = _rand_net(seed)
-    lb = rng.uniform(-1.0, -0.2, size=3); ub = rng.uniform(0.2, 1.0, size=3)
-    S_in = Star.from_bounds(lb, ub)
-    out0 = reach_pytorch_model(net, S_in, method="exact")
-    mins = min(float(S.get_range(0)[0]) for S in out0)
-    maxs = max(float(S.get_range(0)[1]) for S in out0)
-    tau = mins + (maxs - mins) * (0.25 + 0.5 * rng.random())
-    spec = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([tau]))
-    oracle = _oracle(net, S_in, spec)
-    res = verify_refine_input_gpu(S_in, net, spec, node_budget=100000, min_width=1e-7,
-                                  batch=16, gpu_iters=3000)
-    assert res.status != Status.UNKNOWN
-    assert res.status == oracle, f"gpu: {res.status} != {oracle} (seed={seed})"
-    if res.status == Status.SAT:
-        with torch.no_grad():
-            y = net(torch.as_tensor(res.counterexample_x, dtype=torch.float64))
-        assert spec.is_unsafe(y.numpy().flatten())
-
-
-@pytest.mark.parametrize("bound_mode", ["box", "lp_cpu"])
-@pytest.mark.parametrize("seed", range(6))
-def test_input_split_sb_matches_oracle(seed, bound_mode):
-    """Exact input strong branching yields the same verdict as the oracle -- it
-    only changes *which* dimension is split (and how few nodes), never the answer."""
-    rng = np.random.default_rng(seed)
-    net = _rand_net(seed)
-    lb = rng.uniform(-1.0, -0.2, size=3); ub = rng.uniform(0.2, 1.0, size=3)
-    S_in = Star.from_bounds(lb, ub)
-    out0 = reach_pytorch_model(net, S_in, method="exact")
-    mins = min(float(S.get_range(0)[0]) for S in out0)
-    maxs = max(float(S.get_range(0)[1]) for S in out0)
-    tau = mins + (maxs - mins) * (0.25 + 0.5 * rng.random())
-    spec = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([tau]))
-    oracle = _oracle(net, S_in, spec)
-    res = verify_refine_input_sb(S_in, net, spec, bound_mode=bound_mode,
-                                 node_budget=200000, min_width=1e-7, n_workers=4)
-    assert res.status != Status.UNKNOWN
-    assert res.status == oracle, f"{bound_mode}: {res.status} != {oracle} (seed={seed})"
-    if res.status == Status.SAT:
-        with torch.no_grad():
-            y = net(torch.as_tensor(res.counterexample_x, dtype=torch.float64))
-        assert spec.is_unsafe(y.numpy().flatten())
-
-
-@pytest.mark.parametrize("seed", range(6))
-def test_input_split_no_false_unsat_vs_sampling(seed):
-    rng = np.random.default_rng(2000 + seed)
-    net = _rand_net(seed + 50)
-    lb = rng.uniform(-1.0, -0.2, size=3); ub = rng.uniform(0.2, 1.0, size=3)
-    S_in = Star.from_bounds(lb, ub)
-    X = rng.uniform(lb, ub, size=(40000, 3))
-    with torch.no_grad():
-        Y = net(torch.as_tensor(X, dtype=torch.float64)).numpy()
-    tau = float(np.quantile(Y[:, 0], 0.10))
-    spec = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([tau]))
-    assert np.any(Y[:, 0] <= tau)
-    res = verify_refine_input(S_in, net, spec, node_budget=200000, min_width=1e-7)
-    assert res.status == Status.SAT, f"false non-SAT ({res.status}) despite sampled CE (seed={seed})"
 
 
 class TestInputCrown:
@@ -300,3 +163,129 @@ class TestInputCrown:
         res = verify_refine_input_crown(S2, net, spec, node_budget=20_000)
         assert res.status != Status.SAT, \
             "SAT with an out-of-set counterexample (membership filter broken)"
+
+    @pytest.mark.parametrize("seed", [4, 15, 19, 23, 33, 36, 38, 45, 49, 51,
+                                      56, 59, 70, 74, 76, 106])
+    def test_touching_spec_is_never_unsat(self, seed):
+        """The unsafe region touches the image of the input box at one vertex
+        (exact margin 0 there). The CROWN margins must be outward-rigorous in
+        floating point, so the touching vertex is never rounded into a
+        prune; these seeds gave a false UNSAT without the rounding slack."""
+        import torch
+        import torch.nn as nn
+        from n2v.refine import verify_refine_input_crown
+        rng = np.random.default_rng(seed)
+        torch.manual_seed(seed)
+        net = nn.Sequential(nn.Linear(5, 8), nn.ReLU(), nn.Linear(8, 1)).double()
+        with torch.no_grad():
+            net[0].bias.add_(10.0)            # hidden neurons stably active
+        lb = rng.uniform(-1, 0, size=5)
+        ub = lb + rng.uniform(0.1, 1, size=5)
+        S = Star.from_bounds(lb, ub)
+        # the vertex minimizing the (affine) output, as a star member
+        W = (net[2].weight @ net[0].weight).detach().numpy().flatten()
+        x = S.V[:, 0] + np.diag(S.V[:, 1:]) * np.where(W >= 0, -1.0, 1.0)
+        with torch.no_grad():
+            y = net(torch.as_tensor(x).unsqueeze(0)).numpy().flatten()[0]
+        spec = LinearSpec(G=np.array([[1.0]]), g=np.array([y]))
+        res = verify_refine_input_crown(S, net, spec, node_budget=3000)
+        assert res.status != Status.UNSAT, "false UNSAT on a touching spec"
+        if res.status == Status.SAT:
+            xc = np.asarray(res.counterexample_x, dtype=np.float64)
+            assert np.all(xc >= lb) and np.all(xc <= ub)
+            with torch.no_grad():
+                yc = net(torch.as_tensor(xc).unsqueeze(0)).numpy().flatten()
+            assert np.all(spec.G @ yc - spec.g <= 0.0)
+
+    def test_box_corner_counterexample_is_found(self):
+        """y0 + y1 >= 2 holds only at the corner (1, 1). The outward search
+        box puts that vertex a few ulps outside the input set; projected back
+        into the predicate set it is a valid counterexample at once."""
+        import torch
+        import torch.nn as nn
+        from n2v.refine import verify_refine_input_crown
+        net = nn.Sequential(nn.Linear(2, 2)).double()
+        with torch.no_grad():
+            net[0].weight.copy_(torch.eye(2, dtype=torch.float64))
+            net[0].bias.zero_()
+        S = Star.from_bounds(np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
+        spec = LinearSpec(G=-np.ones((1, 2)), g=np.array([-2.0]))
+        res = verify_refine_input_crown(S, net, spec, node_budget=20_000)
+        assert res.status == Status.SAT and res.nodes <= 10, \
+            f"{res.status} after {res.nodes} nodes"
+        x = np.asarray(res.counterexample_x)
+        assert np.all(x >= -1.0) and np.all(x <= 1.0)
+
+    @staticmethod
+    def _inf_box_instance():
+        """y = relu(x0) + relu(x1), with x0 bounded only by C rows (the
+        predicate box is +/-inf on dim 0)."""
+        import torch
+        import torch.nn as nn
+        net = nn.Sequential(nn.Linear(2, 2), nn.ReLU(), nn.Linear(2, 1)).double()
+        with torch.no_grad():
+            net[0].weight.copy_(torch.eye(2, dtype=torch.float64))
+            net[0].bias.zero_()
+            net[2].weight.copy_(torch.tensor([[1.0, 1.0]], dtype=torch.float64))
+            net[2].bias.zero_()
+        V = np.hstack([np.zeros((2, 1)), np.eye(2)])
+        C = np.array([[1.0, 0.0], [-1.0, 0.0]])       # -1 <= alpha_0 <= 1
+        d = np.array([[1.0], [1.0]])
+        S = Star(V, C, d, np.array([[-np.inf], [-1.0]]),
+                 np.array([[np.inf], [1.0]]))
+        return net, S
+
+    def test_infinite_predicate_box_is_finitized(self):
+        """The CROWN search box comes from interval bounds, which are NaN on
+        an infinite predicate box (such margins never prune): the driver
+        finitizes the box first and decides the far-UNSAT spec."""
+        from n2v.refine import verify_refine_input_crown
+        net, S = self._inf_box_instance()
+        res = verify_refine_input_crown(S, net, LinearSpec([[-1.0]], [-99.0]),
+                                        node_budget=5000)
+        assert res.status == Status.UNSAT
+        res = verify_refine_input_crown(S, net, LinearSpec([[-1.0]], [-1.5]),
+                                        node_budget=5000)
+        assert res.status != Status.UNSAT
+        if res.status == Status.SAT:
+            x = np.asarray(res.counterexample_x, dtype=np.float64)
+            assert np.all(S.C @ x <= S.d.flatten()), "counterexample outside C"
+            assert -1.0 <= x[1] <= 1.0
+
+    def test_batched_forward_hit_is_revalidated_per_point(self):
+        """The batched exact forward pass only filters candidates: a model
+        that reports "unsafe" for every batch of more than one input must not
+        yield SAT, because each hit is re-checked by a single-input pass."""
+        import torch
+        import torch.nn as nn
+        from n2v.refine import verify_refine_input_crown
+        from n2v.refine.reach_relaxed import extract_layers
+
+        net = seq_net(2, 8, 8, 1, seed=1)
+        S = Star.from_bounds(np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
+        out0 = reach_pytorch_model(net, S, method="exact")
+        mn = min(float(T.get_range(0)[0]) for T in out0)
+        mx = max(float(T.get_range(0)[1]) for T in out0)
+        spec = LinearSpec(np.array([[1.0]]), np.array([mn - 0.05 * (mx - mn)]))
+
+        class _BatchLiar(nn.Module):
+            def __init__(self, inner):
+                super().__init__()
+                self.inner = inner
+                self.lies = 0
+
+            def forward(self, x):
+                if x.shape[0] > 1:
+                    self.lies += 1
+                    return torch.full((x.shape[0], 1), -1e9,
+                                      dtype=torch.float64)
+                return self.inner(x)
+
+        # eval mode up front: no eval-mode copy is made, so the lie counter is
+        # read from this object
+        wrapper = _BatchLiar(net).eval()
+        res = verify_refine_input_crown(S, wrapper, spec,
+                                        layers=extract_layers(net),
+                                        node_budget=5000)
+        assert res.status != Status.SAT
+        assert wrapper.lies > 0, "the batched check was never exercised"

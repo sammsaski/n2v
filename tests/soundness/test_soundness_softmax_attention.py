@@ -79,17 +79,37 @@ def test_softmax_box_sound(shape, axis, regime):
         assert np.all(a >= lo - TOL) and np.all(a <= hi + TOL)
 
 
-@pytest.mark.parametrize("shape,axis", CASES)
-@pytest.mark.parametrize("regime", REGIMES)
-def test_softmax_star_sound(shape, axis, regime):
+# The (3, 17, 17) Star cell costs one LP per sample (about 20 s at 300). The
+# default tier checks it at 30 random samples plus the box corners and centre
+# (the points most likely to escape); the 300-sample check is its slow twin,
+# so the default tier has one tenth of the random sampling on that cell.
+_LARGE_STAR_CELL = (3, 17, 17)
+_N_SAMPLES_LARGE_DEFAULT = 30
+
+
+def _check_softmax_star(shape, axis, regime, n_samples):
     rng = np.random.default_rng(SEED + 1)
     s_lo, s_hi = _logit_box(rng, shape, regime)
     out = softmax_attn_star(
         [Star.from_bounds(s_lo.reshape(-1), s_hi.reshape(-1))], shape, axis)[0]
-    for _ in range(N_SAMPLES):
-        s = rng.uniform(s_lo, s_hi)
+    points = [s_lo, s_hi, 0.5 * (s_lo + s_hi)]
+    points += [rng.uniform(s_lo, s_hi) for _ in range(n_samples)]
+    for s in points:
         a = _softmax_np(s, axis).reshape(-1)
         assert _star_contains(out, a)
+
+
+@pytest.mark.parametrize("shape,axis", CASES)
+@pytest.mark.parametrize("regime", REGIMES)
+def test_softmax_star_sound(shape, axis, regime):
+    n = _N_SAMPLES_LARGE_DEFAULT if shape == _LARGE_STAR_CELL else N_SAMPLES
+    _check_softmax_star(shape, axis, regime, n)
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("regime", REGIMES)
+def test_softmax_star_sound_large_full_sampling(regime):
+    _check_softmax_star(_LARGE_STAR_CELL, -1, regime, N_SAMPLES)
 
 
 @pytest.mark.parametrize("shape,axis", CASES)

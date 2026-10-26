@@ -73,7 +73,7 @@ def _detect_model_device(model) -> torch.device:
             return torch.device('cpu')
 
 
-def falsify(
+def _falsify_impl(
     model: torch.nn.Module,
     lb: np.ndarray,
     ub: np.ndarray,
@@ -82,68 +82,7 @@ def falsify(
     seed: Optional[int] = None,
     **kwargs
 ) -> FalsifyResult:
-    """
-    Attempt to find a counterexample using the specified falsification method.
-
-    Note:
-        This function assumes the input set is a hyperbox [lb, ub]. For input
-        sets defined by general linear constraints (polytopes), the sampling
-        and projection may not cover the true input region correctly.
-
-    Bounds can be any shape matching the model's expected input (excluding the
-    batch dimension). For example, pass lb/ub with shape (1, 28, 28) for a CNN
-    model that expects (batch, C, H, W) input. Samples are generated uniformly
-    in the flattened space, then reshaped to match the bounds' shape before
-    passing to the model.
-
-    Args:
-        model: PyTorch neural network model
-        lb: Lower bounds of input region. Shape should match model input
-            (excluding batch dim), e.g. (n,) for FC or (C, H, W) for CNN.
-        ub: Upper bounds of input region, same shape as lb.
-        property: Property specification (unsafe region), can be:
-                  - dict with 'Hg' field containing HalfSpace(s)
-                  - list of dicts with 'Hg' field
-                  - HalfSpace object
-                  - list of HalfSpace objects
-        method: Falsification method to use:
-                - 'random': Uniform random sampling (default)
-                - 'pgd': Projected Gradient Descent
-                - 'random+pgd': Try random first, then PGD if no counterexample found
-        seed: Random seed for reproducibility (default: None)
-        **kwargs: Method-specific arguments:
-            For 'random':
-                - n_samples (int): Number of random samples (default: 500)
-            For 'pgd':
-                - n_restarts (int): Number of random restarts (default: 10)
-                - n_steps (int): Steps per restart (default: 50)
-                - step_size (float): Step size (default: auto)
-            For 'random+pgd':
-                - All of the above
-
-    Returns:
-        Tuple of (result, counterexample) where:
-        - result: 0 if counterexample found (SAT), 2 if no counterexample (unknown)
-        - counterexample: Tuple of (input, output) if found, None otherwise
-
-    Example:
-        >>> import torch
-        >>> from n2v.utils import falsify, load_vnnlib
-        >>>
-        >>> model = torch.nn.Sequential(torch.nn.Linear(5, 5), torch.nn.ReLU())
-        >>> prop = load_vnnlib('property.vnnlib')
-        >>>
-        >>> # Random sampling
-        >>> result, cex = falsify(model, prop['lb'], prop['ub'], prop['prop'])
-        >>>
-        >>> # PGD
-        >>> result, cex = falsify(model, prop['lb'], prop['ub'], prop['prop'],
-        ...                       method='pgd', n_restarts=20)
-        >>>
-        >>> # Combined approach
-        >>> result, cex = falsify(model, prop['lb'], prop['ub'], prop['prop'],
-        ...                       method='random+pgd', n_samples=1000, n_restarts=10)
-    """
+    """Dispatch to the attack(s) named by ``method``; see :func:`falsify`."""
     if method not in METHODS:
         raise ValueError(f"Unknown method '{method}'. Available: {METHODS}")
 
@@ -199,6 +138,118 @@ def falsify(
 
     # Should not reach here
     raise ValueError(f"Unknown method '{method}'")
+
+
+def falsify(
+    model: torch.nn.Module,
+    lb: np.ndarray,
+    ub: np.ndarray,
+    property: Union[dict, List[dict], 'HalfSpace', List['HalfSpace']],
+    method: str = 'random',
+    seed: Optional[int] = None,
+    **kwargs
+) -> FalsifyResult:
+    """
+    Attempt to find a counterexample using the specified falsification method.
+
+    Note:
+        This function assumes the input set is a hyperbox [lb, ub]. For input
+        sets defined by general linear constraints (polytopes), the sampling
+        and projection may not cover the true input region correctly.
+
+    Bounds can be any shape matching the model's expected input (excluding the
+    batch dimension). For example, pass lb/ub with shape (1, 28, 28) for a CNN
+    model that expects (batch, C, H, W) input. Samples are generated uniformly
+    in the flattened space, then reshaped to match the bounds' shape before
+    passing to the model.
+
+    Args:
+        model: PyTorch neural network model
+        lb: Lower bounds of input region. Shape should match model input
+            (excluding batch dim), e.g. (n,) for FC or (C, H, W) for CNN.
+        ub: Upper bounds of input region, same shape as lb.
+        property: Property specification (unsafe region), can be:
+                  - dict with 'Hg' field containing HalfSpace(s)
+                  - list of dicts with 'Hg' field
+                  - HalfSpace object
+                  - list of HalfSpace objects
+        method: Falsification method to use:
+                - 'random': Uniform random sampling (default)
+                - 'pgd': Projected Gradient Descent
+                - 'random+pgd': Try random first, then PGD if no counterexample found
+        seed: Random seed for reproducibility (default: None)
+        **kwargs: Method-specific arguments:
+            For 'random':
+                - n_samples (int): Number of random samples (default: 500)
+            For 'pgd':
+                - n_restarts (int): Number of random restarts (default: 10)
+                - n_steps (int): Steps per restart (default: 50)
+                - step_size (float): Step size (default: auto)
+            For 'random+pgd':
+                - All of the above
+
+    A returned counterexample ``(x, y)`` is checked once more before it is
+    returned: ``x`` is clipped into the float64 box ``[lb, ub]`` (the attacks
+    work in float32), ``y`` is recomputed as the model's output at ``x`` at
+    batch size 1, and the property must hold for that ``y`` at zero
+    tolerance; otherwise the result is ``(2, None)``. A batched forward can
+    differ from the batch-1 forward of the same point in the last bits, and
+    batch 1 is how an external checker replays a witness.
+
+    Returns:
+        Tuple of (result, counterexample) where:
+        - result: 0 if counterexample found (SAT), 2 if no counterexample (unknown)
+        - counterexample: Tuple of (input, output) if found, None otherwise
+
+    Example:
+        >>> import torch
+        >>> from n2v.utils import falsify, load_vnnlib
+        >>>
+        >>> model = torch.nn.Sequential(torch.nn.Linear(5, 5), torch.nn.ReLU())
+        >>> prop = load_vnnlib('property.vnnlib')
+        >>>
+        >>> # Random sampling
+        >>> result, cex = falsify(model, prop['lb'], prop['ub'], prop['prop'])
+        >>>
+        >>> # PGD
+        >>> result, cex = falsify(model, prop['lb'], prop['ub'], prop['prop'],
+        ...                       method='pgd', n_restarts=20)
+        >>>
+        >>> # Combined approach
+        >>> result, cex = falsify(model, prop['lb'], prop['ub'], prop['prop'],
+        ...                       method='random+pgd', n_samples=1000, n_restarts=10)
+    """
+    result, cex = _falsify_impl(model, lb, ub, property, method=method,
+                                seed=seed, **kwargs)
+    if cex is None:
+        return result, cex
+    # SOUNDNESS OF THE WITNESS: the attacks optimise in float32 over
+    # float32-rounded bounds, so the point they return can sit outside the
+    # user's float64 box by rounding; input membership is graded at zero
+    # tolerance. Snap into the exact box. Then recompute the output there at
+    # batch size 1 (model dtype) and re-check the property at zero tolerance,
+    # conceding "no counterexample" if it no longer holds. The attacks already
+    # re-check their hits at batch 1; doing it here as well makes that the
+    # contract of falsify() rather than a property each attack must keep.
+    x, _ = cex
+    lb64 = np.asarray(lb, dtype=np.float64)
+    ub64 = np.asarray(ub, dtype=np.float64)
+    x64 = np.asarray(x, dtype=np.float64)
+    if lb64.size != x64.size:
+        return result, cex
+    x_c = np.clip(x64, lb64.reshape(x64.shape), ub64.reshape(x64.shape))
+    try:
+        dtype = next(model.parameters()).dtype
+    except StopIteration:
+        dtype = torch.float32
+    device = _detect_model_device(model)
+    with torch.no_grad():
+        y_c = (model(torch.as_tensor(x_c, dtype=dtype, device=device)
+                     .reshape(1, *lb64.shape))
+               .detach().cpu().numpy().flatten())
+    if _output_satisfies_property(y_c, _extract_halfspace_groups(property)):
+        return result, (x_c, y_c)
+    return 2, None
 
 
 def _falsify_random(
@@ -573,17 +624,18 @@ def _batch_total_margin(outs: np.ndarray, group_arrays) -> np.ndarray:
     ``outs``: (N, out_dim). Returns (N,) where a value <= 0 means the point lies in
     the unsafe region (a counterexample). Mirrors ``_output_satisfies_property``:
     AND across groups (max), OR within a group (min over halfspaces), all rows of a
-    halfspace must hold (max over rows of ``G @ y - g``). ``HalfSpace.contains``'s
-    numerical tolerance (``G @ y <= g + 1e-8``) is baked in by subtracting it from
-    the aggregated margin, so the ``<= 0`` test agrees with the canonical check at
-    the boundary (the constant tolerance distributes through the monotone max/min).
+    halfspace must hold (max over rows of ``G @ y - g``), with no tolerance. The
+    margins are computed in float32, so the ``<= 0`` test only screens candidates;
+    a hit is confirmed with ``_output_satisfies_property``.
     """
     group_margins = []
     for group in group_arrays:
         hs_margins = [(outs @ G.T - g).max(axis=1) for G, g in group]  # each (N,)
         group_margins.append(np.min(np.stack(hs_margins, axis=1), axis=1))  # OR -> min
-    # Subtract HalfSpace.contains' +1e-8 tolerance so `margin <= 0` mirrors canonical.
-    return np.max(np.stack(group_margins, axis=1), axis=1) - 1e-8  # AND -> max
+    # Zero tolerance: a SAT claim requires the exact output inside the CLOSED
+    # unsafe region, matching every other SAT exit and the zero-tolerance
+    # competition replay (a +1e-8 slack accepted non-replaying witnesses).
+    return np.max(np.stack(group_margins, axis=1), axis=1)  # AND -> max
 
 
 def _falsify_square(
@@ -604,8 +656,9 @@ def _falsify_square(
     (where L-inf adversarial points concentrate) and greedily keeps improvements,
     evaluated in batches. Uses NO gradients, so it attacks models where PGD/APGD
     fail because gradients vanish (e.g. Sign/binarized activations like
-    traffic_signs). Every returned counterexample is verified against the canonical
-    ``_output_satisfies_property`` check, so a SAT result is always sound.
+    traffic_signs). Every returned counterexample is re-run at batch size 1 and
+    verified against the canonical ``_output_satisfies_property`` check on that
+    output, so a SAT result is always sound.
 
     Args:
         n_iters: max model evaluations (across the batched search).
@@ -661,7 +714,16 @@ def _falsify_square(
             best = cand[j].copy()
             # Verify against the canonical check before claiming SAT (soundness).
             if bm <= 0 and _output_satisfies_property(outs[j], groups):
-                return 0, (best, outs[j])
+                # Row j of the batched forward can differ from the batch-1
+                # forward of the same point in the last bits (float
+                # reordering), and batch 1 is how the witness is replayed.
+                # Re-run the point alone; if it misses, keep searching from
+                # its batch-1 margin.
+                y1 = forward(best[None])
+                evals += 1
+                if _output_satisfies_property(y1[0], groups):
+                    return 0, (best, y1[0])
+                bm = float(_batch_total_margin(y1, garr)[0])
     return 2, None
 
 
@@ -715,9 +777,13 @@ def _extract_halfspace_groups(property: Union[dict, List[dict], 'HalfSpace', Lis
 
 def _output_satisfies_property(output_np: np.ndarray, groups: List[List['HalfSpace']]) -> bool:
     """Check if an output satisfies all property groups (AND of OR)."""
+    y = np.asarray(output_np, dtype=np.float64).reshape(-1, 1)
     for group in groups:
-        # Within each group, at least one halfspace must be satisfied (OR)
-        if not any(hs.contains(output_np) for hs in group):
+        # Within each group, at least one halfspace must be satisfied (OR).
+        # Zero tolerance (HalfSpace.contains allows +1e-8, which accepted
+        # witnesses a zero-tolerance replay rejects).
+        if not any(bool(np.all(hs.G @ y <= np.asarray(hs.g).reshape(-1, 1)))
+                   for hs in group):
             return False
     return True
 

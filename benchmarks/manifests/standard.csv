@@ -1,0 +1,108 @@
+# selection: seeded per benchmark (benchmarks/manifest.py)
+# seed: 0
+# per_benchmark: 3
+# vnnlib_version: 2.0
+# benchmarks: 34
+benchmark,onnx,vnnlib,timeout
+acasxu_2023,onnx/ACASXU_run2a_1_6_batch_2000.onnx,vnnlib/prop_1.vnnlib,116
+acasxu_2023,onnx/ACASXU_run2a_3_1_batch_2000.onnx,vnnlib/prop_1.vnnlib,116
+acasxu_2023,onnx/ACASXU_run2a_2_7_batch_2000.onnx,vnnlib/prop_2.vnnlib,116
+adaptive_cruise_control_non_linear_2026,onnx/acc-2000000-64-64-64-64-retrain-100000-200000-0.9.onnx,vnnlib/instance_13.vnnlib,100
+adaptive_cruise_control_non_linear_2026,onnx/acc-2000000-64-64-64-64-retrain-100000-200000-0.9.onnx,vnnlib/instance_22.vnnlib,100
+adaptive_cruise_control_non_linear_2026,onnx/acc-2000000-64-64-64-64-retrain-100000-200000-0.9.onnx,vnnlib/instance_24.vnnlib,100
+cctsdb_yolo_2023,onnx/patch-1.onnx,vnnlib/spec_onnx_patch-1_idx_12559_0.vnnlib,350
+cctsdb_yolo_2023,onnx/patch-3.onnx,vnnlib/spec_onnx_patch-3_idx_03292_0.vnnlib,350
+cctsdb_yolo_2023,onnx/patch-1.onnx,vnnlib/spec_onnx_patch-1_idx_16845_1.vnnlib,350
+cersyve,onnx/lane_keep_finetune_con.onnx,vnnlib/prop_lane_keep.vnnlib,100
+cersyve,onnx/lane_keep_finetune_inv.onnx,vnnlib/prop_lane_keep.vnnlib,100
+cersyve,onnx/point_mass_finetune_con.onnx,vnnlib/prop_point_mass.vnnlib,100
+cgan2026,onnx/cGAN_imgSz32_nCh_1.onnx,vnnlib/cGAN_imgSz32_nCh_1_prop_3_input_eps_0.010_output_eps_0.015.vnnlib,900
+cgan2026,onnx/cGAN_imgSz32_nCh_3.onnx,vnnlib/cGAN_imgSz32_nCh_3_prop_1_input_eps_0.015_output_eps_0.020.vnnlib,900
+cgan2026,onnx/cGAN_imgSz32_nCh_1_transposedConvPadding_1.onnx,vnnlib/cGAN_imgSz32_nCh_1_transposedConvPadding_1_prop_0_input_eps_0.015_output_eps_0.020.vnnlib,1200
+cgan_2023,onnx/cGAN_imgSz32_nCh_1.onnx,vnnlib/cGAN_imgSz32_nCh_1_prop_0_input_eps_0.010_output_eps_0.015.vnnlib,900
+cgan_2023,onnx/cGAN_imgSz32_nCh_1.onnx,vnnlib/cGAN_imgSz32_nCh_1_prop_1_input_eps_0.010_output_eps_0.015.vnnlib,900
+cgan_2023,onnx/cGAN_imgSz32_nCh_3_small_transformer.onnx,vnnlib/cGAN_imgSz32_nCh_3_small_transformer_prop_0_input_eps_0.005_output_eps_0.010.vnnlib,1800
+challenging_certified_training_2026,onnx/cifar10_eps2_cnn7.onnx,vnnlib/cifar10_eps2_cnn7/cifar10_eps2_cnn7_idx2576_sample0.vnnlib,30
+challenging_certified_training_2026,onnx/cifar10_eps8_wide_cnn7.onnx,vnnlib/cifar10_eps8_wide_cnn7/cifar10_eps8_wide_cnn7_idx8895_sample2.vnnlib,120
+challenging_certified_training_2026,onnx/tinyimagenet_eps1_cnn7.onnx,vnnlib/tinyimagenet_eps1_cnn7/tinyimagenet_eps1_cnn7_idx2949_sample9.vnnlib,550
+cifar100_2024,onnx/CIFAR100_resnet_medium.onnx,vnnlib/CIFAR100_resnet_medium_prop_idx_4964_sidx_5266_eps_0.0039.vnnlib,100
+cifar100_2024,onnx/CIFAR100_resnet_large.onnx,vnnlib/CIFAR100_resnet_large_prop_idx_4385_sidx_9116_eps_0.0039.vnnlib,100
+cifar100_2024,onnx/CIFAR100_resnet_large.onnx,vnnlib/CIFAR100_resnet_large_prop_idx_3703_sidx_3842_eps_0.0039.vnnlib,100
+collins_aerospace_benchmark,onnx/yolov5nano_LRelu_640.onnx,vnnlib/img_14386_perturbed_bbox_7_delta_0.01.vnnlib,3600
+collins_aerospace_benchmark,onnx/yolov5nano_LRelu_640.onnx,vnnlib/img_8758_perturbed_bbox_3_delta_0.02.vnnlib,3600
+collins_aerospace_benchmark,onnx/yolov5nano_LRelu_640.onnx,vnnlib/img_12761_perturbed_bbox_0_delta_0.1.vnnlib,3600
+collins_rul_cnn_2022,onnx/NN_rul_full_window_20.onnx,vnnlib/if_then_9levels_w20.vnnlib,1800
+collins_rul_cnn_2022,onnx/NN_rul_full_window_40.onnx,vnnlib/robustness_4perturbations_delta40_epsilon10_w40.vnnlib,300
+collins_rul_cnn_2022,onnx/NN_rul_full_window_40.onnx,vnnlib/robustness_8perturbations_delta10_epsilon10_w40.vnnlib,300
+cora_2024,./onnx/mnist-set.onnx,vnnlib/mnist-img20.vnnlib,30
+cora_2024,./onnx/svhn-set.onnx,vnnlib/svhn-img137.vnnlib,30
+cora_2024,./onnx/cifar10-point.onnx,vnnlib/cifar10-img440.vnnlib,30
+dist_shift_2023,./onnx/mnist_concat.onnx,./vnnlib/index6323_delta0.13.vnnlib,300
+dist_shift_2023,./onnx/mnist_concat.onnx,./vnnlib/index1285_delta0.13.vnnlib,300
+dist_shift_2023,./onnx/mnist_concat.onnx,./vnnlib/index4312_delta0.13.vnnlib,300
+isomorphic_acasxu_2026,"[('f', 'onnx/original/ACASXU_run2a_4_3_batch_2000.onnx'), ('g', 'onnx/perturbed/ACASXU_run2a_4_3_batch_2000_perturbed_27.onnx')]",./vnnlib/instance_27.vnnlib,100
+isomorphic_acasxu_2026,"[('f', 'onnx/original/ACASXU_run2a_3_2_batch_2000.onnx'), ('g', 'onnx/perturbed/ACASXU_run2a_3_2_batch_2000_perturbed_35.onnx')]",./vnnlib/instance_35.vnnlib,100
+isomorphic_acasxu_2026,"[('f', 'onnx/original/ACASXU_run2a_4_2_batch_2000.onnx'), ('g', 'onnx/perturbed/ACASXU_run2a_4_2_batch_2000_perturbed_40.onnx')]",./vnnlib/instance_40.vnnlib,100
+linearizenn_2024,onnx/AllInOne_10_10.onnx,vnnlib/prop_10_10_3.vnnlib,900
+linearizenn_2024,onnx/AllInOne_50_50.onnx,vnnlib/prop_50_50_0.vnnlib,900
+linearizenn_2024,onnx/AllInOne_50_120.onnx,vnnlib/prop_50_120_1.vnnlib,900
+lsnc_relu,onnx/relu_quadrotor2d_state.onnx,vnnlib/quadrotor2d_state_11.vnnlib,25
+lsnc_relu,onnx/relu_quadrotor2d_state.onnx,vnnlib/quadrotor2d_state_64.vnnlib,25
+lsnc_relu,onnx/relu_quadrotor2d_state.onnx,vnnlib/quadrotor2d_state_75.vnnlib,25
+malbeware,onnx/malware_malimg_family_scaled_linear-25.onnx,vnnlib/malbeware_family-Autorun.K_label-5_eps-1_idx-27.vnnlib,100
+malbeware,onnx/malware_malimg_family_scaled_4-25.onnx,vnnlib/malbeware_family-Rbotigen_label-18_eps-2_idx-93.vnnlib,100
+malbeware,onnx/malware_malimg_family_scaled_16-25.onnx,vnnlib/malbeware_family-Allaple.L_label-3_eps-1_idx-18.vnnlib,100
+metaroom_2023,./onnx/6cnn_ry_49_8_no_custom_OP.onnx,./vnnlib/spec_idx_124_eps_0.00000436.vnnlib,210
+metaroom_2023,./onnx/6cnn_ry_81_13_no_custom_OP.onnx,./vnnlib/spec_idx_144_eps_0.00000436.vnnlib,210
+metaroom_2023,./onnx/6cnn_ry_28_4_no_custom_OP.onnx,./vnnlib/spec_idx_113_eps_0.00000436.vnnlib,210
+ml4acopf_2024,./onnx/14_ieee_ml4acopf-linear-residual.onnx,./vnnlib/14_ieee_prop4.vnnlib,600
+ml4acopf_2024,./onnx/118_ieee_ml4acopf.onnx,./vnnlib/118_ieee_prop4.vnnlib,600
+ml4acopf_2024,./onnx/14_ieee_ml4acopf-linear-nonresidual.onnx,./vnnlib/14_ieee_prop12.vnnlib,600
+monotonic_acasxu_2026,"[('f', 'onnx/ACASXU_run2a_2_2_batch_2000.onnx'), ('g', 'onnx/ACASXU_run2a_2_2_batch_2000.onnx')]",./vnnlib/instance_0.vnnlib,100
+monotonic_acasxu_2026,"[('f', 'onnx/ACASXU_run2a_5_6_batch_2000.onnx'), ('g', 'onnx/ACASXU_run2a_5_6_batch_2000.onnx')]",./vnnlib/instance_24.vnnlib,100
+monotonic_acasxu_2026,"[('f', 'onnx/ACASXU_run2a_3_7_batch_2000.onnx'), ('g', 'onnx/ACASXU_run2a_3_7_batch_2000.onnx')]",./vnnlib/instance_33.vnnlib,100
+nn4sys,onnx/pensieve_big_parallel.onnx,vnnlib/pensieve_parallel_60.vnnlib,60
+nn4sys,onnx/pensieve_big_parallel.onnx,vnnlib/pensieve_parallel_66.vnnlib,60
+nn4sys,onnx/lindex.onnx,vnnlib/lindex_1.vnnlib,30
+relusplitter,onnx/mnist_fc_vnncomp2022_mnist-net_256x4.onnx,vnnlib/mnist_fc_vnncomp2022_prop_11_0.03.vnnlib,30
+relusplitter,onnx/oval21-benchmark_cifar_base_kw_RSPLITTER_oval21-benchmark_cifar_base_kw-img6098-eps0.006666666666666666.onnx,vnnlib/oval21-benchmark_cifar_base_kw-img6098-eps0.006666666666666666.vnnlib,180
+relusplitter,onnx/oval21-benchmark_cifar_base_kw.onnx,vnnlib/oval21-benchmark_cifar_base_kw-img1204-eps0.024967320261437907.vnnlib,60
+relusplitter_2026,onnx/model_2_2~d2_eps_0.05_sample_6_label_6~pct0.6~cnt76~seed850851855.onnx,vnnlib/d2_eps_0.05_sample_6_label_6.vnnlib,180
+relusplitter_2026,onnx/model_0_0~d0_eps_0.01_sample_18_label_1~pct0.2~cnt25~seed850851855.onnx,vnnlib/d0_eps_0.01_sample_18_label_1.vnnlib,180
+relusplitter_2026,onnx/model_2_2~d2_eps_0.04_sample_18_label_5~pct0.2~cnt25~seed850851855.onnx,vnnlib/d2_eps_0.04_sample_18_label_5.vnnlib,180
+safenlp_2024,onnx/medical/perturbations_0.onnx,vnnlib/medical/hyperrectangle_135.vnnlib,20
+safenlp_2024,onnx/ruarobot/perturbations_0.onnx,vnnlib/ruarobot/hyperrectangle_3961.vnnlib,20
+safenlp_2024,onnx/ruarobot/perturbations_0.onnx,vnnlib/ruarobot/hyperrectangle_2399.vnnlib,20
+sat_relu,onnx/unsat_v69_c389_k35.onnx,vnnlib/unsat_v69_c389_k35.vnnlib,100
+sat_relu,onnx/unsat_v88_c343_k59.onnx,vnnlib/unsat_v88_c343_k59.vnnlib,100
+sat_relu,onnx/sat_v19_c102_k92.onnx,vnnlib/sat_v19_c102_k92.vnnlib,100
+smart_turn_multimodal_2026,onnx/smart-turn-multimodal-cpu.onnx,vnnlib/instance_4.vnnlib,100
+smart_turn_multimodal_2026,onnx/smart-turn-multimodal-cpu.onnx,vnnlib/instance_40.vnnlib,100
+smart_turn_multimodal_2026,onnx/smart-turn-multimodal-cpu.onnx,vnnlib/instance_41.vnnlib,100
+soundnessbench,onnx/model.onnx,vnnlib/model_3.vnnlib,150
+soundnessbench,onnx/model.onnx,vnnlib/model_14.vnnlib,150
+soundnessbench,onnx/model.onnx,vnnlib/model_28.vnnlib,150
+soundnessbench_2026,onnx/model_residual.onnx,vnnlib/properties/property_014.vnnlib,150
+soundnessbench_2026,onnx/model_residual.onnx,vnnlib/properties/property_017.vnnlib,150
+soundnessbench_2026,onnx/model.onnx,vnnlib/properties/property_027.vnnlib,150
+test,onnx/test_nano.onnx,vnnlib/test_nano.vnnlib,60
+test,onnx/test_tiny.onnx,vnnlib/test_tiny.vnnlib,60
+test,onnx/test_unsat.onnx,vnnlib/test_prop.vnnlib,60
+tinyimagenet_2024,onnx/TinyImageNet_resnet_medium.onnx,vnnlib/TinyImageNet_resnet_medium_prop_idx_683_sidx_2348_eps_0.0039.vnnlib,100
+tinyimagenet_2024,onnx/TinyImageNet_resnet_medium.onnx,vnnlib/TinyImageNet_resnet_medium_prop_idx_3110_sidx_1017_eps_0.0039.vnnlib,100
+tinyimagenet_2024,onnx/TinyImageNet_resnet_medium.onnx,vnnlib/TinyImageNet_resnet_medium_prop_idx_5676_sidx_9851_eps_0.0039.vnnlib,100
+tllverifybench_2023,onnx/tllBench_n=2_N=M=8_m=1_instance_0_0.onnx,vnnlib/property_N=8_0.vnnlib,600
+tllverifybench_2023,onnx/tllBench_n=2_N=M=32_m=1_instance_3_2.onnx,vnnlib/property_N=32_2.vnnlib,600
+tllverifybench_2023,onnx/tllBench_n=2_N=M=64_m=1_instance_7_2.onnx,vnnlib/property_N=64_2.vnnlib,600
+traffic_signs_recognition_2023,onnx/3_30_30_QConv_16_3_QConv_32_2_Dense_43_ep_30.onnx,vnnlib/model_30_idx_7573_eps_10.00000.vnnlib,480
+traffic_signs_recognition_2023,onnx/3_30_30_QConv_16_3_QConv_32_2_Dense_43_ep_30.onnx,vnnlib/model_30_idx_11379_eps_1.00000.vnnlib,480
+traffic_signs_recognition_2023,onnx/3_48_48_QConv_32_5_MP_2_BN_QConv_64_5_MP_2_BN_QConv_64_3_BN_Dense_256_BN_Dense_43_ep_30.onnx,vnnlib/model_48_idx_9022_eps_15.00000.vnnlib,480
+vggnet16_2022,onnx/vgg16-7.onnx,vnnlib/spec7_basketball.vnnlib,1200
+vggnet16_2022,onnx/vgg16-7.onnx,vnnlib/spec13_pillow.vnnlib,1200
+vggnet16_2022,onnx/vgg16-7.onnx,vnnlib/spec16_breastplate.vnnlib,1200
+vit_2023,onnx/ibp_3_3_8.onnx,vnnlib/ibp_3_3_8_7011.vnnlib,100
+vit_2023,onnx/ibp_3_3_8.onnx,vnnlib/ibp_3_3_8_5600.vnnlib,100
+vit_2023,onnx/ibp_3_3_8.onnx,vnnlib/ibp_3_3_8_7624.vnnlib,100
+yolo_2023,onnx/TinyYOLO.onnx,vnnlib/TinyYOLO_prop_000290_eps_1_255.vnnlib,300
+yolo_2023,onnx/TinyYOLO.onnx,vnnlib/TinyYOLO_prop_000034_eps_1_255.vnnlib,300
+yolo_2023,onnx/TinyYOLO.onnx,vnnlib/TinyYOLO_prop_000306_eps_1_255.vnnlib,300
