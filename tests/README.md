@@ -22,6 +22,7 @@ These tests check that:
 - `core/` - Tests for dispatcher and parallel processing
 - `utils/` - Tests for VNN-LIB parsing and differentiable solvers
 - `probabilistic/` - Tests for probabilistic verification (conformal inference, surrogates, conformal_reach); includes `probabilistic/flow/` for flow-matching reach (AMLS, importance sampling, calibration, scenario verification)
+- `fairness/` - Tests for group-fairness verification (`examples/FairN2V/group_fairness/`): Clopper–Pearson interval soundness, parity/equalized-odds verdict logic, flow-population plumbing and end-to-end rate recovery (see `fairness/README.md`)
 - `integration/` - Integration tests for complete workflows
 - `experiments/` - Tests for paper-experiment runners
 - `vnncomp/` - Tests for VNN-COMP harness infrastructure
