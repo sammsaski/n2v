@@ -127,6 +127,127 @@ class AffineTransform:
         return HalfSpace(G_white, g_white.reshape(-1, 1))
 
 
+@dataclass(frozen=True)
+class PCATransform:
+    """Whiten-then-project transform for PCA-reduced flow reachability.
+
+    Encodes the map from raw network outputs to the reduced coordinate frame the
+    flow was trained in, composing per-dimension whitening with an orthonormal
+    PCA projection::
+
+        white = (y_raw - mean) / std                 # per-dim whitening
+        z     = (white - pca_mean) @ components.T    # project to k dims
+
+    Drop-in replacement for :class:`AffineTransform` in
+    :class:`ProbabilisticSet` (same ``whiten`` / ``unwhiten`` /
+    ``transform_halfspace`` surface), used when ``flow_reach`` is run with PCA on
+    the output. Because the projection is lossy, ``transform_halfspace`` adds a
+    **residual inflation** so that spec-disjointness certified in the reduced
+    frame remains sound for the true full-dimensional output.
+
+    Attributes:
+        mean: Per-dim whitening shift (train-output mean), shape ``(D,)``.
+        std: Per-dim whitening scale (train-output std, > 0), shape ``(D,)``.
+        components: Orthonormal PCA directions (rows), shape ``(k, D)``.
+        pca_mean: PCA mean in whitened space, shape ``(D,)``.
+        residual_bound: Calibrated upper bound (whitened **ℓ∞** — max component)
+            on the dropped PCA residual ``white - pca_mean - components.T @ z``.
+            ``0.0`` gives the exact linear map (no inflation); ``flow_reach``
+            sets it from a conformal quantile of the calibration residuals so
+            disjointness is sound. Paired with an ℓ1 row-norm in
+            :meth:`transform_halfspace` (Hölder ℓ1–ℓ∞). Default ``0.0``.
+    """
+
+    mean: np.ndarray
+    std: np.ndarray
+    components: np.ndarray
+    pca_mean: np.ndarray
+    residual_bound: float = 0.0
+
+    def __post_init__(self):
+        mean = np.asarray(self.mean, dtype=np.float64).flatten()
+        std = np.asarray(self.std, dtype=np.float64).flatten()
+        comp = np.asarray(self.components, dtype=np.float64)
+        pca_mean = np.asarray(self.pca_mean, dtype=np.float64).flatten()
+        if comp.ndim != 2:
+            raise ValueError(
+                f"PCATransform: components must be 2-D (k, D), got {comp.shape}"
+            )
+        D = comp.shape[1]
+        if not (mean.shape == std.shape == pca_mean.shape == (D,)):
+            raise ValueError(
+                "PCATransform: mean/std/pca_mean must all be shape (D,) matching "
+                f"components' second axis ({D}); got {mean.shape}, {std.shape}, "
+                f"{pca_mean.shape}"
+            )
+        if not np.all(std > 0):
+            raise ValueError("PCATransform: std must be strictly positive")
+        if self.residual_bound < 0:
+            raise ValueError("PCATransform: residual_bound must be >= 0")
+        object.__setattr__(self, 'mean', mean)
+        object.__setattr__(self, 'std', std)
+        object.__setattr__(self, 'components', comp)
+        object.__setattr__(self, 'pca_mean', pca_mean)
+
+    @property
+    def dim(self) -> int:
+        """Reduced (latent) dimensionality k."""
+        return int(self.components.shape[0])
+
+    @property
+    def full_dim(self) -> int:
+        """Full output dimensionality D."""
+        return int(self.components.shape[1])
+
+    def whiten(self, y_raw: np.ndarray) -> np.ndarray:
+        """Map raw outputs ``(…, D)`` to reduced coordinates ``(…, k)``."""
+        white = (np.asarray(y_raw) - self.mean) / self.std
+        return (white - self.pca_mean) @ self.components.T
+
+    def unwhiten(self, z: np.ndarray) -> np.ndarray:
+        """Reconstruct raw outputs ``(…, D)`` from reduced ``(…, k)`` (lossy)."""
+        white = np.asarray(z) @ self.components + self.pca_mean
+        return white * self.std + self.mean
+
+    def residual_norm(self, y_raw: np.ndarray) -> np.ndarray:
+        """Whitened ℓ∞ reconstruction residual per sample, shape ``(…,)``.
+
+        ``max_i |white_i - (pca_mean + componentsᵀ z)_i|`` — the quantity the
+        calibrated :attr:`residual_bound` upper-bounds. Useful for validating
+        the joint (projection ∈ set AND residual ≤ bound) coverage of the
+        full-output reach set.
+        """
+        white = (np.asarray(y_raw) - self.mean) / self.std
+        z = (white - self.pca_mean) @ self.components.T
+        recon = z @ self.components + self.pca_mean
+        return np.abs(white - recon).max(axis=-1)
+
+    def transform_halfspace(self, hs: HalfSpace) -> HalfSpace:
+        """Express raw-space ``G·y_raw <= g`` in the reduced frame, soundly.
+
+        Substituting ``y_raw = mean + std ⊙ (pca_mean + componentsᵀ z + r)``
+        with whitened residual ``‖r‖_∞ <= residual_bound`` into ``G·y_raw <= g``:
+
+            (G ⊙ std) componentsᵀ · z  <=  g − G·(mean + std ⊙ pca_mean)
+                                              + residual_bound · ‖G ⊙ std‖₁  (row-wise)
+
+        The residual term bounds ``|(G⊙std)·r| ≤ ‖G⊙std‖₁ · ‖r‖_∞`` (Hölder), and
+        **enlarges** the unsafe region in the reduced frame by that worst-case
+        residual contribution, so certifying the reach set disjoint from this
+        inflated halfspace implies disjointness from the true full-dimensional
+        unsafe set (conservative → sound). With ``residual_bound = 0`` this is
+        the exact linear coordinate change.
+        """
+        G = np.asarray(hs.G, dtype=np.float64)              # (n_rows, D)
+        g = np.asarray(hs.g, dtype=np.float64).flatten()    # (n_rows,)
+        Gstd = G * self.std[None, :]                        # (n_rows, D)
+        G_red = Gstd @ self.components.T                    # (n_rows, k)
+        offset = G @ (self.mean + self.std * self.pca_mean)  # (n_rows,)
+        inflate = self.residual_bound * np.abs(Gstd).sum(axis=1)  # ℓ1 row-norm
+        g_red = g - offset + inflate
+        return HalfSpace(G_red, g_red.reshape(-1, 1))
+
+
 class ProbabilisticSet:
     """Implicit set ``{y : score(y) <= threshold}`` with a probabilistic guarantee.
 
@@ -367,15 +488,12 @@ class ProbabilisticSet:
             y_np = model(x_te.detach().cpu().numpy())
             y_te = torch.as_tensor(y_np, dtype=torch.float32)
 
-        # Bring into the set's coordinate frame.
+        # Bring into the set's coordinate frame. Use the transform's own
+        # ``whiten`` so this works for both the diagonal AffineTransform and the
+        # whiten-then-project PCATransform (which maps to the reduced frame).
         if self.affine_transform is not None:
-            y_mean = torch.as_tensor(
-                self.affine_transform.mean, dtype=torch.float32,
-            ).to(y_te.device)
-            y_std = torch.as_tensor(
-                self.affine_transform.std, dtype=torch.float32,
-            ).to(y_te.device)
-            y_te = (y_te - y_mean) / y_std
+            z_np = self.affine_transform.whiten(y_te.detach().cpu().numpy())
+            y_te = torch.as_tensor(np.asarray(z_np), dtype=torch.float32)
 
         return self.contains(y_te).float().mean().item()
 

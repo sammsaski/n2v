@@ -34,9 +34,25 @@ import torch.nn as nn
 from n2v.probabilistic.flow.calibrate import calibrate
 from n2v.probabilistic.flow.sampling import sample_box
 from n2v.probabilistic.flow.scores import FlowScore
-from n2v.probabilistic.flow.sets import AffineTransform, ProbabilisticSet
+from n2v.probabilistic.flow.sets import (
+    AffineTransform, PCATransform, ProbabilisticSet,
+)
 from n2v.probabilistic.flow.train import _train_flow, _train_flow_tight
 from n2v.sets import Box
+
+
+def _make_pca(backend: str, n_components: int, seed: int):
+    """Construct a PCA reducer (shared ``fit_transform`` / ``transform`` /
+    ``inverse_transform`` / ``components_`` / ``mean_`` interface)."""
+    if backend == 'randomized':
+        from n2v.probabilistic.dimensionality import RandomizedSVDPCA
+        return RandomizedSVDPCA(n_components=n_components, random_state=seed)
+    if backend == 'deflation':
+        from n2v.probabilistic.dimensionality import DeflationPCA
+        return DeflationPCA(n_components=n_components)
+    raise ValueError(
+        f"pca_backend must be 'randomized' or 'deflation', got {backend!r}"
+    )
 
 
 @dataclass(frozen=True)
@@ -111,6 +127,16 @@ class FlowReachConfig:
     infer_solver: str = 'rk4'
     infer_steps: int = 30
 
+    # Output dimensionality reduction (for high-dim outputs, e.g. dense depth /
+    # segmentation maps that far exceed the ~10s of dims the flow handles well).
+    # When set, the flow is trained on the PCA-reduced output and the returned
+    # ProbabilisticSet carries a PCATransform. Coverage is calibrated in the
+    # reduced frame; a calibrated residual bound (see ``residual_bound`` on the
+    # PCATransform) keeps downstream halfspace spec-disjointness sound for the
+    # full-dimensional output. ``None`` disables PCA (original behaviour).
+    pca_components: Optional[int] = None
+    pca_backend: str = 'randomized'   # 'randomized' (SVD) or 'deflation'
+
     # Reproducibility
     seed: int = 0
     flow_seed: Optional[int] = None
@@ -152,6 +178,16 @@ class FlowReachConfig:
         if self.infer_steps < 1:
             raise ValueError(
                 f"FlowReachConfig.infer_steps must be >= 1, got {self.infer_steps}"
+            )
+        if self.pca_components is not None and self.pca_components < 1:
+            raise ValueError(
+                f"FlowReachConfig.pca_components must be >= 1 or None, "
+                f"got {self.pca_components}"
+            )
+        if self.pca_backend not in ('randomized', 'deflation'):
+            raise ValueError(
+                f"FlowReachConfig.pca_backend must be 'randomized' or "
+                f"'deflation', got {self.pca_backend!r}"
             )
 
 
@@ -299,6 +335,39 @@ def flow_reach(
     y_tr_w = (y_tr - y_mean) / y_std
     y_ca_w = (y_ca - y_mean) / y_std
 
+    raw_output_dim = y_tr_w.shape[1]
+
+    # Optional PCA reduction of the (whitened) output. When enabled, the flow is
+    # trained on the reduced coordinates z = (y_white - pca_mean) @ componentsᵀ.
+    # Coverage is calibrated in this reduced frame; we additionally calibrate a
+    # conformal upper bound on the dropped whitened residual norm and stash it in
+    # the PCATransform, so that halfspace spec-disjointness done in the reduced
+    # frame (with the transform's residual inflation) stays sound for the full
+    # output. See PCATransform / verify_specification.
+    use_pca = (config.pca_components is not None
+               and config.pca_components < raw_output_dim)
+    pca = None
+    residual_bound = 0.0
+    if use_pca:
+        ytrw_np = y_tr_w.detach().cpu().numpy()
+        ycaw_np = y_ca_w.detach().cpu().numpy()
+        pca = _make_pca(config.pca_backend, config.pca_components, flow_seed)
+        z_tr_np = pca.fit_transform(ytrw_np)              # (n_train, k)
+        z_ca_np = pca.transform(ycaw_np)                  # (m, k)
+        # Whitened reconstruction residual on calibration -> conformal bound.
+        # We bound the ℓ∞ (max whitened component) residual: paired with an ℓ1
+        # row-norm in PCATransform.transform_halfspace (Hölder), this is much
+        # tighter than an ℓ2 bound for the sparse (single-cell) halfspaces that
+        # spatial per-region specs use, while staying sound for any halfspace.
+        recon_ca = pca.inverse_transform(z_ca_np)         # (m, D)
+        resid_inf = np.abs(ycaw_np - recon_ca).max(axis=1)  # (m,) whitened ℓ∞
+        residual_bound = float(
+            calibrate(torch.as_tensor(resid_inf, dtype=torch.float32),
+                      config.ell).item()
+        )
+        y_tr_w = torch.as_tensor(z_tr_np, dtype=torch.float32)
+        y_ca_w = torch.as_tensor(z_ca_np, dtype=torch.float32)
+
     output_dim = y_tr_w.shape[1]
 
     # Train the flow. ``internal_standardize=False`` because we pre-whiten.
@@ -329,12 +398,22 @@ def flow_reach(
     calib_scores = base_score_fn(y_ca_w)
     q = calibrate(calib_scores, config.ell).item()
 
-    # Whitening transform consumed by verify_specification's probabilistic
-    # dispatch to map raw-coordinate specs into the set's frame.
-    transform = AffineTransform(
-        mean=y_mean.detach().cpu().numpy(),
-        std=y_std.detach().cpu().numpy(),
-    )
+    # Coordinate transform consumed by verify_specification's probabilistic
+    # dispatch to map raw-coordinate specs into the set's frame. Diagonal
+    # whitening without PCA; a whiten-then-project PCATransform (carrying the
+    # calibrated residual bound for sound spec inflation) with PCA.
+    mean_np = y_mean.detach().cpu().numpy()
+    std_np = y_std.detach().cpu().numpy()
+    if use_pca:
+        transform = PCATransform(
+            mean=mean_np,
+            std=std_np,
+            components=pca.components_,
+            pca_mean=pca.mean_,
+            residual_bound=residual_bound,
+        )
+    else:
+        transform = AffineTransform(mean=mean_np, std=std_np)
 
     # Quiet "y_te unused" — kept for parity with the legacy pipeline so
     # the calibration RNG sequence advances by exactly the same number of

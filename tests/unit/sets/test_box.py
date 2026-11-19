@@ -151,6 +151,32 @@ class TestBox:
         # Generators should have only non-zero columns
         assert box.generators.shape[1] == 1  # Only one non-zero dimension
 
+    def test_generators_are_lazy(self):
+        """Generators are built on first access, not eagerly in __init__.
+
+        Regression: __init__ used to materialise a dense (dim, dim) diagonal
+        (np.diag), which OOMs for image-sized inputs (dim ~ 1e5 -> ~1e10
+        entries). The probabilistic-reach path only reads lb/ub/dim, so
+        construction must stay O(dim).
+        """
+        lb = np.array([[0.0], [0.0]])
+        ub = np.array([[2.0], [4.0]])
+        box = Box(lb, ub)
+        assert box._generators is None          # not computed yet
+        _ = box.generators                       # trigger + cache
+        assert box._generators is not None
+        # cached: same object on second access
+        assert box.generators is box._generators
+
+    def test_high_dim_construction_is_cheap(self):
+        """A very high-dim Box constructs without materialising (dim, dim)."""
+        dim = 200_000
+        box = Box(np.zeros(dim), np.full(dim, 0.03))
+        assert box.dim == dim
+        assert box._generators is None           # lazy: never touched here
+        # lb/ub/dim (all the probabilistic-reach path needs) are usable.
+        assert box.ub.shape == (dim, 1) and float(box.ub[0]) == 0.03
+
     def test_creation_invalid_dimension_mismatch(self):
         """Test that mismatched dimensions raise error."""
         lb = np.array([[0.0], [0.0]])
