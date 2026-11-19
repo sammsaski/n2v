@@ -138,9 +138,19 @@ def test_amls_no_detect_when_truly_disjoint():
 # ---------- Group / spec dispatcher ----------
 
 
-def test_amls_certify_spec_unsat_when_all_disjoint():
-    """Spec with one group containing one unreachable HalfSpace =>
-    unsat_certified True, detected_any False.
+# The two tests below asserted ``unsat_certified is True`` where AMLS detected
+# nothing. AMLS is a detector (see ``AMLSSpecResult``): detecting nothing is
+# not a certificate, and the answer it leads to is the subject of
+# tests/contracts/test_probabilistic_contract.py
+# (``test_amls_never_answers_unsat_without_a_bound``, DEFERRED-BUGS.md bug 3).
+# They now assert what AMLS did observe: which half-spaces it detected, and
+# its estimate.
+
+
+def test_amls_certify_spec_reports_no_detection_in_an_unreachable_region():
+    """One group with one HalfSpace no sample reaches: nothing is detected,
+    and the estimate of its mass is the level-exhaustion value
+    ``quantile ** max_levels``, which is positive.
     """
     flow = _IdentityFlow()
     G = np.array([[1.0, 0.0]])
@@ -148,10 +158,14 @@ def test_amls_certify_spec_unsat_when_all_disjoint():
     hs = HalfSpace(G, g.reshape(-1, 1))
     res = amls_certify_spec(
         flow, [[hs]],
-        n_samples_per_level=200, max_levels=5, n_mcmc_steps=5, seed=0,
+        n_samples_per_level=200, quantile=0.1, max_levels=5, n_mcmc_steps=5,
+        seed=0,
     )
     assert res.detected_any is False
-    assert res.unsat_certified is True
+    (only,), = res.per_hs_results
+    assert only.detected_unsafe is False
+    assert only.final_phi > 0.0
+    assert only.pi_hat == pytest.approx(0.1 ** 5)
 
 
 def test_amls_certify_spec_unknown_when_group_member_detected():
@@ -170,9 +184,9 @@ def test_amls_certify_spec_unknown_when_group_member_detected():
     assert res.unsat_certified is False
 
 
-def test_amls_certify_spec_two_groups_one_disjoint_unsat():
-    """Spec with TWO groups (AND across groups): one group disjoint
-    suffices for UNSAT.
+def test_amls_certify_spec_reports_detection_per_group():
+    """Spec with TWO groups (AND across groups): the results keep the group
+    structure, one list of per-HalfSpace results per group, in order.
     """
     flow = _IdentityFlow()
     # Group 1: unreachable HalfSpace
@@ -185,9 +199,9 @@ def test_amls_certify_spec_two_groups_one_disjoint_unsat():
         flow, [[hs_far], [hs_bulk]],
         n_samples_per_level=200, max_levels=5, n_mcmc_steps=5, seed=0,
     )
-    # Group 1 is disjoint => unsat_certified
-    assert res.unsat_certified is True
-    # But a HalfSpace in group 2 was detected
+    detected = [[r.detected_unsafe for r in group]
+                for group in res.per_hs_results]
+    assert detected == [[False], [True]]
     assert res.detected_any is True
 
 

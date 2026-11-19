@@ -871,3 +871,107 @@ class TestOctatopeSample:
         for i in range(50):
             assert o2.contains(samples[i]), f"Sample {i} not contained after affine map"
 
+
+
+# --------------------------------------------------------------------------- #
+# The constructor, repr, the tolerance and a                                    #
+# non-finite point of contains, and the shape of sample                         #
+# --------------------------------------------------------------------------- #
+from n2v.sets.octatope import UTVPIConstraintSystem
+from tests.known_bugs import known_bug
+
+
+def test_constructor_keeps_its_data_and_refuses_inconsistent_shapes():
+    """``Octatope(center, generators, utvpi)`` stores the given numbers
+    exactly, as float64 (a centre entry 1 + 2^-40, which float32 cannot hold,
+    given as a Python list; float32 generators of dyadic values), reads a 1-D
+    generator array as one column, and refuses with ``ValueError`` a centre
+    of the wrong length, a constraint system over another number of variables
+    and state bounds of the wrong length. Catches the data stored in float32,
+    a 1-D generator array read as a row, and a missing shape check."""
+    utvpi = UTVPIConstraintSystem(3)
+    utvpi.add_constraint(0, 1, 1, -1, 1.0)
+    o = Octatope([1.0 + 2.0 ** -40, -2.5],
+                 np.array([[0.25, 0.5, -1.25], [-1.0, 2.0, 0.75]], dtype=np.float32),
+                 utvpi, state_lb=[-1.0, -2.0], state_ub=[[3.0], [4.0]])
+    assert o.center.dtype == np.float64 and o.generators.dtype == np.float64
+    assert o.center.tolist() == [1.0 + 2.0 ** -40, -2.5]
+    assert o.generators.tolist() == [[0.25, 0.5, -1.25], [-1.0, 2.0, 0.75]]
+    assert (o.dim, o.nVar) == (2, 3)
+    assert o.state_lb.tolist() == [[-1.0], [-2.0]] and o.state_ub.tolist() == [[3.0], [4.0]]
+    column = Octatope(np.zeros(3), np.array([0.5, 1.0, -2.0]), UTVPIConstraintSystem(1))
+    assert column.generators.tolist() == [[0.5], [1.0], [-2.0]]
+    with pytest.raises(ValueError):
+        Octatope(np.zeros(3), np.zeros((2, 3)), UTVPIConstraintSystem(3))
+    with pytest.raises(ValueError):
+        Octatope(np.zeros(2), np.zeros((2, 3)), UTVPIConstraintSystem(4))
+    with pytest.raises(ValueError):
+        Octatope(np.zeros(2), np.zeros((2, 3)), UTVPIConstraintSystem(3),
+                 state_lb=np.zeros(3))
+    with pytest.raises(ValueError):
+        Octatope(np.zeros(2), np.zeros((2, 3)), UTVPIConstraintSystem(3),
+                 state_ub=np.zeros(1))
+
+
+def test_repr_names_its_entries_variables_and_rows():
+    """``repr`` names the number of entries, of kernel variables and of rows,
+    each its own number. Catches two of them swapped."""
+    o = Octatope.from_bounds(np.array([-1.0, 0.0, 2.0]), np.array([1.0, 4.0, 2.5]))
+    assert repr(o) == "Octatope(dim=3, nVar=3, nConstraints=6)"
+    assert repr(o.affine_map(np.ones((2, 3)))) == "Octatope(dim=2, nVar=3, nConstraints=6)"
+
+
+def test_contains_reads_its_tolerance():
+    """``tolerance`` is the slack of the membership test. On the box
+    [-3, 5] x [0.5, 4.5] (half-widths 4 and 2) the point 2^-12 beyond the
+    face y0 = 5 breaks its kernel row by 2^-14: accepted at tolerance 2^-10,
+    rejected at the default 1e-7 and at 0. The point 2^-28 beyond that face
+    (2^-30 in the kernel) is accepted at the default and rejected at 0; a
+    point on the face is accepted at 0. Catches the option ignored (a fixed
+    1e-7) and a tolerance of 0 read as 'use the default'."""
+    o = Octatope.from_bounds(np.array([-3.0, 0.5]), np.array([5.0, 4.5]))
+    near = np.array([5.0 + 2.0 ** -12, 2.5])
+    nearer = np.array([5.0 + 2.0 ** -28, 2.5])
+    assert o.contains(near, tolerance=2.0 ** -10)
+    assert not o.contains(near)
+    assert not o.contains(near, tolerance=0.0)
+    assert o.contains(nearer)
+    assert not o.contains(nearer, tolerance=0.0)
+    assert o.contains(np.array([5.0, 2.5]), tolerance=0.0)
+
+
+_NON_FINITE = known_bug(
+    9, "Hexatope.contains and Octatope.contains answer True for a point with a "
+       "NaN or an infinite entry: each of their checks compares a NaN residual "
+       "or row value with the tolerance, which is False, so none rejects it")
+
+
+@pytest.mark.parametrize("point", ["finite-far", pytest.param("non-finite", marks=_NON_FINITE)])
+def test_contains_says_false_for_a_point_far_outside_or_not_finite(point):
+    """A point far outside the box, and points with a NaN or an infinite
+    entry, are not members of a bounded set: ``contains`` answers False (or
+    refuses a non-finite point with ``ValueError``). The finite point is the
+    passing neighbour. Catches a membership test that a NaN passes."""
+    o = Octatope.from_bounds(np.array([-3.0, 0.5]), np.array([5.0, 4.5]))
+    points = ([[100.0, 2.5]] if point == "finite-far"
+              else [[np.nan, 2.5], [np.inf, 2.5], [-np.inf, -np.inf]])
+    for p in points:
+        try:
+            answer = o.contains(np.array(p))
+        except ValueError:
+            continue
+        assert not answer, f"Octatope.contains({p}) is True"
+
+
+_SAMPLE_OF_NONE = known_bug(
+    9, "Hexatope.sample(0) and Octatope.sample(0) return an array of shape "
+       "(0,), not the (0, dim) their docstring states")
+
+
+@pytest.mark.parametrize("n", [3, pytest.param(0, marks=_SAMPLE_OF_NONE)])
+def test_sample_has_shape_n_by_dim(n):
+    """``sample(n)`` returns an (n, dim) array, also for n = 0 (a value Python
+    reads as false). Catches the count or the layout of the result wrong;
+    n = 3 is the passing neighbour."""
+    o = Octatope.from_bounds(np.array([-3.0, 0.5, -2.0]), np.array([5.0, 4.5, -1.0]))
+    assert o.sample(n).shape == (n, 3)

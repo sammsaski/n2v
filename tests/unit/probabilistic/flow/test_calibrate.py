@@ -127,3 +127,68 @@ class TestScoreAgnosticEmpiricalCoverage:
                 f"score={score_name}: marginal coverage {mean_cov:.5f} "
                 f"below floor {floor:.5f} (target {1 - alpha:.5f})"
             )
+
+
+# ---------------------------------------------------------------------------
+# Ranks at and beyond the ends of [1, m]
+# ---------------------------------------------------------------------------
+from fractions import Fraction  # noqa: E402
+from math import comb  # noqa: E402
+
+from tests.known_bugs import DID_NOT_RAISE, known_bug  # noqa: E402
+
+
+def _binomial_tail(m, ell, epsilon):
+    """P(Bin(m, 1 - epsilon) <= ell - 1) in fractions; 0 for ell <= 0 and 1
+    for ell > m, the limits of a threshold below or above every score."""
+    e = Fraction(epsilon)
+    return sum((comb(m, k) * (1 - e)**k * e**(m - k) for k in range(min(ell, m + 1))),
+               Fraction(0))
+
+
+class TestRankOutsideOneToM:
+    @pytest.mark.parametrize("ell", [
+        pytest.param(0, id="ell=0", marks=known_bug(
+            13, "calibrate(scores, 0) returns the largest score (index -1) "
+                "although no 0-th smallest score exists", raises=DID_NOT_RAISE)),
+        pytest.param(6, id="ell=m+1", marks=known_bug(
+            23, "calibrate(scores, m + 1) raises IndexError instead of a "
+                "ValueError naming the rank", raises=IndexError)),
+    ])
+    def test_calibrate_refuses_a_rank_outside_one_to_m(self, ell):
+        """There is no ell-th smallest of m = 5 scores for ell = 0 or
+        ell = 6; calibrate must say so with ValueError. Today ell = 0 wraps
+        to the largest score, a threshold for a rank the guarantee is not
+        computed for (a caller thinking in 0-based ranks gets it silently)."""
+        from n2v.probabilistic.flow.calibrate import calibrate
+
+        with pytest.raises(ValueError):
+            calibrate(torch.tensor([5.0, 3.0, 1.0, 4.0, 2.0]), ell)
+
+    @pytest.mark.parametrize("ell", [
+        pytest.param(5, id="ell=m"),
+        pytest.param(0, id="ell=0", marks=known_bug(
+            13, "compute_guarantee with ell = 0 answers a NaN confidence "
+                "instead of refusing or answering the limit 0")),
+        pytest.param(6, id="ell=m+1", marks=known_bug(
+            13, "compute_guarantee with ell = m + 1 answers a NaN confidence "
+                "instead of refusing or answering the limit 1")),
+    ])
+    def test_compute_guarantee_at_and_beyond_the_ends_of_the_rank(self, ell):
+        """For ell in [1, m] the confidence is the binomial tail
+        P(Bin(m, 1 - epsilon) <= ell - 1) (here m = 5, the end ell = m).
+        Outside, compute_guarantee must refuse with ValueError or answer the
+        limit of the tail: 0 for ell = 0 (a threshold below every score) and
+        1 for ell = m + 1 (a threshold above every score). Today it answers
+        NaN, which the set then states as its confidence."""
+        from n2v.probabilistic.flow.calibrate import compute_guarantee
+
+        m, epsilon = 5, 0.25
+        try:
+            coverage, confidence = compute_guarantee(m, ell, epsilon)
+        except ValueError:
+            assert not 1 <= ell <= m, f"rank {ell} of {m} refused"
+            return
+        assert coverage == 1 - epsilon
+        expected = float(_binomial_tail(m, ell, epsilon))
+        assert abs(confidence - expected) <= 1e-12, (confidence, expected)

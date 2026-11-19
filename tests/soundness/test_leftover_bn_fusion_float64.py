@@ -66,7 +66,11 @@ def _worst_miss(lb, ub, y):
 
 
 def test_fused_linear_bn_box_contains_the_real_output():
-    # The reviewer's repro: every coordinate was missed, by up to 1.5e-6.
+    """A Box from a point through Linear > BatchNorm1d with random
+    non-dyadic parameters holds the real-number output (60-digit reference),
+    no slack. Catches a Box sent through a fold rounded to float32 (every
+    coordinate missed, by up to 1.5e-6) and a Box
+    rule whose rounding margin does not cover its own fold."""
     rng = np.random.default_rng(0)
     for _ in range(40):
         lin, bn = nn.Linear(3, 2), _randomize(nn.BatchNorm1d(2), rng)
@@ -82,6 +86,11 @@ def test_fused_linear_bn_box_contains_the_real_output():
 
 
 def test_fused_star_zono_imagestar_are_float64_close():
+    """Star and Zono from a point through a fused Linear > BatchNorm1d, and
+    an ImageStar through a fused Conv2d > BatchNorm2d, miss the real-number
+    output by less than 1e-12 (their affine maps round to nearest, PLAN step
+    7b). Catches a fold computed or kept in float32 again (a miss of about
+    1e-6)."""
     rng = np.random.default_rng(1)
     for _ in range(10):
         lin, bn1 = nn.Linear(3, 2), _randomize(nn.BatchNorm1d(2), rng)
@@ -106,8 +115,11 @@ def test_fused_star_zono_imagestar_are_float64_close():
 
 
 def test_fused_model_keeps_the_callers_dtype_and_model():
-    # The float64 fused layers still take and return the network's float32,
-    # and fusing leaves the caller's model untouched.
+    """The float64 fused layers still take and return the network's float32,
+    compute the original function, and fusing leaves the caller's model and
+    its hooks untouched. Catches a fusion that edits the caller's model in
+    place, or whose cast hooks are missing or registered on the caller's
+    modules."""
     rng = np.random.default_rng(2)
     model = nn.Sequential(nn.Conv2d(1, 2, 3), _randomize(nn.BatchNorm2d(2), rng),
                           nn.ReLU(), nn.Flatten(), nn.Linear(18, 3),
@@ -124,11 +136,11 @@ def test_fused_model_keeps_the_callers_dtype_and_model():
 
 
 def test_fused_box_contains_a_pruned_neurons_real_output():
-    # An all-zero weight row (a pruned neuron) before a BatchNorm: a fused
-    # layer would map any Box to its rounded bias as a single point, which
-    # cannot contain the irrational real value. reach_pytorch_model therefore
-    # keeps BatchNorm unfused for a Box input (batchnorm_box bounds its own
-    # fold rounding).
+    """An all-zero weight row (a pruned neuron) before a BatchNorm: a fused
+    layer would map any Box to its rounded bias as a single point, which
+    cannot contain the irrational real value. Catches a model entry that
+    fuses for a Box input (reach_pytorch_model keeps BatchNorm unfused for a
+    Box, and batchnorm_box bounds its own fold rounding)."""
     rng = np.random.default_rng(3)
     lin, bn = nn.Linear(4, 3), _randomize(nn.BatchNorm1d(3), rng)
     with torch.no_grad():
@@ -141,9 +153,10 @@ def test_fused_box_contains_a_pruned_neurons_real_output():
 
 
 def test_fused_model_scripts_and_float_drops_the_casts():
-    # fuse_batchnorm is public: its result must pass torch.jit.script (the
-    # cast hooks need type annotations), and after .float() a trace records
-    # no casts, so a torch or ONNX use of the model runs in float32.
+    """fuse_batchnorm is public: its result must pass torch.jit.script and
+    compute the original function, and after .float() a trace records no
+    casts, so a torch or ONNX use of the model runs in float32. Catches cast
+    hooks without type annotations and casts that stay after .float()."""
     rng = np.random.default_rng(4)
     model = nn.Sequential(nn.Conv2d(1, 2, 3), _randomize(nn.BatchNorm2d(2), rng),
                           nn.ReLU()).eval()

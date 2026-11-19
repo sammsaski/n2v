@@ -11,6 +11,7 @@ from n2v.sets.volume import (
     star_union_volume_sound_lower,
     star_volume,
 )
+from tests.known_bugs import known_bug
 
 
 def _axis_aligned_star(lo, hi):
@@ -285,12 +286,14 @@ class TestStarUnionVolumeMC:
         """Both contains methods should give statistically-equivalent volumes."""
         a = _axis_aligned_star([0.0, 0.0], [1.0, 1.0])
         b = _axis_aligned_star([0.5, 0.5], [1.5, 1.5])
+        # 3000 draws (was 20000, 14 s): the comparison is exact (same draws),
+        # so the instance size does not change what it catches.
         v_lp = star_union_volume_mc(
-            [a, b], n_samples=20_000, batch_size=5_000, seed=0,
+            [a, b], n_samples=3_000, batch_size=1_000, seed=0,
             contains_method='lp',
         )
         v_alg = star_union_volume_mc(
-            [a, b], n_samples=20_000, batch_size=5_000, seed=0,
+            [a, b], n_samples=3_000, batch_size=1_000, seed=0,
             contains_method='algebraic',
         )
         # Same seed + same bbox + same sample points -> identical inside counts.
@@ -334,3 +337,164 @@ class TestStarUnionSoundLower:
             [a, b], n_samples=20_000, batch_size=5_000, seed=0,
         )
         assert lower <= mc.ci_high
+
+
+def _cut_parallelogram():
+    """x = (5, -7) + [[2, 3], [1, -1]] a, a in [0.5, 2] x [1, 3], cut by
+    a0 + a1 <= 3.5 and a0 - a1 <= 0.5: about 58 % of the predicate box, and
+    one Monte Carlo draw is 0 or (box volume 3) x (|det| 5) = 15."""
+    return Star(V=np.array([[5.0, 2.0, 3.0], [-7.0, 1.0, -1.0]]),
+                C=np.array([[1.0, 1.0], [1.0, -1.0]]), d=np.array([3.5, 0.5]),
+                pred_lb=np.array([0.5, 1.0]), pred_ub=np.array([2.0, 3.0]))
+
+
+def _diamond_and_bar():
+    """|x| + |y| <= 1 and the box [0, 2] x [-0.5, 0.5]."""
+    diamond = Star(V=np.array([[0.0, 0.5, 0.5], [0.0, 0.5, -0.5]]), C=None,
+                   d=None, pred_lb=-np.ones(2), pred_ub=np.ones(2))
+    return [diamond, _axis_aligned_star([0.0, -0.5], [2.0, 0.5])]
+
+
+class TestMonteCarloUnitValues:
+    """Values of the Monte Carlo estimates that do not decide whether the
+    interval holds the volume, computed by hand: the standard error, the
+    number of draws, the seed."""
+
+    def test_star_volume_standard_error_is_the_binomial_error_of_the_volume(self):
+        """se = sqrt(f (1 - f) / n) times the range of one draw (15), with f
+        the inside fraction. Catches a standard error scaled by the box
+        volume without the Jacobian |det| = 5."""
+        v = star_volume(_cut_parallelogram(), method='mc', n_samples=4_000,
+                        seed=0)
+        frac = v.mean / 15.0
+        if not 0.0 < frac < 1.0:
+            pytest.fail(f"inside fraction {frac}: the case needs one in (0, 1)")
+        assert v.se == pytest.approx(
+            np.sqrt(frac * (1 - frac) / 4_000) * 15.0, rel=1e-9)
+
+    def test_union_standard_error_is_the_binomial_error_of_the_volume(self):
+        """With the sampling box [-1, 2] x [-1, 1] (area 6) given: se =
+        sqrt(f (1 - f) / n) times 6. Catches the standard error of the
+        inside fraction reported as that of the volume."""
+        v = star_union_volume_mc(
+            _diamond_and_bar(), bbox=(np.array([-1.0, -1.0]),
+                                      np.array([2.0, 1.0])),
+            n_samples=2_000, batch_size=2_000, seed=0,
+            contains_method='algebraic')
+        frac = v.mean / 6.0
+        if not 0.0 < frac < 1.0:
+            pytest.fail(f"inside fraction {frac}: the case needs one in (0, 1)")
+        assert v.se == pytest.approx(
+            np.sqrt(frac * (1 - frac) / 2_000) * 6.0, rel=1e-9)
+
+    def test_last_partial_batch_draws_only_the_remaining_samples(self):
+        """1100 draws in batches of 500: two full batches and one of 100.
+        Catches a last batch that draws a full batch (1500 reported, and an
+        interval computed for draws that were not asked for)."""
+        v = star_union_volume_mc(_diamond_and_bar(), n_samples=1_100,
+                                 batch_size=500, seed=0,
+                                 contains_method='algebraic')
+        assert v.n_samples == 1_100
+
+    def test_seed_selects_the_draws(self):
+        """Ten seeds give ten independent estimates of an inside fraction
+        near 0.58 from 1000 draws: the chance that all ten agree is below
+        0.026^9 < 1e-14. Eight seeds of the union estimate (fraction near
+        0.54 from 300 draws) all agree with chance below 0.047^7 < 1e-9. The
+        same seed gives the same estimate. Catches a sampler of either
+        function seeded with a constant instead of ``seed``."""
+        star = _cut_parallelogram()
+        means = [star_volume(star, method='mc', n_samples=1_000, seed=k).mean
+                 for k in range(10)]
+        assert len(set(means)) > 1, means
+        assert star_volume(star, method='mc', n_samples=1_000,
+                           seed=4).mean == means[4]
+        union = [star_union_volume_mc(_diamond_and_bar(), n_samples=300,
+                                      batch_size=300, seed=k,
+                                      contains_method='algebraic').mean
+                 for k in range(8)]
+        assert len(set(union)) > 1, union
+
+    @pytest.mark.parametrize('function, n_samples, confidence', [
+        pytest.param('star', 1, 0.99, id='star-one-draw'),
+        pytest.param('star', 0, 0.99, id='star-no-draws', marks=known_bug(
+            8, "star_volume(method='mc', n_samples=0) divides the inside "
+               "count by zero (ZeroDivisionError) where a ValueError or an "
+               "unbounded interval is due; _hoeffding_half_width's guard for "
+               "no draws is never reached", raises=ZeroDivisionError)),
+        pytest.param('star', 100, 1.0, id='star-confidence-one',
+                     marks=known_bug(
+            8, "the Monte Carlo volume functions take confidence=1 into "
+               "log(2 / (1 - confidence)) and raise ZeroDivisionError where a "
+               "ValueError or an unbounded interval is due",
+            raises=ZeroDivisionError)),
+        pytest.param('union', 1, 0.99, id='union-one-draw'),
+        pytest.param('union', 0, 0.99, id='union-no-draws', marks=known_bug(
+            8, "star_union_volume_mc(n_samples=0) divides the inside count "
+               "by zero (ZeroDivisionError) where a ValueError or an "
+               "unbounded interval is due", raises=ZeroDivisionError)),
+    ])
+    def test_a_request_without_a_finite_interval_is_refused_or_unbounded(
+            self, function, n_samples, confidence):
+        """No draws, or confidence 1, admit no finite Hoeffding interval
+        (``_hoeffding_half_width`` returns an infinite half-width for no
+        draws). The call must refuse with ``ValueError`` or return an
+        interval that holds the area 6 of [0, 2] x [0, 3]. One draw at 99 %
+        is the passing neighbour: its half-width 6 sqrt(ln(200) / 2) = 9.8
+        exceeds the range of a draw, so its interval holds 6 whatever the
+        draw. Catches a zero option value read as a division by zero."""
+        box = Star.from_bounds(np.zeros((2, 1)), np.array([[2.0], [3.0]]))
+        try:
+            if function == 'star':
+                v = star_volume(box, method='mc', n_samples=n_samples,
+                                confidence=confidence)
+            else:
+                v = star_union_volume_mc([box], n_samples=n_samples,
+                                         batch_size=10, confidence=confidence,
+                                         contains_method='algebraic')
+        except ValueError:
+            return
+        assert v.ci_low <= 6.0 <= v.ci_high, v
+
+    @pytest.mark.parametrize('method', ['exact', 'mc'])
+    def test_empty_star_has_volume_zero(self, method):
+        """``Star()`` holds no point. Catches an empty-star test that looks
+        only for ``V is None`` (the empty constructor stores a 0 x 0 array,
+        on which the Monte Carlo branch counts every draw inside a box of
+        volume 1)."""
+        v = star_volume(Star(), method=method, n_samples=100)
+        assert v.mean == 0.0 and v.ci_high == 0.0, v
+
+
+class TestStarUnionSoundLowerArgmax:
+    def test_max_star_names_the_largest_member_when_it_comes_first(self):
+        """[[0, 2] x [0, 3], [0, 1]^2]: the bound is 6 and names member 0.
+        Catches an argmax that is updated for every member, not only for a
+        larger one, and so names the last member."""
+        big = _axis_aligned_star([0.0, 0.0], [2.0, 3.0])
+        small = _axis_aligned_star([0.0, 0.0], [1.0, 1.0])
+        v = star_union_volume_sound_lower([big, small])
+        assert v.meta['argmax_star'] == 0, v.meta
+        assert v.mean == pytest.approx(6.0, rel=1e-9)
+
+
+class TestVolumeZeroRegimes:
+    def test_sound_lower_of_members_of_volume_zero_is_zero(self):
+        """``Star()`` and the diagonal segment of a rank-deficient square
+        basis: no member has volume, so the bound is 0 and names no member
+        (-1). Catches an argmax that names a member anyway."""
+        flat = Star(V=np.array([[0.0, 1.0, 0.0], [0.0, 1.0, 0.0]]), C=None,
+                    d=None, pred_lb=-np.ones(2), pred_ub=np.ones(2))
+        v = star_union_volume_sound_lower([Star(), flat])
+        assert v.mean == 0.0
+        assert v.meta['argmax_star'] == -1, v.meta
+
+    def test_union_of_a_star_with_a_zero_width_coordinate_has_volume_zero(self):
+        """[0, 1] x {2} x [0, 3]: the union box has volume 0, so the union
+        has volume 0 with an interval [0, 0]. Catches a box volume that is
+        not the product of the widths (a sum gives 4, and every draw of the
+        flat box lies in the flat star)."""
+        flat = Star.from_bounds(np.array([[0.0], [2.0], [0.0]]),
+                                np.array([[1.0], [2.0], [3.0]]))
+        v = star_union_volume_mc([flat], n_samples=200, batch_size=200)
+        assert v.mean == 0.0 and v.ci_high == 0.0, v

@@ -6,7 +6,7 @@ import pytest
 import numpy as np
 from n2v.utils.verify_specification import verify_specification
 from n2v.sets import Star, Box, HalfSpace
-from n2v.sets.probabilistic_box import ProbabilisticBox
+from tests.known_bugs import DID_NOT_RAISE, known_bug
 
 
 class TestVerifySpecificationBasic:
@@ -174,16 +174,9 @@ class TestVerifySpecificationMultipleStars:
 class TestVerifySpecificationEdgeCases:
     """Test edge cases and error handling."""
 
-    def test_empty_reach_set(self):
-        """Test with empty reach set list."""
-        G = np.array([[1, 0]], dtype=np.float32)
-        g = np.array([[5]], dtype=np.float32)
-        halfspace = HalfSpace(G, g)
-
-        result = verify_specification([], halfspace)
-
-        # No reach sets -> property satisfied (vacuously true)
-        assert result.verdict == "UNSAT"
+    # An empty list of reach sets used to be pinned here as UNSAT. The
+    # contract is the opposite (a bare list carries no emptiness certificate):
+    # tests/contracts/test_verify_api.py::test_empty_list_of_reach_sets_is_refused.
 
     def test_invalid_property_type(self):
         """Test with invalid property type."""
@@ -457,21 +450,11 @@ class TestVerifySpecificationBox:
         result = verify_specification([box], [{'Hg': hs}])
         assert result.verdict == "UNSAT"
 
-    def test_probabilistic_box_uses_box_path(self):
-        """ProbabilisticBox (inherits Box) should use the Box fast path."""
-        pbox = ProbabilisticBox(
-            lb=np.array([0.0, 0.0]),
-            ub=np.array([1.0, 1.0]),
-            m=100, ell=99, epsilon=0.01
-        )
-
-        # Disjoint: x1 >= 2
-        G = np.array([[-1, 0]], dtype=np.float64)
-        g = np.array([[-2]], dtype=np.float64)
-        hs = HalfSpace(G, g)
-
-        result = verify_specification([pbox], hs)
-        assert result.verdict == "UNSAT"
+    # A ProbabilisticBox was checked here on the Box path and the bare UNSAT
+    # asserted. The box holds the output only with a stated probability, so
+    # that UNSAT is not a proof; the contract is tests/contracts/
+    # test_probabilistic_contract.py
+    # (``test_unsat_from_a_probabilistic_box_says_it_is_probabilistic``).
 
     def test_box_high_dimensional_disjoint(self, monkeypatch):
         """A Box is checked by interval arithmetic, never through a Star.
@@ -514,3 +497,103 @@ class TestVerifySpecificationBox:
         result_box = verify_specification([box], hs)
         result_star = verify_specification([star], hs)
         assert result_box == result_star
+        # The independent answer: y0 - y1 >= 0.7 - 0.3 = 0.4 > 0 on the box,
+        # so the region y0 - y1 <= 0 is missed by a wide margin.
+        assert result_box.verdict == "UNSAT"
+
+
+class TestVerifySpecificationRefusals:
+    """What verify_specification must refuse rather than answer.
+
+    A refusal is the settled ``ValueError`` for an input that cannot be read,
+    or the deliberate ``TypeError`` the function documents (its message says
+    what the argument "must be"); an answer, or an exception raised by accident
+    deeper down, is not one.
+    """
+
+    @staticmethod
+    def _star():
+        return Star.from_bounds(np.zeros((2, 1)), np.ones((2, 1)))
+
+    @pytest.mark.parametrize("kind", ["Star", "Box"])
+    def test_config_with_a_sound_reach_set_is_refused(self, kind):
+        """A probabilistic configuration has no meaning for a sound reach set;
+        accepting it silently would let a caller believe a probabilistic
+        method ran. Catches the TypeError downgraded to a log message."""
+        from n2v.utils.verify_specification import ProbVerifyConfig
+        s = (self._star() if kind == "Star"
+             else Box(np.zeros(2), np.ones(2)))
+        far = HalfSpace(np.array([[-1.0, 0.0]]), np.array([[-2.0]]))
+        with pytest.raises(TypeError, match="config"):
+            verify_specification([s], far, config=ProbVerifyConfig())
+
+    def test_a_reach_set_of_an_unknown_type_is_refused(self):
+        """A list whose second item is not a set (a bare array) after a star
+        that misses the region: nothing can be said about the array, so the
+        call raises TypeError instead of counting it as disjoint (which would
+        answer UNSAT)."""
+        far = HalfSpace(np.array([[-1.0, 0.0]]), np.array([[-2.0]]))
+        with pytest.raises(TypeError, match="Cannot verify"):
+            verify_specification([self._star(), np.zeros(2)], far)
+
+    @pytest.mark.parametrize("prop", [
+        pytest.param(lambda hs: 3.0, id="a-number"),
+        pytest.param(lambda hs: {"Hg": (hs, hs)}, id="a-dict-whose-Hg-is-a-tuple"),
+        pytest.param(lambda hs: [{"Hg": hs}, {"Hg": 3}],
+                     id="a-group-whose-Hg-is-a-number"),
+    ])
+    def test_a_property_of_another_shape_is_refused(self, prop):
+        """The three deliberate refusals of the property reader. Catches a
+        dict or a group of an unreadable shape read as having no group (an
+        answer where a refusal is due)."""
+        hs = HalfSpace(np.array([[1.0, 0.0]]), np.array([[0.5]]))
+        with pytest.raises(TypeError, match="must be"):
+            verify_specification([self._star()], prop(hs))
+
+    @pytest.mark.parametrize("prop", [
+        pytest.param(lambda hs: {"G": hs.G, "g": hs.g},
+                     marks=known_bug(23, "a property dict without 'Hg' crashes "
+                                         "with KeyError instead of a refusal",
+                                     raises=KeyError),
+                     id="a-dict-without-Hg"),
+        pytest.param(lambda hs: [1.0, 2.0],
+                     marks=known_bug(23, "a list of items that are not "
+                                         "half-spaces is taken as one OR group "
+                                         "and crashes with AttributeError when "
+                                         "the first item is checked",
+                                     raises=AttributeError),
+                     id="a-list-of-numbers"),
+        pytest.param(lambda hs: [hs, {"Hg": hs}],
+                     marks=known_bug(6, "a list that holds a HalfSpace and then "
+                                        "a dict is taken as one OR group and "
+                                        "answered (UNKNOWN here) instead of "
+                                        "refused", raises=DID_NOT_RAISE),
+                     id="a-halfspace-then-a-dict"),
+    ])
+    def test_a_malformed_property_is_refused(self, prop):
+        """Property shapes no documented form covers. The region y0 <= 1/2
+        meets the star, so the answer today is UNKNOWN where nothing
+        crashes."""
+        hs = HalfSpace(np.array([[1.0, 0.0]]), np.array([[0.5]]))
+        try:
+            verify_specification([self._star()], prop(hs))
+        except ValueError:
+            return
+        except TypeError as error:
+            if "must be" in str(error):
+                return
+            raise
+        pytest.fail("DID NOT RAISE a refusal")
+
+    @known_bug(6, "a half-space with NaN in G or g is accepted and answered "
+                  "(UNKNOWN on a Star and on a Box) instead of refused; NaN "
+                  "states no region", raises=DID_NOT_RAISE)
+    def test_a_property_with_a_nan_is_refused(self):
+        """NaN in a threshold: no comparison with it holds, so the property
+        states no unsafe region and cannot be read. A refusal at
+        construction or at the call is both fine. (The Box path answers the
+        same way; one marked case for the one missing check.)"""
+        with pytest.raises(ValueError):
+            verify_specification(
+                [self._star()],
+                HalfSpace(np.array([[1.0, 0.0]]), np.array([[np.nan]])))

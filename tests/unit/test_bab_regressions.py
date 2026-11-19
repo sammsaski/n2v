@@ -60,8 +60,10 @@ def test_forced_neurons_are_pinned_exactly(decisions, lo, hi):
     assert unstable == []
     assert out.nVar == s.nVar
     olb, oub = out.get_ranges()
-    assert float(np.ravel(olb)[0]) == pytest.approx(lo, abs=1e-12)
-    assert float(np.ravel(oub)[0]) == pytest.approx(hi, abs=1e-12)
+    # sound with no inward slack; exact up to rounding-sized outward padding
+    olb, oub = float(np.ravel(olb)[0]), float(np.ravel(oub)[0])
+    assert lo - 1e-12 <= olb <= lo, olb
+    assert hi <= oub <= hi + 1e-12, oub
 
 
 def test_fully_split_leaf_proves_tight_margin():

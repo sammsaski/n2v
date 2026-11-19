@@ -7,6 +7,10 @@
     torch/ONNX flattened output), like ImageStar.
   * An LP failure in one AND-group leaves only that group undecided; a later
     group that is certified disjoint still proves UNSAT.
+  * ImageStar reach sets are checked in CHW order too, directly and through
+    a model; a Box LP's "infeasible" is a proof only once confirmed.
+  * ``spec_summary`` (and the ``verbose`` route) and
+    ``distribute_and_of_or_of_and``, against the meaning of each spec shape.
 """
 
 import logging
@@ -19,10 +23,11 @@ import torch.nn as nn
 
 import n2v.utils.verify_specification as vs
 from n2v.nn import NeuralNetwork
-from n2v.sets import Box, ImageZono, Star
+from n2v.sets import Box, ImageStar, ImageZono, Star
 from n2v.sets.halfspace import HalfSpace
 from n2v.utils.lpsolver import LPFailure
 from n2v.utils.verify_specification import verify_specification
+from tests.known_bugs import known_bug
 
 
 def _exact_box_min(row, lb, ub):
@@ -221,3 +226,246 @@ def test_star_interval_margin_is_decided_without_an_lp(monkeypatch):
     assert vs._verify_specification_star(S, spec_clear) is True
     monkeypatch.undo()
     assert vs._verify_specification_star(S, spec_touch) is False
+
+
+# ---------------------------------------------------------------------------
+# ImageStar specs use CHW order (the counterpart of the ImageZono cases)
+# ---------------------------------------------------------------------------
+
+def _chw_to_stored(channels, height, width, k):
+    """The stored (height, width, channel) index of CHW entry k."""
+    c, rest = divmod(k, height * width)
+    h, w = divmod(rest, width)
+    return (h * width + w) * channels + c
+
+
+def test_imagestar_spec_uses_chw_order():
+    # (C, H, W) = (2, 2, 3) stored HWC: channel c of every pixel is in
+    # [5c, 5c + 1]. CHW entry 6 is channel 1 at pixel (0, 0), in [5, 6], while
+    # stored entry 6 is channel 0 at pixel (1, 0), in [0, 1]; CHW entry 1 is
+    # channel 0 at pixel (0, 1), in [0, 1], while stored entry 1 is channel 1
+    # at pixel (0, 0), in [5, 6]. Catches an ImageStar checked in its stored
+    # order (a false UNSAT on the first spec, a missed one on the second).
+    if (_chw_to_stored(2, 2, 3, 6), _chw_to_stored(2, 2, 3, 1)) != (1, 2):
+        pytest.fail("the CHW to HWC index map of the case is wrong")
+    lo = np.zeros((2, 3, 2))
+    lo[:, :, 1] = 5.0
+    S = ImageStar.from_bounds(lo, lo + 1.0, 2, 3, 2)
+    G = np.zeros((1, 12))
+    G[0, 6] = -1.0                       # CHW y6 >= 5.5: reachable
+    assert verify_specification([S], HalfSpace(G, np.array([[-5.5]]))).verdict \
+        == "UNKNOWN"
+    G = np.zeros((1, 12))
+    G[0, 1] = -1.0                       # CHW y1 >= 5.5: unreachable
+    assert verify_specification([S], HalfSpace(G, np.array([[-5.5]]))).verdict \
+        == "UNSAT"
+
+
+def test_imagestar_conv_output_matches_torch_order():
+    # Conv2d(1 -> 2, k=1) on a 2x3 image, x in [0, 1]: channel 0 = x,
+    # channel 1 = 10 - x. CHW entry 6 is channel 1 at pixel (0, 0); the stored
+    # entry 6 is channel 0 at pixel (1, 0). Through the model entry point.
+    net = nn.Sequential(nn.Conv2d(1, 2, 1))
+    with torch.no_grad():
+        net[0].weight.copy_(torch.tensor([1.0, -1.0]).reshape(2, 1, 1, 1))
+        net[0].bias.copy_(torch.tensor([0.0, 10.0]))
+    y = net(torch.zeros(1, 1, 2, 3)).detach().numpy().ravel()   # CHW
+    if not np.array_equal(y, [0.0] * 6 + [10.0] * 6):
+        pytest.fail(f"the network computes {y}")
+    S = ImageStar.from_bounds(np.zeros((2, 3, 1)), np.ones((2, 3, 1)), 2, 3, 1)
+    R = NeuralNetwork(net).reach(S, method="approx")
+    assert all(isinstance(r, ImageStar) for r in R)
+    G = np.zeros((1, 12))
+    G[0, 6] = -1.0
+    # y6 >= 9.5 is reached at x = 0; y6 >= 10.5 is not reachable.
+    assert verify_specification(R, HalfSpace(G, np.array([[-9.5]]))).verdict \
+        == "UNKNOWN"
+    assert verify_specification(R, HalfSpace(G, np.array([[-10.5]]))).verdict \
+        == "UNSAT"
+
+
+# ---------------------------------------------------------------------------
+# A Box LP that says "infeasible" is a proof only once confirmed
+# ---------------------------------------------------------------------------
+
+def test_box_lp_infeasible_status_is_confirmed_before_unsat(monkeypatch):
+    """The two-row region y0 <= 1/2, y1 <= 1/2 meets the box [0, 1]^2 at
+    (0, 0). The box feasibility LP is stubbed to report scipy status 2
+    (infeasible), as scipy's presolve does on some feasible tiny-scale
+    systems; the confirmation re-solves and finds the point, so the verdict
+    stays UNKNOWN. Catches an unconfirmed 'infeasible' read as disjoint (a
+    false UNSAT)."""
+    class _Infeasible:
+        status = 2
+        success = False
+        message = "The problem is infeasible. (stubbed)"
+
+    monkeypatch.setattr(vs, "linprog", lambda *a, **k: _Infeasible())
+    box = Box(np.zeros(2), np.ones(2))
+    two_rows = HalfSpace(np.eye(2), np.array([[0.5], [0.5]]))
+    assert vs._verify_specification_box(box, two_rows) is False
+    assert verify_specification([box], two_rows).verdict == "UNKNOWN"
+
+
+# ---------------------------------------------------------------------------
+# spec_summary and the verbose route
+# ---------------------------------------------------------------------------
+
+def _half_space(rows, cols):
+    return HalfSpace(np.ones((rows, cols)), np.ones((rows, 1)))
+
+
+@pytest.mark.parametrize("spec,parts,absent", [
+    pytest.param(lambda: _half_space(2, 5), ("HalfSpace", "dim=5",
+                                              "2 constraints", "AND"),
+                 ("OR",), id="halfspace-2-rows-over-5"),
+    pytest.param(lambda: _half_space(1, 3), ("dim=3", "1 constraint"),
+                 ("AND", "constraints"), id="halfspace-1-row-over-3"),
+    pytest.param(lambda: {"Hg": _half_space(2, 5)},
+                 ("dim=5", "2 constraints"), ("OR",), id="dict-halfspace"),
+    pytest.param(lambda: {"Hg": [_half_space(1, 2)] * 3},
+                 ("OR of 3 HalfSpaces",), (), id="dict-list-of-3"),
+    pytest.param(lambda: [{"Hg": _half_space(1, 2)}] * 2,
+                 ("AND of 2",), ("OR",), id="list-of-2-dicts"),
+    pytest.param(lambda: [_half_space(1, 2)] * 3, ("OR of 3",), ("AND",),
+                 id="list-of-3-halfspaces"),
+    pytest.param(lambda: [], ("empty",), (), id="empty-list"),
+])
+def test_spec_summary_states_the_structure_and_the_counts(spec, parts,
+                                                          absent):
+    """The summary names the dimension (columns of G), the number of rows of a
+    half-space, the number of disjuncts or groups, and which of AND and OR
+    joins them. Catches the row count read from the columns, the dimension
+    read from the rows, a list of groups described as an OR, and a count of
+    the dict's keys instead of its disjuncts."""
+    text = vs.spec_summary(spec())
+    for part in parts:
+        assert part in text, f"{part!r} missing from {text!r}"
+    for part in absent:
+        assert part not in text, f"{part!r} in {text!r}"
+
+
+@pytest.mark.parametrize("spec", [
+    pytest.param("y0 <= 1", id="a-string"),
+    pytest.param({"G": np.ones((1, 2))}, id="a-dict-without-Hg"),
+    pytest.param({"Hg": 3}, id="a-dict-whose-Hg-is-a-number"),
+])
+def test_spec_summary_refuses_what_it_cannot_describe(spec):
+    with pytest.raises(TypeError):
+        vs.spec_summary(spec)
+
+
+def test_verbose_prints_the_summary_and_the_verdict_and_changes_nothing(
+        capsys):
+    """``verbose=True`` prints the spec summary and the verdict; the result
+    is the one the quiet call returns. Catches a verbose route that prints
+    another structure than the property has or changes the verdict."""
+    S = Star.from_bounds(np.zeros((2, 1)), np.ones((2, 1)))
+    spec = [{'Hg': _Y0_LE_HALF}, {'Hg': _Y0_GE_5}]
+    quiet = verify_specification([S], spec)
+    capsys.readouterr()
+    loud = verify_specification([S], spec, verbose=True)
+    out = capsys.readouterr().out
+    assert loud == quiet and loud.verdict == "UNSAT"
+    assert "AND of 2" in out and "verdict: UNSAT" in out, out
+
+
+# ---------------------------------------------------------------------------
+# distribute_and_of_or_of_and: the same unsafe region in one OR
+# ---------------------------------------------------------------------------
+
+def _in_region(hs, y):
+    """Every row of ``hs`` holds at ``y``, in fractions."""
+    return all(sum(Fraction(float(a)) * Fraction(float(v))
+                   for a, v in zip(row, y)) <= Fraction(float(b))
+               for row, b in zip(np.atleast_2d(hs.G), np.ravel(hs.g)))
+
+
+def _unsafe_by_the_docstring(groups, y):
+    """AND over groups, OR within a group, AND over the rows of a HalfSpace."""
+    return all(any(_in_region(hs, y) for hs in group) for group in groups)
+
+
+_GRID = [Fraction(k, 2) for k in range(-5, 6)]          # -5/2 .. 5/2, step 1/2
+
+
+@pytest.mark.parametrize("groups", [
+    pytest.param(lambda: [[HalfSpace([[-1.0, 0.0]], [[-1.0]]),     # y0 >= 1
+                           HalfSpace([[1.0, 0.0]], [[-1.0]])],     # y0 <= -1
+                          [HalfSpace([[0.0, -1.0]], [[-1.0]]),     # y1 >= 1
+                           HalfSpace([[0.0, 1.0]], [[-1.0]])]],    # y1 <= -1
+                 id="two-groups-of-two"),
+    pytest.param(lambda: [[HalfSpace([[1.0, 1.0], [-1.0, 1.0]],    # two rows
+                                     [[1.0], [0.5]])],
+                          [HalfSpace([[0.0, -1.0]], [[-0.5]]),
+                           HalfSpace([[1.0, 0.0]], [[0.0]]),
+                           HalfSpace([[-1.0, -1.0]], [[2.0]])]],
+                 id="one-then-three-with-two-rows"),
+    pytest.param(lambda: [[HalfSpace([[-1.0, 0.0]], [[-1.0]]),
+                           HalfSpace([[0.0, 1.0]], [[0.0]])]],
+                 id="one-group-of-two"),
+    pytest.param(lambda: [[HalfSpace([[-1.0, 0.0]], [[-1.0]])], []],
+                 id="a-group-with-no-disjunct"),
+])
+def test_distribute_keeps_the_unsafe_region_point_by_point(groups):
+    """The distributed form is one group (outer length 1) whose disjuncts are
+    the stacked choices, and it classifies every point of a half-integer grid
+    over [-5/2, 5/2]^2, boundaries included, as the AND-of-OR input does
+    (docstring meaning, evaluated in fractions). Catches the choices paired
+    by position instead of all combinations, a one-group input split into an
+    AND of its disjuncts, rows or thresholds dropped when stacking, and an
+    empty group not read as an empty region."""
+    from n2v.utils.verify_specification import distribute_and_of_or_of_and
+    groups = groups()
+    out = distribute_and_of_or_of_and(groups)
+    assert len(out) == 1, f"{len(out)} groups returned"
+    wrong = [(float(a), float(b)) for a in _GRID for b in _GRID
+             if _unsafe_by_the_docstring(out, (a, b))
+             != _unsafe_by_the_docstring(groups, (a, b))]
+    assert not wrong, f"classified otherwise than the input at {wrong[:5]}"
+
+
+@known_bug(6, "distribute_and_of_or_of_and returns [[]], the empty unsafe "
+              "region, for an input with no group, whose meaning (an AND of "
+              "nothing) is the whole output space; it neither refuses the "
+              "input nor returns that region (no library code calls it today)")
+def test_distribute_of_no_group_is_refused_or_the_whole_space():
+    from n2v.utils.verify_specification import distribute_and_of_or_of_and
+    try:
+        out = distribute_and_of_or_of_and([])
+    except ValueError:
+        return
+    unsafe = [(float(a), float(b)) for a in _GRID for b in _GRID
+              if _unsafe_by_the_docstring(out, (a, b))]
+    assert len(unsafe) == len(_GRID) ** 2, (
+        f"{out} holds {len(unsafe)} of {len(_GRID) ** 2} points")
+
+
+# ---------------------------------------------------------------------------
+# The dispatch: a probabilistic set goes to its own lane
+# ---------------------------------------------------------------------------
+
+def test_a_probabilistic_set_goes_to_its_lane_with_the_default_config(
+        monkeypatch):
+    """A ``ProbabilisticSet`` is handed to the probabilistic lane with
+    ``ProbVerifyConfig()`` when no config is given, and with the caller's
+    config otherwise; the lane's result is returned as it is. The lane itself
+    is stubbed: this checks the routing line only.
+    Catches the default config dropped (the lane then reads ``None``) and a
+    probabilistic set sent down the sound path."""
+    from n2v.probabilistic.flow.sets import ProbabilisticSet
+    seen = []
+    sentinel = vs.VerificationResult(verdict="UNKNOWN", epsilon_total=0.5)
+
+    def lane(prob_set, spec, config, verbose=False):
+        seen.append((prob_set, spec, config))
+        return sentinel
+
+    monkeypatch.setattr(vs, "_verify_specification_probabilistic", lane)
+    prob = ProbabilisticSet.__new__(ProbabilisticSet)
+    assert verify_specification(prob, _Y0_GE_5) is sentinel
+    assert seen[-1][0] is prob and seen[-1][1] is _Y0_GE_5
+    assert seen[-1][2] == vs.ProbVerifyConfig()
+    mine = vs.ProbVerifyConfig(method="amls", n_samples=7)
+    verify_specification(prob, _Y0_GE_5, config=mine)
+    assert seen[-1][2] is mine

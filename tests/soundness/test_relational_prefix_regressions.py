@@ -13,6 +13,7 @@ import torch.nn as nn
 
 from n2v.sets.halfspace import HalfSpace
 from n2v.nn.relational import relational_reach, verify_relational
+from tests._oracles.membership import uncovered
 
 
 def _linear(W, b=None):
@@ -68,10 +69,20 @@ def test_softmax_network_is_not_falsely_unsat():
 
 
 def test_softmax_join_contains_true_joint_outputs():
+    """Every joint output of 129 allowed pairs (x_f = x_g = x on a grid of
+    [0, 1], ends included), replayed in float64, is a member of the joint
+    star by an LP on its own rows (``membership.uncovered``); the first 11
+    are also checked with ``Star.contains``. Catches the softmax network's
+    first predicates dropped or read as the input, swapped right-hand sides
+    or own bounds in the join, and g reached with model_f."""
     f, g, spec, _, _ = _softmax_case()
     joint = relational_reach(f, g, spec, method="approx")
     for x in np.linspace(0.0, 1.0, 11):
         assert joint.contains(_joint_output(f, g, x)), f"x={x}"
+    xs = np.linspace(0.0, 1.0, 129)
+    missed = uncovered([joint], [_joint_output(f, g, x) for x in xs])
+    assert not missed, (f"{len(missed)} of 129 joint outputs outside the "
+                        f"joint star, e.g. x = {xs[missed[0][0]]}")
 
 
 def test_linear_relu_networks_keep_the_shared_input():
@@ -82,3 +93,21 @@ def test_linear_relu_networks_keep_the_shared_input():
                       _linear([[1.0, -1.0]])).double().eval()
     spec = _spec(1, 1, [[-1.0, 1.0]], [[-0.1]])
     assert verify_relational(f, f, spec, method="approx").verdict == "UNSAT"
+
+
+def test_relu_networks_with_own_predicates_keep_the_shared_input():
+    """f = g = relu(x) on x in [-0.25, 4] with x_f == x_g: the ReLU is
+    unstable, so each output star appends one own predicate after the two
+    shared input predicates. The two relaxations differ by at most the
+    triangle's height 4 * 0.25 / 4.25 < 0.5, so |Y_f - Y_g| >= 0.5 is
+    unreachable and provable only through the shared input predicates.
+    Catches a prefix test that rejects every output star with own
+    predicates (the join then loses the coupling: UNKNOWN)."""
+    f = nn.Sequential(_linear([[1.0]]), nn.ReLU(),
+                      _linear([[1.0]])).double().eval()
+    for G in ([[-1.0, 1.0]], [[1.0, -1.0]]):       # B - D, D - B >= 0.5
+        spec = _spec(1, 1, G, [[-0.5]])
+        spec["lb"] = np.array([-0.25, -0.25])
+        spec["ub"] = np.array([4.0, 4.0])
+        verdict = verify_relational(f, f, spec, method="approx").verdict
+        assert verdict == "UNSAT", (G, verdict)

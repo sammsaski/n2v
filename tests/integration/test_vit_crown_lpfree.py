@@ -11,7 +11,7 @@
       the full refine + alpha recipe, and the certified margin is never violated.
 
 The benchmark assets live under ``benchmarks/vit_vnncomp2023`` (ONNX + instance
-npz); the test skips cleanly if they are absent.
+npz); they are tracked files, so a missing one is an error, never a skip.
 """
 import os
 import sys
@@ -69,7 +69,10 @@ def test_single_shot_backward_is_sound_lower_bound():
     with torch.no_grad():
         lg = md(torch.tensor(Xn.reshape(-1, 3, 32, 32), dtype=torch.float64)).numpy()
     tm = (C @ lg.T).T
-    assert np.all(mb <= tm.min(axis=0) + 1e-7), "single-shot bound exceeds a true margin"
+    # Slack of the 1e-12 class against the float64 replay (PROTOCOL 3.4).
+    true_min = tm.min(axis=0)
+    assert np.all(mb <= true_min + 1e-12 * (1.0 + np.abs(true_min))), \
+        "single-shot bound exceeds a true margin"
 
 
 @pytest.mark.slow

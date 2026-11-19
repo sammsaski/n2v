@@ -176,6 +176,65 @@ def test_relaxation_box_survives_lp_undershoot(monkeypatch, op):
     assert out_lo <= lo and out_hi >= hi, (out_lo, lo, out_hi, hi)
 
 
+_CEIL = SimpleNamespace(round_function=torch.ceil)
+
+
+@pytest.mark.parametrize("op", ["ceil", "sigmoid"])
+@pytest.mark.parametrize("center, radius", [(-0.5, 3.5), (0.5, 0.5)],
+                         ids=["range [-4, 3]", "range [0, 1]"])
+def test_relaxation_box_survives_lp_undershoot_below_minus_one_and_at_zero(
+        monkeypatch, op, center, radius):
+    """As ``test_relaxation_box_survives_lp_undershoot``, on the two regimes
+    of the pad that range [-0.5, 1] does not reach: a minimum below -1
+    (exactly -4; a pad computed from the signed optimum is negative there and
+    moves the bound inward, so ceil(-4) = -4 is lost) and a minimum at
+    exactly 0 (a pad with no absolute part is 0 there, so ceil(0) = 0 and
+    sigmoid(0) = 1/2 are lost)."""
+    X = _line_star([center], [radius])
+    lo_x, hi_x = center - radius, center + radius
+    orig = Star._solve_lp_batch
+
+    def undershooting(self, objectives, minimize_flags,
+                      lp_solver=LPSolver.DEFAULT):
+        vals = orig(self, objectives, minimize_flags, lp_solver)
+        return [v if v is None or not np.any(np.asarray(f) != 0)
+                else v + _UNDERSHOOT if mn else v - _UNDERSHOOT
+                for v, f, mn in zip(vals, objectives, minimize_flags)]
+
+    monkeypatch.setattr(Star, "_solve_lp_batch", undershooting)
+    if op == "ceil":
+        outs = round_star(_CEIL, [X], lp_solver="linprog")
+        lo, hi = np.ceil(lo_x), np.ceil(hi_x)
+    else:
+        outs = sigmoid_star_approx([X], lp_solver="linprog")
+        lo, hi = _sigmoid(lo_x), _sigmoid(hi_x)
+    monkeypatch.undo()
+    out_lo = min(float(o.estimate_ranges()[0][0, 0]) for o in outs)
+    out_hi = max(float(o.estimate_ranges()[1][0, 0]) for o in outs)
+    assert out_lo <= lo and out_hi >= hi, (out_lo, lo, out_hi, hi)
+
+
+@pytest.mark.parametrize("requested, configured, expected", [
+    ("highs-ds", None, LPSolver.HIGHS_DS),
+    (LPSolver.DEFAULT, "highs-ipm", LPSolver.HIGHS_IPM),
+], ids=["requested highs-ds", "global highs-ipm"])
+def test_relaxation_box_lps_keep_a_requested_highs_method(
+        monkeypatch, requested, configured, expected):
+    """A HiGHS method that the caller or the global setting picks is the one
+    the relaxation-box LPs run on (``_bound_lp_solver`` keeps it, and only a
+    CVXPY solver is replaced). Catches the method replaced by LINPROG and the
+    default not resolved against the global setting."""
+    try:
+        if configured is not None:
+            config.lp_solver = configured
+        seen = _spy_solvers(monkeypatch)
+        sigmoid_star_approx([_X], lp_solver=requested)
+        assert seen and all(resolve(s, allow_sentinel=False) is expected
+                            for s in seen), seen
+    finally:
+        config.reset()
+
+
 def test_constant_rows_stay_exact():
     # A row with no generator is a constant: it is not padded, so an op can
     # still map it exactly (sigmoid of the constant 0 is 0.5).

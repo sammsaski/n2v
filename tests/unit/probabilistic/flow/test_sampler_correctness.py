@@ -147,7 +147,7 @@ class TestSampleBox:
         from n2v.probabilistic.flow.sampling import sample_box
         lb = torch.tensor([1.0, 0.0])
         ub = torch.tensor([0.0, 1.0])  # first dim violates lb <= ub
-        with pytest.raises((ValueError, AssertionError)):
+        with pytest.raises(ValueError):
             sample_box(lb, ub, n_samples=10, seed=0)
 
     def test_agrees_with_sample_l_inf_ball_on_symmetric_case(self):
@@ -163,3 +163,54 @@ class TestSampleBox:
         # Both use the same uniform-per-dim factorization; with the same
         # seed and the same generator construction they must agree.
         assert torch.allclose(x_box, x_ball, atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Boxes sample_box cannot sample
+# ---------------------------------------------------------------------------
+import math  # noqa: E402
+
+from tests.known_bugs import DID_NOT_RAISE, known_bug  # noqa: E402
+
+
+class TestSampleBoxRefusals:
+    @pytest.mark.parametrize("lb, ub", [
+        pytest.param([-1.0, 0.0, 0.5], [2.0], id="shapes-differ"),
+        pytest.param([-math.inf, 0.0], [1.0, 1.0], id="infinite-bound",
+                     marks=known_bug(13, "sample_box draws from a box with an "
+                                         "infinite bound and returns NaN or "
+                                         "infinite samples instead of refusing; "
+                                         "no uniform law exists on an "
+                                         "unbounded box", raises=DID_NOT_RAISE)),
+    ])
+    def test_refuses_a_box_it_cannot_sample(self, lb, ub):
+        """Bounds of different shapes (documented) and an unbounded box
+        raise ValueError. A shape check that compares only the number of
+        axes broadcasts a one-entry ub silently (every lb entry is below it,
+        so the order check cannot raise in its place); an unbounded box
+        today gives NaN samples, and a coverage estimated on them is 0."""
+        from n2v.probabilistic.flow.sampling import sample_box
+        with pytest.raises(ValueError):
+            sample_box(torch.tensor(lb), torch.tensor(ub), n_samples=10, seed=0)
+
+
+class TestSampleLInfBallDimension:
+    @pytest.mark.parametrize("centre", [
+        pytest.param([0.0, 1.0, -2.0], id="centre-of-dim-entries"),
+        pytest.param([0.0, 1.0], id="centre-of-fewer-entries", marks=known_bug(
+            23, "sample_l_inf_ball with a centre of 2 entries and dim=3 raises "
+                "a torch RuntimeError from broadcasting instead of a ValueError "
+                "naming the mismatch", raises=RuntimeError)),
+    ])
+    def test_dim_must_match_the_centre(self, centre):
+        """dim must equal the number of centre entries (documented). A
+        matching centre gives n samples of dim coordinates inside the ball;
+        a centre of 2 entries with dim = 3 must raise ValueError."""
+        x_center = torch.tensor(centre)
+        if x_center.numel() == 3:
+            x = sample_l_inf_ball(x_center, 0.5, n_samples=50, seed=0, dim=3)
+            assert x.shape == (50, 3)
+            assert ((x - x_center).abs() <= 0.5).all()
+        else:
+            with pytest.raises(ValueError):
+                sample_l_inf_ball(x_center, 0.5, n_samples=50, seed=0, dim=3)

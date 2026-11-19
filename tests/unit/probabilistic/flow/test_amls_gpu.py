@@ -184,3 +184,20 @@ def test_amls_certify_spec_threads_device_kwarg():
     assert res.detected_any is True
     # The flow buffer should have been moved to cuda.
     assert flow._marker.device.type == 'cuda'
+
+
+def test_resolve_device_autodetects_cuda_only_when_available():
+    """``device=None`` is documented as "CUDA when available, else CPU" and an
+    explicit device is taken as given. Checked on the resolver itself with
+    ``torch.cuda.is_available`` patched both ways, so that the CUDA branch is
+    exercised on a host without a GPU (no tensor is moved). Catches a
+    resolver that answers CPU, or CUDA, whatever the host has.
+    """
+    from n2v.probabilistic.flow.amls import _resolve_device
+
+    with mock.patch('torch.cuda.is_available', return_value=True):
+        assert _resolve_device(None) == torch.device('cuda')
+        assert _resolve_device('cpu') == torch.device('cpu')
+    with mock.patch('torch.cuda.is_available', return_value=False):
+        assert _resolve_device(None) == torch.device('cpu')
+        assert _resolve_device(torch.device('cpu')) == torch.device('cpu')

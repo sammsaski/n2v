@@ -175,3 +175,54 @@ def test_certify_spec_disjoint_threads_qmc_kwarg():
         sampling_strategy='qmc',
     )
     assert res.unsat_certified is True
+
+
+# -------- Seed and antithetic pairs --------
+# The law of the QMC latents (one Sobol point per stratum of every coordinate
+# after the inverse normal CDF) is checked in
+# tests/soundness/test_soundness_scenario_verify.py.
+
+
+def test_qmc_same_seed_gives_the_same_points():
+    """The seed fixes the scrambling: two calls with the same seed return the
+    same points bit for bit, another seed other points. Catches a seed that
+    is not handed to the Sobol sampler (scrambling from system entropy)."""
+    a = _qmc_sample_latents(64, 3, seed=9, dtype=torch.float64)
+    b = _qmc_sample_latents(64, 3, seed=9, dtype=torch.float64)
+    c = _qmc_sample_latents(64, 3, seed=10, dtype=torch.float64)
+    assert torch.equal(a, b)
+    assert not torch.equal(a, c)
+
+
+@pytest.mark.parametrize("n", [64, 63, 1])
+def test_qmc_antithetic_pairs_each_point_with_its_mirror(n):
+    """With antithetic=True the first ceil(n/2) rows are the Sobol points of
+    the same seed and the next rows their negatives, in order; for odd n the
+    last base point has no mirror. Catches the points repeated in place of
+    mirrored, and a base count of floor(n/2) (one sample short for odd n)."""
+    n_base = (n + 1) // 2
+    z = _qmc_sample_latents(n, 3, seed=2, dtype=torch.float64, antithetic=True)
+    base = _qmc_sample_latents(n_base, 3, seed=2, dtype=torch.float64)
+    assert z.shape == (n, 3)
+    assert torch.equal(z[:n_base], base)
+    assert torch.equal(z[n_base:], -base[:n - n_base])
+
+
+def test_qmc_antithetic_certifier_draws_exactly_n_samples():
+    """certify_halfspace_disjoint with 'qmc+antithetic' hands exactly N latent
+    points to the flow for odd N as well, and states ln(1/beta)/N."""
+    class _Recording:
+        def __init__(self):
+            self.batches = []
+
+        def inverse(self, z, **kwargs):
+            self.batches.append(int(z.shape[0]))
+            return z.detach().to(torch.float64).clone()
+
+    flow = _Recording()
+    hs = HalfSpace(np.array([[1.0, 0.0]]), np.array([[-50.0]]))
+    res = certify_halfspace_disjoint(flow, 1.0, hs, n_samples=101, beta_2=0.01, seed=0,
+                                     sampling_strategy='qmc+antithetic')
+    assert flow.batches == [101]
+    assert res.n_samples_used == 101
+    assert res.epsilon_2 == pytest.approx(math.log(100.0) / 101, rel=1e-15)

@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from n2v.sets import Star
 from n2v.nn import NeuralNetwork
+from tests.cell_support import assert_covered, replay_torch, samples
 
 
 class InlineReLUModel(nn.Module):
@@ -99,53 +100,30 @@ def _make_input_star():
     return Star.from_bounds(lb, ub)
 
 
-def _get_reference_bounds(model, input_star):
-    """Get bounds by sampling — ground truth for comparison.
-
-    Samples many points from the input region, runs them through the model,
-    and returns the min/max output values observed.
-    """
-    # Get bounds from the Star (estimate_ranges computes and caches them)
-    star_lb, star_ub = input_star.estimate_ranges()
-    lb = star_lb.flatten()
-    ub = star_ub.flatten()
-    n_samples = 10000
-    samples = np.random.uniform(lb, ub, size=(n_samples, len(lb)))
-    with torch.no_grad():
-        outputs = model(torch.tensor(samples, dtype=torch.float32)).numpy()
-    return outputs.min(axis=0), outputs.max(axis=0)
+def _assert_holds_every_output(output_stars, model, what):
+    """The approx method relaxes and never splits, so one input set gives one
+    output set (a reach that loses ``method`` runs the splitting exact
+    method); every output of the model, replayed in float64 on 128 points of
+    the input box [0, 1]^3 (corners included), must be a member of a
+    returned set by an LP on that set's own rows. (A comparison of the
+    result's bounding box with the extremes of 10000 float32 samples and a
+    slack of 1e-6 would let a wrong row pass.)"""
+    assert len(output_stars) == 1, (
+        f"{what}: the approx method returned {len(output_stars)} sets")
+    assert_covered(output_stars, replay_torch(
+        model, samples(np.zeros(3), np.ones(3)), (1, 3)), what)
 
 
 class TestInlineActivationRegression:
     """Regression tests for issue #3: inline activations silently skipped."""
 
     def _verify_model_reach(self, model, method='approx'):
-        """Verify reach() output bounds contain sampled bounds (soundness)."""
+        """Verify that the reach result holds every replayed output."""
         model.eval()
         input_star = _make_input_star()
         output_stars = NeuralNetwork(model).reach(input_star, method=method)
-
-        # Get bounds from reach output
-        reach_lb_list, reach_ub_list = [], []
-        for star in output_stars:
-            star_lb, star_ub = star.get_ranges()
-            reach_lb_list.append(star_lb.flatten())
-            reach_ub_list.append(star_ub.flatten())
-        reach_lb = np.min(np.stack(reach_lb_list), axis=0)
-        reach_ub = np.max(np.stack(reach_ub_list), axis=0)
-
-        # Get sampled bounds (ground truth)
-        sample_lb, sample_ub = _get_reference_bounds(model, input_star)
-
-        # Reach bounds must contain sampled bounds (soundness)
-        np.testing.assert_array_less(
-            reach_lb - 1e-6, sample_lb,
-            err_msg="Reach lower bound is above sampled minimum — unsound!"
-        )
-        np.testing.assert_array_less(
-            sample_ub, reach_ub + 1e-6,
-            err_msg="Reach upper bound is below sampled maximum — unsound!"
-        )
+        _assert_holds_every_output(output_stars, model,
+                                   f"{type(model).__name__} approx reach")
 
     def test_inline_relu_raises_error(self):
         """Issue #3: inline nn.ReLU() must raise a clear error, not silently skip."""
@@ -231,7 +209,12 @@ class TestInlineActivationRegression:
         functional_stars = NeuralNetwork(functional_model).reach(input_star, method='approx')
         registered_stars = NeuralNetwork(registered_model).reach(input_star, method='approx')
 
-        # Both should produce same bounds
+        # Each holds every replayed output (the independent reference); the
+        # two spellings take the same rule, so their bounds agree as well.
+        _assert_holds_every_output(functional_stars, functional_model,
+                                   "F.relu model")
+        _assert_holds_every_output(registered_stars, registered_model,
+                                   "nn.ReLU model")
         for f_star, r_star in zip(functional_stars, registered_stars):
             f_lb, f_ub = f_star.get_ranges()
             r_lb, r_ub = r_star.get_ranges()
@@ -324,16 +307,11 @@ class TestSequentialModelParity:
         input_star = _make_input_star()
         output_stars = NeuralNetwork(model).reach(input_star, method='approx')
 
-        assert len(output_stars) >= 1
         for star in output_stars:
             assert star.dim == 2
             pytest.assert_star_valid(star)
-
-        # Soundness check
-        sample_lb, sample_ub = _get_reference_bounds(model, input_star)
-        star_lb, star_ub = output_stars[0].get_ranges()
-        np.testing.assert_array_less(star_lb.flatten() - 1e-6, sample_lb)
-        np.testing.assert_array_less(sample_ub, star_ub.flatten() + 1e-6)
+        _assert_holds_every_output(output_stars, model,
+                                   "nn.Sequential approx reach")
 
 
 class TestNeuralNetworkLayers:

@@ -231,7 +231,11 @@ def test_certified_disjoint_output_star_is_unsat():
 def test_default_lp_bounds_bracket_a_known_feasible_point(scale):
     """HiGHS drops matrix entries below 1e-9 and applies its tolerances to
     unscaled rows: the presolve-on optimum cut off the known point on ~1 in 3
-    bound LPs at these scales, or the LP came back 'infeasible'."""
+    bound LPs at these scales, or the LP came back 'infeasible'. ``x0`` is
+    feasible in exact arithmetic (its rows clear by ~1e-3 of their scale) and
+    the box is finite, so every optimum is certified and must bracket ``x0``
+    with no slack (the earlier 1e-7 forgave a bound that cut ``x0`` off by up
+    to 1e-7)."""
     rng = np.random.default_rng(5)
     for _ in range(25):
         A, b, x0 = _tiny_polytope(rng, scale)
@@ -242,11 +246,11 @@ def test_default_lp_bounds_bracket_a_known_feasible_point(scale):
             _, lo, st_lo, _ = solve_lp(f, A, b, lb=lb, ub=ub, minimize=True)
             _, hi, st_hi, _ = solve_lp(f, A, b, lb=lb, ub=ub, minimize=False)
             assert st_lo == "optimal" and st_hi == "optimal"
-            assert lo <= x0[i] + 1e-7 and x0[i] - 1e-7 <= hi
+            assert lo <= x0[i] <= hi
         vals = solve_lp_batch([np.eye(n)[i] for i in range(n) for _ in (0, 1)],
                               A, b, lb, ub, [True, False] * n)
         for i in range(n):
-            assert vals[2 * i] <= x0[i] + 1e-7 <= vals[2 * i + 1] + 2e-7
+            assert vals[2 * i] <= x0[i] <= vals[2 * i + 1]
 
 
 def test_exact_reach_on_tiny_coefficient_star_keeps_the_true_output():

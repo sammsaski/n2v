@@ -10,10 +10,15 @@
 - Negative axes were mapped onto the wrong (H, W, C) axis (axis -1, the
   width, reduced the channels of an ImageStar), and an ImageZono reduced its
   center and its generators over different axes.
-- Reducing only the batch axis reduced every axis, a ReduceSum with empty
+- Reducing only the batch axis reduced every axis (on a flat set its
+  regression is
+  ``test_soundness_reduce.py::test_reduce_layer_on_a_flat_set_of_a_row_vector``
+  over axis 0), a ReduceSum with empty
   axes and noop_with_empty_axes=1 reduced every axis instead of passing its
-  input through, and a full reduction with keepdims=0 on an ImageStar built
-  a malformed Star.
+  input through (its regression is
+  ``test_soundness_reduce.py::test_reduce_sum_with_no_axes_and_noop_is_the_identity``),
+  and a full reduction with keepdims=0 on an ImageStar built a malformed
+  Star.
 - ReduceMax, ReduceMin, ReduceProd, ReduceL1, ReduceL2, ReduceLogSum,
   ReduceLogSumExp and ReduceSumSquare were reached as a ReduceSum. They are
   now refused, except ReduceMax, ReduceMin, ReduceProd and ReduceLogSumExp
@@ -27,8 +32,6 @@ axis or a wrong operation shows up as a mismatch.
 
 Convention: SAT = unsafe (the unsafe region is ``G y <= g``), UNSAT = safe.
 """
-
-import itertools
 
 import numpy as np
 import pytest
@@ -55,11 +58,14 @@ _rng = np.random.default_rng(3)
 LB = _rng.uniform(-3.0, 3.0, size=(C, H, W))
 UB = LB + _rng.uniform(0.1, 2.0, size=(C, H, W))
 
-# Every subset of the (N, C, H, W) axes, spelled with positive and with
-# negative indices, plus the attribute left out.
-AXES = [None] + [list(s) for r in range(1, 5)
-                 for s in itertools.combinations(range(4), r)]
-AXES += [[a - 4 for a in s] for s in AXES[1:]]
+# One spelling of the (N, C, H, W) axes per path of ``_get_axes`` and
+# ``_reduce_hwc``: the attribute left out; the batch axis alone; each tensor
+# axis alone (each maps to another stored axis), also negative (resolved
+# against the rank); the batch axis with another one; each pair of tensor
+# axes (the remaining axis is the width, the height or the channels); all
+# three; all four; and a negative pair.
+AXES = [None, [0], [1], [2], [3], [0, 2], [1, 2], [1, 3], [2, 3], [1, 2, 3],
+        [0, 1, 2, 3], [-4], [-3], [-2], [-1], [-3, -1]]
 
 
 def _image_star():
@@ -136,37 +142,6 @@ def test_image_reduce_layer_matches_torch(op, axes, keepdims):
         else:
             assert type(out[0]) in (Star, Zono)
         _assert_matches(out[0], S, f)
-
-
-def test_reduce_sum_noop_with_empty_axes_passes_input_through():
-    layer = OnnxReduceSumStaticAxes(axes=[], keepdims=0,
-                                    noop_with_empty_axes=1)
-    for S in (_image_star(), _image_zono(),
-              Star.from_bounds(LB.ravel(), UB.ravel()),
-              Box(LB.reshape(-1, 1), UB.reshape(-1, 1))):
-        out = reach_layer(layer, [S], 'approx')[0]
-        if isinstance(S, Box):
-            np.testing.assert_array_equal(out.lb, S.lb)
-            np.testing.assert_array_equal(out.ub, S.ub)
-        else:
-            _assert_matches(out, S, lambda x: x.ravel())
-
-
-@pytest.mark.parametrize('keepdims', [0, 1])
-def test_flat_reduce_over_batch_axis_only_is_identity(keepdims):
-    """ReduceMean over axis 0 of a (1, N) tensor leaves its N values; the
-    flat path reduced all of them."""
-    lb, ub = LB.ravel()[:5], UB.ravel()[:5]
-    layer = OnnxReduceStaticAxes('ReduceMean', axes=[0], keepdims=keepdims)
-    S = Star.from_bounds(lb, ub)
-    out = reach_layer(layer, [S], 'approx')[0]
-    assert out.dim == 5
-    for p in _predicate_points(S):
-        np.testing.assert_array_equal(_at(out, p), _at(S, p))
-    B = reach_layer(layer, [Box(lb.reshape(-1, 1), ub.reshape(-1, 1))],
-                    'approx')[0]
-    np.testing.assert_array_equal(B.lb.ravel(), lb)
-    np.testing.assert_array_equal(B.ub.ravel(), ub)
 
 
 NON_AFFINE = ['ReduceMax', 'ReduceMin', 'ReduceProd', 'ReduceL1', 'ReduceL2',

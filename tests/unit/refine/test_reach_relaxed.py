@@ -329,3 +329,225 @@ def test_conv_layer_generators_skip_the_bias(kind):
     V = layer.apply(S).V
     assert V[0, 0] == 1.0
     assert np.array_equal(V[0, 1:], np.array([1e-17, 3e-16]))
+
+
+# --------------------------------------------------------------------------- #
+# Refusals of extract_layers                                                    #
+# --------------------------------------------------------------------------- #
+def _nested_chain():
+    return nn.Sequential(nn.Sequential(nn.Linear(2, 3), nn.ReLU()),
+                         nn.Linear(3, 1))
+
+
+def _hook_nested_leaf(m):
+    return m[0][0].register_forward_hook(lambda mod, i, o: 2 * o)
+
+
+def _hook_the_model(m):
+    return m.register_forward_hook(lambda mod, i, o: 2 * o)
+
+
+def _pre_hook_a_leaf(m):
+    return m[1].register_forward_pre_hook(lambda mod, args: (2 * args[0],))
+
+
+@pytest.mark.parametrize("attach", [_hook_nested_leaf, _hook_the_model,
+                                    _pre_hook_a_leaf],
+                         ids=["forward-hook-in-a-nested-sequential",
+                              "forward-hook-on-the-model-itself",
+                              "forward-pre-hook-on-a-leaf"])
+def test_extract_layers_rejects_a_hook_anywhere_in_the_model(attach):
+    """A forward hook or pre-hook changes what model(x) computes, wherever it
+    sits: on a module inside a nested Sequential, on the model itself, or
+    before a leaf. Catches a scan that reads only the top-level children or
+    only forward hooks; the same model is accepted once the hook is gone."""
+    m = _nested_chain()
+    handle = attach(m)
+    try:
+        with pytest.raises(TypeError, match="hook"):
+            extract_layers(m)
+    finally:
+        handle.remove()
+    assert len(extract_layers(m)) == 3
+
+
+def test_extract_layers_rejects_global_forward_pre_hooks():
+    """A global pre-hook changes the input of every module's forward()."""
+    handle = torch.nn.modules.module.register_module_forward_pre_hook(
+        lambda mod, args: None)
+    try:
+        with pytest.raises(TypeError, match="global"):
+            extract_layers(_chain())
+    finally:
+        handle.remove()                   # leave the process-wide registry clean
+
+
+@pytest.mark.parametrize("make", [
+    lambda: nn.Sequential(nn.Conv2d(1, 1, 1), nn.Flatten()),
+    lambda: nn.Sequential(nn.Linear(4, 8), nn.Unflatten(1, (2, 2, 2)),
+                          nn.Flatten(), nn.BatchNorm2d(2)),
+], ids=["conv-first-without-in-shape", "batchnorm-after-a-flatten"])
+def test_extract_layers_rejects_a_conv_type_module_without_an_image_shape(make):
+    """A conv-type module needs a (C, H, W) shape from ``in_shape`` or a
+    preceding nn.Unflatten: none at all, or a flat one after nn.Flatten.
+    Catches a Flatten that leaves the tracked image shape in place (the
+    BatchNorm2d after it is then accepted)."""
+    with pytest.raises(TypeError, match=r"\(C, H, W\)"):
+        extract_layers(make())
+
+
+@pytest.mark.parametrize("make", [
+    lambda: nn.Sequential(nn.Linear(2, 8), nn.Unflatten(1, (2, 2, 2)),
+                          nn.Flatten(1, 2), nn.Linear(2, 1)),
+    lambda: nn.Sequential(nn.Linear(2, 8), nn.Unflatten(1, (2, 2, 2)),
+                          nn.Conv2d(2, 2, 1), nn.Unflatten(1, (1, 2)),
+                          nn.Flatten(), nn.Linear(8, 1)),
+], ids=["flatten-1-2", "unflatten-of-an-image"])
+def test_extract_layers_rejects_other_flatten_and_unflatten_dims(make):
+    """Only the default Flatten and an Unflatten of a flat activation are the
+    identity on the star's flat basis: Flatten(1, 2) keeps an image axis, so
+    the Linear after it is applied along that axis by torch and to the whole
+    flat vector by the layer list. Catches a Flatten check that reads only
+    start_dim (Flatten(0) and Unflatten(2) are the cases of
+    test_extract_layers_rejects_non_default_flatten_and_unflatten_dims)."""
+    with pytest.raises(TypeError):
+        extract_layers(make())
+
+
+def test_extract_layers_keeps_the_float64_parameters_bit_for_bit():
+    """The layer list holds the model's own float64 weights and biases, not
+    a rounded copy (0.1 and 1/3 are not float32 numbers), and a Linear
+    without bias gets a zero bias of its output size. With cancelling weights
+    and inputs near 1e4 a float32 copy puts the reach set far from the true
+    outputs (float64 torch, membership by an LP on the star's rows)."""
+    from tests._oracles.membership import uncovered
+
+    net = nn.Sequential(nn.Linear(1, 2), nn.ReLU(), nn.Linear(2, 2),
+                        nn.ReLU(), nn.Linear(2, 3, bias=False)).double()
+    with torch.no_grad():
+        net[0].weight.copy_(torch.tensor([[0.1], [0.1000001]]))
+        net[0].bias.copy_(torch.tensor([1.0 / 3.0, -0.1]))
+        net[2].weight.copy_(torch.tensor([[1.0, -1.0], [1e-5, 0.0]]))
+        net[2].bias.copy_(torch.tensor([0.0, 0.0]))
+        net[4].weight.copy_(torch.tensor([[1.0, 0.0], [0.0, 1.0], [0.1, 0.2]]))
+    layers = extract_layers(net)
+    linears = [l for l in layers if isinstance(l, LinearLayer)]
+    mods = [m for m in net if isinstance(m, nn.Linear)]
+    for lay, mod in zip(linears, mods):
+        assert lay.W.dtype == np.float64 and lay.b.dtype == np.float64
+        assert np.array_equal(lay.W, mod.weight.detach().numpy())
+        expected_b = (mod.bias.detach().numpy() if mod.bias is not None
+                      else np.zeros(mod.out_features))
+        assert np.array_equal(lay.b, expected_b)
+
+    S_in = Star.from_bounds(np.array([[1.0e4]]), np.array([[2.0e4]]))
+    out, _ = relaxed_reach(S_in, layers)
+    Y = _forward(net, np.linspace(1.0e4, 2.0e4, 33).reshape(-1, 1))
+    assert uncovered([out], Y) == []
+
+
+# --------------------------------------------------------------------------- #
+# relaxed_reach options, refusals and provenance                                #
+# --------------------------------------------------------------------------- #
+def _lp_star():
+    """[-1, 1]^2 cut by the row x0 + x1 <= -1."""
+    S = Star.from_bounds(np.array([[-1.0], [-1.0]]), np.array([[1.0], [1.0]]))
+    return Star(S.V, np.vstack([S.C, [[1.0, 1.0]]]), np.vstack([S.d, [[-1.0]]]),
+                S.predicate_lb, S.predicate_ub)
+
+
+@pytest.mark.parametrize("bound_mode", ["box", "lp_cpu", "dual_gpu"])
+def test_bound_modes_read_the_constraint_rows_as_documented(bound_mode,
+                                                            monkeypatch):
+    """Neuron 0 is x0 + x1 + 1/2: its box range [-3/2, 5/2] crosses 0, its
+    exact range over the rows is [-3/2, -1/2] (vertex enumeration), so it is
+    stable inactive. Every mode records bounds that hold the exact range;
+    lp_cpu documents the exact LP range padded by the solver tolerance, so
+    its neuron is not relaxed and its upper bound is within that pad of
+    -1/2; box documents the predicate-box interval and relaxes it. Catches
+    lp_cpu answered with the box interval."""
+    monkeypatch.setattr("n2v.utils.lpsolver_gpu.gpu_available", lambda: False)
+    layers = [LinearLayer(np.array([[1.0, 1.0], [1.0, -1.0]]),
+                          np.array([0.5, 0.25])), ReluLayer()]
+    S_in = _lp_star()
+    from tests._oracles import rational as R
+    corners = R.vertices([[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1]],
+                         [1, 1, 1, 1, -1])
+    exact = [(min(sum(w * v for w, v in zip(row, x)) + b0 for x in corners),
+              max(sum(w * v for w, v in zip(row, x)) + b0 for x in corners))
+             for row, b0 in (((1, 1), 0.5), ((1, -1), 0.25))]
+    out, meta = relaxed_reach(S_in, layers, bound_mode=bound_mode)
+    lb, ub = out.relu_bounds[0]
+    for j, (lo, hi) in enumerate(exact):
+        assert lb[j] <= lo and ub[j] >= hi, f"neuron {j}: [{lb[j]}, {ub[j]}] misses [{lo}, {hi}]"
+    keys = {m.key for m in meta}
+    if bound_mode == "lp_cpu":
+        assert NeuronKey(0, 0) not in keys
+        assert ub[0] <= -0.5 + 1e-6
+    if bound_mode == "box":
+        assert NeuronKey(0, 0) in keys
+
+
+def test_relaxed_reach_rejects_an_unknown_bound_mode():
+    layers = extract_layers(_seq(2, 3, 1, seed=0))
+    S_in = Star.from_bounds(np.array([[-1.0], [-1.0]]), np.array([[1.0], [1.0]]))
+    with pytest.raises(ValueError, match="bound_mode"):
+        relaxed_reach(S_in, layers, bound_mode="exact")
+
+
+@pytest.mark.parametrize("neuron", [-1, 3], ids=["negative", "past-the-layer"])
+def test_relaxed_reach_rejects_a_fixed_neuron_index_out_of_range(neuron):
+    """A negative index would wrap and pin the last neuron's phase."""
+    layers = extract_layers(_seq(2, 3, 1, seed=0))
+    S_in = Star.from_bounds(np.array([[-1.0], [-1.0]]), np.array([[1.0], [1.0]]))
+    with pytest.raises(ValueError, match="out of range"):
+        relaxed_reach(S_in, layers, {NeuronKey(0, neuron): Phase.ACTIVE})
+
+
+@pytest.mark.parametrize("upper_only", [True, False],
+                         ids=["infinite-above", "infinite-both-sides"])
+def test_relaxed_reach_refuses_non_finite_neuron_bounds(upper_only):
+    """A predicate box infinite above gives the neuron x0 the bounds
+    [-1, inf]: a NaN slope would follow, so the layer must raise."""
+    lb = np.array([[-1.0], [-1.0]]) if upper_only else np.array([[-np.inf], [-1.0]])
+    S_in = Star(np.hstack([np.zeros((2, 1)), np.eye(2)]), np.zeros((0, 2)),
+                np.zeros((0, 1)), lb, np.array([[np.inf], [1.0]]))
+    layers = [LinearLayer(np.eye(2), np.zeros(2)), ReluLayer()]
+    with pytest.raises(ValueError, match="non-finite"):
+        relaxed_reach(S_in, layers)
+
+
+def test_relaxed_reach_rejects_an_unknown_layer_object():
+    """A hand-built layer list holding a torch module is not reached as if
+    that layer were the identity."""
+    S_in = Star.from_bounds(np.array([[-1.0], [-1.0]]), np.array([[1.0], [1.0]]))
+    layers = [LinearLayer(np.eye(2), np.zeros(2)), nn.ReLU()]
+    with pytest.raises(TypeError, match="Unknown layer type"):
+        relaxed_reach(S_in, layers)
+
+
+@pytest.mark.parametrize("make", [
+    lambda: [],
+    lambda: extract_layers(nn.Sequential(nn.Flatten(), nn.Dropout(0.5))),
+], ids=["no-layer", "flatten-and-dropout"])
+def test_relaxed_reach_leaves_the_input_star_untouched_when_no_layer_changes_it(make):
+    """The caller's input star is reused across calls: provenance goes on a
+    fresh star, never on the input."""
+    S_in = Star.from_bounds(np.array([[-1.0], [0.5]]), np.array([[1.0], [2.0]]))
+    V = S_in.V.copy()
+    out, meta = relaxed_reach(S_in, make(), {NeuronKey(0, 0): Phase.ACTIVE})
+    assert out is not S_in and meta == []
+    assert S_in.relax_meta is None and S_in.fixed is None
+    assert S_in.checkpoints is None and S_in.bound_mode is None
+    assert np.array_equal(out.V, V) and out.checkpoints == []
+
+
+def test_relaxed_reach_records_a_copy_of_the_fixed_phases():
+    """The star records the fixes it was reached under; a caller that
+    changes its dict afterwards does not change them."""
+    layers = extract_layers(_seq(2, 3, 3, 1, seed=1))
+    S_in = Star.from_bounds(np.array([[-1.0], [-1.0]]), np.array([[1.0], [1.0]]))
+    fixed = {NeuronKey(0, 0): Phase.ACTIVE}
+    out, _ = relaxed_reach(S_in, layers, fixed)
+    fixed[NeuronKey(1, 0)] = Phase.INACTIVE
+    assert out.fixed == {NeuronKey(0, 0): Phase.ACTIVE}

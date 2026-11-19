@@ -203,3 +203,83 @@ def test_resume_pair_checks_the_prefix_before_any_gpu_call():
         resume_reach_pair(parent, layers,
                           [{k1: Phase.ACTIVE}, {k1: Phase.INACTIVE}],
                           "dual_gpu", 1)
+
+
+@pytest.mark.parametrize("call", ["resume_reach", "pair-box", "pair-dual_gpu"])
+def test_resume_rejects_a_child_that_flips_a_parent_phase(call):
+    """The parent's layer-0 fix is INACTIVE and its phase row lives in the
+    reused checkpoint; a child that claims the same neuron ACTIVE below the
+    split layer would be built on the wrong region. Catches a prefix check
+    that compares only which neurons are fixed, not their phases."""
+    layers, parent, k1 = _parent_with_a_layer0_fix()
+    k0 = next(k for k in parent.fixed if k.layer == 0)
+    flipped = {k0: Phase.ACTIVE, k1: Phase.ACTIVE}
+    with pytest.raises(ValueError, match="below split"):
+        if call == "resume_reach":
+            resume_reach(parent, layers, flipped, "box", 1)
+        else:
+            resume_reach_pair(parent, layers,
+                              [flipped, {k0: Phase.ACTIVE, k1: Phase.INACTIVE}],
+                              call.split("-")[1], 1)
+
+
+@pytest.mark.parametrize("bound_mode", ["box", "dual_gpu"])
+def test_resume_pair_checks_the_prefix_of_every_child(bound_mode):
+    """Only the SECOND child of the pair disagrees with the parent below the
+    split layer; the pair must still refuse."""
+    layers, parent, k1 = _parent_with_a_layer0_fix()
+    k0 = next(k for k in parent.fixed if k.layer == 0)
+    pair = [{k0: Phase.INACTIVE, k1: Phase.ACTIVE},
+            {k0: Phase.ACTIVE, k1: Phase.INACTIVE}]
+    with pytest.raises(ValueError, match="below split"):
+        resume_reach_pair(parent, layers, pair, bound_mode, 1)
+
+
+@pytest.mark.parametrize("call", ["resume_reach", "pair-dual_gpu"])
+def test_resume_rejects_a_parent_without_checkpoints_and_a_split_layer_out_of_range(call):
+    """A plain star carries no checkpoints; a split layer of -1 (which Python
+    would read as the last ReLU layer) or of the number of ReLU layers names
+    no checkpoint."""
+    net = _net(0, dims=(2, 5, 5, 2))
+    layers = extract_layers(net)
+    S_in = Star.from_bounds(np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
+    root, _ = relaxed_reach(S_in, layers, {})
+
+    def run(parent, split):
+        if call == "resume_reach":
+            return resume_reach(parent, layers, {}, "box", split)
+        return resume_reach_pair(parent, layers, [{}, {}], "dual_gpu", split)
+
+    with pytest.raises(ValueError, match="no checkpoints"):
+        run(S_in, 0)
+    for split in (-1, len(root.checkpoints)):
+        with pytest.raises(ValueError, match="out of range"):
+            run(root, split)
+
+
+@pytest.mark.parametrize("bound_mode", ["box", "lp_cpu"])
+def test_grandchildren_resumed_layer_after_layer_equal_from_scratch(bound_mode):
+    """A chain in depth order: a child split at layer 0, a grandchild split
+    at layer 1 resumed from the child, a great-grandchild at layer 2 resumed
+    from the grandchild. Each reads the checkpoints and the recorded bounds
+    of a RESUMED star, so a child that stores them shifted by one makes the
+    next resume start from another layer's star or reuse another layer's
+    bounds; each must equal a reach from scratch with the same fixes."""
+    net = _net(5, dims=(2, 6, 6, 6, 2))
+    layers = extract_layers(net)
+    S_in = Star.from_bounds(np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
+    star, _ = relaxed_reach(S_in, layers, {}, bound_mode=bound_mode)
+    fixed = {}
+    for L in range(len(relu_positions(layers))):
+        key = next((m.key for m in star.relax_meta if m.key.layer == L), None)
+        if key is None:
+            continue
+        fixed = {**fixed, key: Phase.ACTIVE if L % 2 else Phase.INACTIVE}
+        star = resume_reach(star, layers, fixed, bound_mode, L)
+        scratch, smeta = relaxed_reach(S_in, layers, fixed, bound_mode=bound_mode)
+        _assert_star_equal(star, scratch)
+        _assert_meta_equal(star.relax_meta, smeta)
+        assert len(star.checkpoints) == len(relu_positions(layers))
+        assert all(np.array_equal(a.V, b.V)
+                   for a, b in zip(star.checkpoints, scratch.checkpoints))
+    assert len(fixed) >= 2, "setup: the chain split fewer than two layers"

@@ -1,9 +1,19 @@
-"""Tests for compute_normalization (Finding 1 fix from Hashemi audit).
+"""Tests for compute_normalization: the formula of Hashemi et al. 2025, eq. 6.
 
-The τ normalization should use BOTH training and calibration errors per dim,
-not just training. Naive surrogate has nonzero training errors; clipping
-block has zero training errors. In both cases, calibration errors must
-contribute.
+These tests pin the formula as the paper writes it: τ_k is the largest error
+in output k over the training AND the calibration samples (Finding 1 of the
+Hashemi audit moved the code to it from a training-only τ).
+
+Status: that formula is DEFERRED-BUGS.md bug 1. A τ computed from the
+calibration samples breaks the exchangeability the coverage statement rests
+on, and the box under-covers with the naive surrogate at 50 and 200 outputs.
+The owner deferred the fix (2026-10-08: raise it with the paper's authors
+first), so today's formula is kept and these tests document it. They say what
+the code computes, not that the result is a valid guarantee; the guarantee is
+tested in tests/contracts/test_probabilistic_contract.py
+(``test_conformal_box_misses_no_more_often_than_it_states``). When bug 1 is
+fixed, the tests here that assert a τ taken from the calibration errors change
+with it, or move to the explicitly named paper option if one is kept.
 
 Audit reference:
   .claude/research/flow-matching-probabilistic-reach/_archive/audits/
@@ -24,7 +34,8 @@ from n2v.probabilistic.conformal import (
 
 
 def test_tau_uses_calibration_errors_when_training_errors_zero():
-    """Clipping-block case: training errors are zero. τ must come from calibration."""
+    """Clipping-block case: training errors are zero, so the paper's τ comes
+    from the calibration errors alone (the formula of deferred bug 1)."""
     train_err = np.zeros((10, 2))
     calib_err = np.array([[1.0, 0.10], [0.5, 0.05], [0.3, 0.02]])
     tau = compute_normalization(
@@ -36,7 +47,8 @@ def test_tau_uses_calibration_errors_when_training_errors_zero():
 
 
 def test_tau_uses_max_of_train_and_calib_per_dim():
-    """Naive case: nonzero training errors. τ_k = max over both per dim."""
+    """Naive case: nonzero training errors. The paper's τ_k is the max over
+    both per dim (the formula of deferred bug 1)."""
     train_err = np.array([[0.8, 0.20], [0.4, 0.15]])
     calib_err = np.array([[1.0, 0.10], [0.5, 0.05]])
     tau = compute_normalization(
@@ -145,3 +157,34 @@ def test_audit_worked_example_2d():
     np.testing.assert_allclose(inflation, [0.5, 0.05], rtol=1e-6)
     # And specifically NOT the buggy uniform [0.5, 0.5]
     assert inflation[1] < 0.5
+
+
+@pytest.mark.parametrize("factor, expected", [
+    (0.5, [6.0, 1.015625]),
+    (None, [6.0, 0.25]),
+], ids=["factor-binds", "default-factor"])
+def test_floor_is_the_factor_times_the_mean_absolute_training_error(
+        factor, expected):
+    """tau* = tau_star_factor * mean |training error| and tau = max(tau*,
+    per-output maxima), by hand: the mean absolute training error is 2.03125,
+    so with the factor 0.5 the floor 1.015625 binds in output 1 (whose
+    largest error is 0.25) and not in output 0 (6); with the default factor
+    1e-5 it binds nowhere. Dyadic data: exact. Catches a factor that is
+    ignored or replaced, a floor taken from the largest instead of the mean
+    error, and a floor that is not applied."""
+    train_err = np.array([[2.0, -0.0625], [-6.0, 0.0625]])
+    calib_err = np.array([[1.0, 0.125], [-0.5, -0.25]])
+    options = {} if factor is None else {"tau_star_factor": factor}
+    tau = compute_normalization(train_err, calib_err, **options)
+    assert tau.tolist() == expected
+
+
+def test_one_dimensional_calibration_errors_are_one_sample():
+    """A 1-D calibration error array is one sample with one error per
+    output: tau = per-output max(|train|, |calib|) = [1, 2, 0.5], by hand.
+    Catches a 1-D array read as a column, which takes the largest calibration
+    error of all outputs (2) for every output."""
+    train_err = np.array([[1.0, 0.0, 0.5], [0.0, 0.25, 0.0]])
+    calib_err = np.array([0.5, -2.0, -0.25])
+    tau = compute_normalization(train_err, calib_err)
+    assert tau.tolist() == [1.0, 2.0, 0.5]

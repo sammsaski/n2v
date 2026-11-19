@@ -76,16 +76,9 @@ class TestSigmoidStarApprox:
         result = reach_layer(layer, [star], method='approx')
         assert len(result) == 1
 
-    def test_exact_warns_and_uses_approx(self):
-        """method='exact' emits warning and falls back to approx."""
-        star = Star.from_bounds(np.array([[-1.0]]), np.array([[1.0]]))
-        layer = nn.Sigmoid()
-        import warnings
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            result = reach_layer(layer, [star], method='exact')
-            assert len(result) == 1
-            assert any("approx" in str(warning.message).lower() for warning in w)
+    # What method="exact" does on Sigmoid is stated by
+    # tests/contracts/test_reach_coverage.py::test_exact_refuses_a_layer_with_no_exact_rule.
+    # The test that stood here asserted the silent downgrade to approx.
 
 
 class TestSigmoidZono:

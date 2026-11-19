@@ -59,6 +59,12 @@ def scs_default():
 
 
 def test_estimate_ranges_without_predicate_box_contain_feasible_points(scs_default):
+    """``estimate_ranges`` and ``estimate_range`` of Stars with no predicate
+    box, with SCS as the configured default solver: the value at every LP
+    solution point that is exactly feasible (rationals) must lie inside the
+    returned range. Catches the interval LPs run on the configured solver
+    instead of HiGHS, an optimum taken with no outward pad, and a centre or
+    a row read wrongly on this path."""
     rng = np.random.default_rng(0)
     checked = 0
     for _ in range(10):
@@ -88,6 +94,11 @@ def test_estimate_ranges_without_predicate_box_contain_feasible_points(scs_defau
 
 
 def test_estimate_range_without_predicate_box_is_never_undecided_or_nan():
+    """An infeasible Star and a Star unbounded below, both with no predicate
+    box: the interval queries return infinite bounds, never None, NaN or a
+    decided finite value, and ``get_ranges`` of the infeasible Star falls
+    back to them without NaN. Catches an LP with no optimum read as a
+    number."""
     # x <= -1 and x >= 1: infeasible, no predicate box.
     S = Star(np.array([[0.0, 1.0]]), np.array([[1.0], [-1.0]]),
              np.array([[-1.0], [-1.0]]))
@@ -107,6 +118,10 @@ def test_estimate_range_without_predicate_box_is_never_undecided_or_nan():
 
 @pytest.mark.parametrize("eps", [1e-8, 1e-10, 1e-12])
 def test_estimate_range_without_predicate_box_is_unbounded_along_a_small_slope(eps):
+    """x = a1 + eps a2 over a2 >= 0 is unbounded above along a slope at or
+    below HiGHS's dual tolerance: the upper bound must hold the values at
+    a2 = 1e12 and 1e100. Catches a finite optimum of an unbounded LP taken
+    as a bound."""
     # x = a1 + eps * a2, a1 in [-1, 1], a2 >= 0: unbounded above, along a
     # slope below HiGHS's dual feasibility tolerance.
     S = Star(np.array([[0.0, 1.0, eps]]),
@@ -122,6 +137,10 @@ def test_estimate_range_without_predicate_box_is_unbounded_along_a_small_slope(e
 
 
 def test_estimate_range_without_predicate_box_survives_center_cancellation():
+    """A centre that nearly cancels an LP optimum of about 1e11: the exact
+    values at the largest feasible float points must lie inside the range.
+    Catches a pad sized by the sum instead of by the optimum, and a centre
+    added to nearest."""
     # x = c + f a with q |a| <= 1 and c = -f / q rounded: the maximum is
     # about 0 while the LP optimum is about 1e11.
     rng = np.random.default_rng(0)
@@ -143,6 +162,9 @@ def test_estimate_range_without_predicate_box_survives_center_cancellation():
 
 
 def test_estimate_ranges_without_predicate_box_keep_constant_rows_exact():
+    """A row with no generator is the constant 0.3 exactly, also with no
+    predicate box. Catches a constant row padded or replaced by an LP
+    bound (the kernels read an exact constant as a constant neuron)."""
     S = Star(np.array([[0.3, 0.0], [0.1, 1.0]]), np.array([[1.0], [-1.0]]),
              np.array([[1.0], [1.0]]))
     lo, hi = S.estimate_ranges()
@@ -166,6 +188,10 @@ def _covers(box, c, G):
 
 
 def test_box_to_zono_contains_the_box_exactly():
+    """600 boxes with non-dyadic ends, some straddling 0: the zonotope and
+    the Star of each must hold both ends of every coordinate, in rationals.
+    Catches a centre and half-width rounded to nearest (an end left out by
+    one unit in the last place)."""
     rng = np.random.default_rng(0)
     for t in range(600):
         if t % 2:
@@ -183,6 +209,14 @@ def test_box_to_zono_contains_the_box_exactly():
 
 
 def test_box_to_zono_edge_cases():
+    """An exact midpoint and half-width stay exact, a midpoint whose sum
+    overflows stays finite and covers the box, and an infinite end gives
+    either a refusal or the form ``outward_center_radius`` documents (the
+    centre 0 and an infinite radius), never an infinite or NaN centre.
+    Catches an overflow to inf or NaN and a widening of exact boxes. A
+    zonotope has no unbounded form, so a refusal (``ValueError`` or
+    ``NotImplementedError``, the fix the registry row SET-35 asks of the
+    Star built from such a box) keeps the promise too."""
     # Exact midpoint and half-width: unchanged.
     Z = Box([0.0, 0.0, 3.0], [1.0, 2.0, 3.0]).to_zono()
     assert np.array_equal(Z.c.ravel(), [0.5, 1.0, 3.0])
@@ -192,13 +226,20 @@ def test_box_to_zono_edge_cases():
         box = Box(lb, ub)
         Z = box.to_zono()
         assert np.isfinite(Z.c).all() and _covers(box, Z.c, Z.V)
-    # Unbounded coordinates: a finite center and an infinite radius.
-    Z = Box([0.0, -np.inf], [np.inf, np.inf]).to_zono()
+    # Unbounded coordinates: a refusal, or a finite center (0, as
+    # documented) and an infinite radius.
+    try:
+        Z = Box([0.0, -np.inf], [np.inf, np.inf]).to_zono()
+    except (ValueError, NotImplementedError):
+        return
     assert np.array_equal(Z.c.ravel(), [0.0, 0.0])
     assert np.all(np.abs(Z.V).sum(axis=1) == np.inf)
 
 
 def test_box_single_partition_covers_the_box():
+    """The pieces of ``single_partition`` start at lb, end at ub exactly and
+    share their cut points. Catches a last piece that ends an ulp below ub
+    (lb + k * width rounded) and a gap between pieces."""
     rng = np.random.default_rng(0)
     for _ in range(500):
         lb = rng.uniform(-5, 5)
@@ -244,6 +285,11 @@ def _dot_frac(row, z):
 
 
 def test_star_convex_hull_contains_both_operands_exactly():
+    """Every operand point at a predicate corner is in the convex hull,
+    decided exactly with the hull's own predicate point (the slack variable
+    solving the rounded centre difference). Catches a centre difference
+    rounded with no slack, and a hull that needs 0 to be a feasible
+    predicate point of an operand."""
     rng = np.random.default_rng(0)
     cases = []
     for _ in range(40):
@@ -329,6 +375,11 @@ def _is_bound(r, e, d):
 @pytest.mark.parametrize("op, fn", [("add", _add_dir), ("mul", _mul_dir),
                                     ("div", _div_dir)])
 def test_directed_rounding_is_a_bound_of_the_exact_value(op, fn):
+    """``_add_dir``, ``_mul_dir`` and ``_div_dir`` on every pair of special
+    values (zeros, infinities, subnormals, the largest floats) and random
+    magnitudes from 1e-30 to 1e30, in both directions: each result must be
+    on its side of the exact value in rationals (infinite where none
+    exists). Catches a direction flipped, an exact case moved, and NaN."""
     rng = np.random.default_rng(1)
     vals = _SPECIAL + list(rng.normal(size=60) * 10.0 ** rng.integers(-30, 30, 60))
     A = np.repeat(vals, len(vals))
@@ -343,12 +394,19 @@ def test_directed_rounding_is_a_bound_of_the_exact_value(op, fn):
 @pytest.mark.parametrize("zero", [0.0, -0.0])
 @pytest.mark.parametrize("inf", [np.inf, -np.inf])
 def test_zero_times_infinity_is_zero(zero, inf):
+    """0 times an infinite end is exactly 0 in both directions and both
+    orders, for both signed zeros and infinities. Catches NaN (which holds
+    no point) and a nonzero bound."""
     for d in (-1.0, 1.0):
         assert _mul_dir(np.array([zero]), np.array([inf]), d)[0] == 0.0
         assert _mul_dir(np.array([inf]), np.array([zero]), d)[0] == 0.0
 
 
 def test_box_times_zero_with_infinite_endpoint_has_no_nan_bounds():
+    """A Box with an infinite end times a zero constant, and Box products
+    with infinite ends: the bounds are exact (0, or the infinite end) with
+    no NaN. Catches 0 * inf computed as NaN in the Box product helpers of
+    the graph walk."""
     out = _mul_sets_by_constant([Box([0.0, 1.0], [np.inf, 2.0])],
                                 np.array([0.0, 1.0]))[0]
     assert np.array_equal(out.lb.ravel(), [0.0, 1.0])

@@ -3,6 +3,29 @@
 import pytest
 import numpy as np
 from n2v.sets import Star, Zono, Box, HalfSpace, Hexatope, Octatope
+from tests.known_bugs import DID_NOT_RAISE, known_bug
+
+
+def _assert_exact_range(lb, ub, exact_lb, exact_ub, tight=1e-6):
+    """``[lb, ub]`` holds the exact range ``[exact_lb, exact_ub]`` with no
+    slack: a bound inside the range is unsound by any amount (the data here
+    is dyadic or the expected value is the float the true value rounds to,
+    so a sound bound is never inside it). The operations and range queries
+    these tests exercise are documented as exact, so the bounds must also
+    lie within ``tight`` of the range: a sound result that is too wide is a
+    defect of an exact operation. Replaces a two-sided ``assert_allclose``
+    that forgave a bound up to ``tight`` inside the range."""
+    lb = np.asarray(lb, dtype=np.float64).reshape(-1)
+    ub = np.asarray(ub, dtype=np.float64).reshape(-1)
+    exact_lb = np.asarray(exact_lb, dtype=np.float64).reshape(-1)
+    exact_ub = np.asarray(exact_ub, dtype=np.float64).reshape(-1)
+    assert np.all(lb <= exact_lb) and np.all(ub >= exact_ub), (
+        f"a bound lies inside the exact range: [{lb}, {ub}] vs "
+        f"[{exact_lb}, {exact_ub}]")
+    assert np.all(lb >= exact_lb - tight) and np.all(ub <= exact_ub + tight), (
+        f"the range of an exact operation is wider than the exact one: "
+        f"[{lb}, {ub}] vs [{exact_lb}, {exact_ub}]")
+
 
 class TestStar:
     """Tests for Star set."""
@@ -122,6 +145,22 @@ class TestStar:
         with pytest.raises(ValueError, match="Inconsistency between constraint matrix"):
             Star(V, C, d)
 
+    @known_bug(15, "Star.__init__ compares the rows of C and d only when C "
+                   "has entries, so right-hand sides given with no C (or a "
+                   "point star whose (k, 0) C and d differ in rows) are "
+                   "accepted; the extra right-hand sides belong to no row",
+               raises=DID_NOT_RAISE)
+    def test_creation_invalid_d_rows_without_C_entries(self):
+        """A right-hand side with no constraint row is an input that cannot
+        be read: ``ValueError``, as for a C and d whose rows differ
+        (``test_creation_invalid_C_d_mismatch`` is the passing neighbour).
+        Today the star is built and every consumer ignores the extra rows."""
+        V = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        with pytest.raises(ValueError):
+            Star(V, None, np.array([[1.0]]))
+        with pytest.raises(ValueError):
+            Star(np.array([[0.0], [1.0]]), np.zeros((2, 0)), np.array([[1.0]]))
+
     def test_creation_invalid_d_multiple_columns(self):
         """Test that d with multiple columns raises error."""
         V = np.array([[1.0, 0.1], [0.0, 0.2]])
@@ -151,6 +190,37 @@ class TestStar:
         with pytest.raises(ValueError, match="State lb size doesn't match dimension"):
             Star(V, C, d, state_lb=state_lb)
 
+    def test_creation_invalid_predicate_ub_size(self):
+        """An upper predicate bound with fewer (or more) entries than
+        predicate variables is refused with ``ValueError``, like the lower
+        one: a star built with it would read bounds that belong to no
+        variable."""
+        V = np.array([[1.0, 0.1, 0.0], [0.0, 0.0, 0.2]])
+        C = np.array([[1.0, 0.0]])
+        d = np.array([[1.0]])
+        with pytest.raises(ValueError, match="Predicate ub size"):
+            Star(V, C, d, pred_lb=np.zeros(2), pred_ub=np.ones(1))
+        with pytest.raises(ValueError, match="Predicate ub size"):
+            Star(V, C, d, pred_lb=np.zeros(2), pred_ub=np.ones(3))
+
+    def test_creation_invalid_state_ub_size(self):
+        """A state upper bound with fewer or more entries than the dimension
+        is refused with ``ValueError``."""
+        V = np.array([[1.0, 0.1], [0.0, 0.2]])
+        for size in (1, 3):
+            with pytest.raises(ValueError, match="State ub size"):
+                Star(V, np.array([[1.0]]), np.array([[1.0]]),
+                     state_ub=np.zeros(size))
+
+    def test_repr_names_dimension_variables_and_rows(self):
+        """``repr`` states the dimension, the number of predicate variables
+        and the number of constraint rows, each under its own name (a star
+        of 4 entries, 3 variables and 2 rows, so a swap shows)."""
+        V = np.zeros((4, 4))
+        V[:3, 1:] = np.eye(3)
+        star = Star(V, np.ones((2, 3)), np.ones((2, 1)))
+        assert repr(star) == "Star(dim=4, nVar=3, nConstraints=2)"
+
     def test_from_bounds(self):
         """Test Star creation from bounds."""
         lb = np.array([[0.0], [0.0], [0.0]])
@@ -169,8 +239,7 @@ class TestStar:
 
         # CRITICAL: Check bounds are preserved
         computed_lb, computed_ub = star.get_ranges()
-        np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, lb, ub)
 
         # Check predicate bounds are set correctly (Box.to_star uses [-1, 1])
         assert star.predicate_lb is not None
@@ -189,8 +258,7 @@ class TestStar:
 
         # Verify bounds
         computed_lb, computed_ub = star.get_ranges()
-        np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, lb, ub)
 
     def test_from_bounds_2d(self):
         """Test Star creation from 2D bounds."""
@@ -203,8 +271,7 @@ class TestStar:
 
         # Verify bounds
         computed_lb, computed_ub = star.get_ranges()
-        np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, lb, ub)
 
     def test_from_bounds_negative(self):
         """Test Star creation from bounds with negative values."""
@@ -216,8 +283,7 @@ class TestStar:
 
         # Verify bounds
         computed_lb, computed_ub = star.get_ranges()
-        np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, lb, ub)
 
     def test_from_bounds_different_ranges(self):
         """Test Star from bounds with different range sizes."""
@@ -229,8 +295,7 @@ class TestStar:
 
         # Verify bounds
         computed_lb, computed_ub = star.get_ranges()
-        np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, lb, ub)
 
     def test_from_bounds_point_containment(self):
         """Test that Star from bounds correctly contains points."""
@@ -286,8 +351,7 @@ class TestStar:
 
         # Bounds should be preserved
         result_lb, result_ub = result.get_ranges()
-        np.testing.assert_allclose(result_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, lb, ub)
 
     def test_affine_map_translation(self):
         """Test pure translation (W=I, b≠0)."""
@@ -305,8 +369,7 @@ class TestStar:
         expected_lb = np.array([[2.0], [3.0]])
         expected_ub = np.array([[3.0], [4.0]])
 
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_affine_map_scaling(self):
         """Test scaling transformation."""
@@ -323,8 +386,7 @@ class TestStar:
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[2.0], [2.0]])
 
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_affine_map_negative_scaling(self):
         """Test negative scaling (reflection)."""
@@ -341,8 +403,7 @@ class TestStar:
         expected_lb = np.array([[-1.0], [-1.0]])
         expected_ub = np.array([[0.0], [0.0]])
 
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_affine_map_dimension_reduction(self):
         """Test dimension reduction via projection."""
@@ -360,10 +421,7 @@ class TestStar:
 
         # First dimension: [0, 1]
         # Second dimension: [0, 2] (sum of two [0,1] ranges)
-        np.testing.assert_allclose(result_lb[0], 0.0, atol=1e-6)
-        np.testing.assert_allclose(result_ub[0], 1.0, atol=1e-6)
-        np.testing.assert_allclose(result_lb[1], 0.0, atol=1e-6)
-        np.testing.assert_allclose(result_ub[1], 2.0, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, [0.0, 0.0], [1.0, 2.0])
 
     def test_affine_map_no_bias(self):
         """Test affine map without bias (b=None)."""
@@ -379,8 +437,7 @@ class TestStar:
         expected_lb = np.array([[2.0], [4.0]])
         expected_ub = np.array([[6.0], [8.0]])
 
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_affine_map_combined(self):
         """Test combined scaling and translation."""
@@ -397,8 +454,7 @@ class TestStar:
         expected_lb = np.array([[1.0], [-1.0]])
         expected_ub = np.array([[3.0], [1.0]])
 
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_affine_map_invalid_dimension(self):
         """Test that mismatched W dimensions raise error."""
@@ -411,6 +467,25 @@ class TestStar:
 
         with pytest.raises(ValueError, match="has 3 columns, expected 2"):
             star.affine_map(W)
+
+    @pytest.mark.parametrize("W", [
+        pytest.param(np.array([[0.5, -1.0]]), id="row-matrix"),
+        pytest.param(np.array([0.5, -1.0]), id="one-dimensional", marks=known_bug(
+            23, "Star.affine_map reads W.shape[1] without checking that W has two axes, so a one-dimensional "
+                "weight raises IndexError ('tuple index out of range') where a ValueError, or the answer as "
+                "one row that Box.affine_map gives, is due (registry row SET-29, which names the Zono twin)",
+            raises=IndexError))])
+    def test_affine_map_by_a_single_row_is_the_exact_image(self, W):
+        """``affine_map`` by a weight of one row, given as a (1, 2) matrix or as a one-dimensional array (which ``Box.affine_map`` reads as that row): the one-dimensional form may be refused with ``ValueError``; otherwise the result is the exact image, the interval [0.5 * 1 - 1 * 4, 0.5 * 3 - 1 * 2] = [-3.5, -0.5] of the box [1, 3] x [2, 4], which the range must hold and exceed by no more than the slack of an exact operation. The (1, 2) matrix is the passing neighbour."""
+        star = Star.from_bounds(np.array([[1.0], [2.0]]), np.array([[3.0], [4.0]]))
+        try:
+            result = star.affine_map(W)
+        except ValueError:
+            assert W.ndim == 1, "the (1, 2) matrix was refused"
+            return
+        assert result.dim == 1
+        lb, ub = result.get_ranges()
+        _assert_exact_range(lb, ub, [-3.5], [-0.5])
 
     def test_minkowski_sum(self):
         """Test Minkowski sum of two Stars."""
@@ -434,8 +509,7 @@ class TestStar:
         result_lb, result_ub = result.get_ranges()
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[1.5], [1.5]])
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_minkowski_sum_with_translation(self):
         """Test Minkowski sum with translated Stars."""
@@ -455,8 +529,7 @@ class TestStar:
         result_lb, result_ub = result.get_ranges()
         expected_lb = np.array([[2.0], [2.0]])
         expected_ub = np.array([[4.0], [4.0]])
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_minkowski_sum_different_sizes(self):
         """Test Minkowski sum of Stars with different sizes."""
@@ -476,8 +549,7 @@ class TestStar:
         result_lb, result_ub = result.get_ranges()
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[2.1], [2.1]])
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_minkowski_sum_negative_ranges(self):
         """Test Minkowski sum with negative ranges."""
@@ -497,8 +569,7 @@ class TestStar:
         result_lb, result_ub = result.get_ranges()
         expected_lb = np.array([[-1.0], [-1.0]])
         expected_ub = np.array([[1.0], [1.0]])
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_minkowski_sum_1d(self):
         """Test Minkowski sum in 1D."""
@@ -518,8 +589,7 @@ class TestStar:
         result_lb, result_ub = result.get_ranges()
         expected_lb = np.array([[2.0]])
         expected_ub = np.array([[4.0]])
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_minkowski_sum_3d(self):
         """Test Minkowski sum in 3D."""
@@ -539,8 +609,7 @@ class TestStar:
         result_lb, result_ub = result.get_ranges()
         expected_lb = np.array([[0.0], [0.0], [0.0]])
         expected_ub = np.array([[1.5], [1.5], [1.5]])
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_minkowski_sum_structure(self):
         """Test that Minkowski sum has correct internal structure."""
@@ -635,8 +704,7 @@ class TestStar:
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[0.5], [1.0]])
 
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_intersect_half_space_multiple(self):
         """Test multiple half-space intersections."""
@@ -660,8 +728,7 @@ class TestStar:
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[0.7], [0.6]])
 
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_intersect_half_space_diagonal(self):
         """Test intersection with diagonal half-space."""
@@ -702,8 +769,7 @@ class TestStar:
         expected_lb = np.array([[0.3], [0.0]])
         expected_ub = np.array([[1.0], [1.0]])
 
-        np.testing.assert_allclose(result_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(result_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(result_lb, result_ub, expected_lb, expected_ub)
 
     def test_intersect_half_space_point_containment(self):
         """Test that intersection correctly includes/excludes points."""
@@ -747,6 +813,10 @@ class TestStar:
         # would be done by is_empty() method if it exists)
         assert result.dim == 2
         pytest.assert_star_valid(result)
+        # The intersection is empty (x0 >= 0 on the star, x0 <= -1 cut):
+        # it must be reported so, and a member of the old star is not in it.
+        assert result.is_empty_set() is True
+        assert not result.contains(np.array([0.5, 0.5]))
 
     def test_intersect_half_space_3d(self):
         """Test half-space intersection in 3D."""
@@ -824,8 +894,8 @@ class TestStar:
         expected_ub = np.array([[3.0], [3.0]])
 
         # Result should at least contain the bounding box of both Stars
-        assert np.all(result_lb <= expected_lb + 1e-6)
-        assert np.all(result_ub >= expected_ub - 1e-6)
+        assert np.all(result_lb <= expected_lb)
+        assert np.all(result_ub >= expected_ub)
 
     def test_convex_hull_overlapping(self):
         """Test convex hull of overlapping Stars."""
@@ -845,10 +915,10 @@ class TestStar:
         result_lb, result_ub = result.get_ranges()
 
         # The union would be at least [0, 1.5] × [0, 1.5]
-        assert result_lb[0] <= 0.0 + 1e-6
-        assert result_lb[1] <= 0.0 + 1e-6
-        assert result_ub[0] >= 1.5 - 1e-6
-        assert result_ub[1] >= 1.5 - 1e-6
+        assert result_lb[0] <= 0.0
+        assert result_lb[1] <= 0.0
+        assert result_ub[0] >= 1.5
+        assert result_ub[1] >= 1.5
 
     def test_convex_hull_identical(self):
         """Test convex hull of identical Stars."""
@@ -863,10 +933,10 @@ class TestStar:
         result_lb, result_ub = result.get_ranges()
 
         # Should at least cover the original bounds
-        assert result_lb[0] <= 0.0 + 1e-6
-        assert result_lb[1] <= 0.0 + 1e-6
-        assert result_ub[0] >= 1.0 - 1e-6
-        assert result_ub[1] >= 1.0 - 1e-6
+        assert result_lb[0] <= 0.0
+        assert result_lb[1] <= 0.0
+        assert result_ub[0] >= 1.0
+        assert result_ub[1] >= 1.0
 
     def test_convex_hull_1d(self):
         """Test convex hull in 1D."""
@@ -886,8 +956,8 @@ class TestStar:
 
         # Convex hull of [0,1] and [3,4] should contain [0,4]
         result_lb, result_ub = result.get_ranges()
-        assert result_lb[0] <= 0.0 + 1e-6
-        assert result_ub[0] >= 4.0 - 1e-6
+        assert result_lb[0] <= 0.0
+        assert result_ub[0] >= 4.0
 
     def test_convex_hull_3d(self):
         """Test convex hull in 3D."""
@@ -907,8 +977,8 @@ class TestStar:
 
         # Should contain the range [0,3]³
         result_lb, result_ub = result.get_ranges()
-        assert np.all(result_lb <= np.array([[0.0], [0.0], [0.0]]) + 1e-6)
-        assert np.all(result_ub >= np.array([[3.0], [3.0], [3.0]]) - 1e-6)
+        assert np.all(result_lb <= np.array([[0.0], [0.0], [0.0]]))
+        assert np.all(result_ub >= np.array([[3.0], [3.0], [3.0]]))
 
     def test_convex_hull_point_containment(self):
         """Test that convex hull contains points from both original Stars."""
@@ -1001,8 +1071,7 @@ class TestStar:
         computed_lb, computed_ub = star.get_ranges()
 
         # Should recover original bounds exactly
-        np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, lb, ub)
 
     def test_get_ranges_after_translation(self):
         """Test get_ranges() after translation."""
@@ -1020,8 +1089,7 @@ class TestStar:
         # Bounds should be shifted
         expected_lb = np.array([[2.0], [3.0]])
         expected_ub = np.array([[3.0], [4.0]])
-        np.testing.assert_allclose(computed_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, expected_lb, expected_ub)
 
     def test_get_ranges_after_scaling(self):
         """Test get_ranges() after scaling."""
@@ -1038,8 +1106,7 @@ class TestStar:
         # Bounds should be scaled
         expected_lb = np.array([[0.0], [2.0]])
         expected_ub = np.array([[2.0], [4.0]])
-        np.testing.assert_allclose(computed_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, expected_lb, expected_ub)
 
     def test_get_ranges_after_half_space_intersection(self):
         """Test get_ranges() after half-space intersection."""
@@ -1057,8 +1124,7 @@ class TestStar:
         # Should get [0, 0.5] × [0, 1]
         expected_lb = np.array([[0.0], [0.0]])
         expected_ub = np.array([[0.5], [1.0]])
-        np.testing.assert_allclose(computed_lb, expected_lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, expected_ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, expected_lb, expected_ub)
 
     def test_get_ranges_1d(self):
         """Test get_ranges() for 1D Star."""
@@ -1068,8 +1134,7 @@ class TestStar:
 
         computed_lb, computed_ub = star.get_ranges()
 
-        np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, lb, ub)
 
     def test_get_ranges_3d(self):
         """Test get_ranges() for 3D Star."""
@@ -1079,8 +1144,7 @@ class TestStar:
 
         computed_lb, computed_ub = star.get_ranges()
 
-        np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, lb, ub)
 
     def test_get_ranges_negative(self):
         """Test get_ranges() with negative bounds."""
@@ -1090,8 +1154,7 @@ class TestStar:
 
         computed_lb, computed_ub = star.get_ranges()
 
-        np.testing.assert_allclose(computed_lb, lb, atol=1e-6)
-        np.testing.assert_allclose(computed_ub, ub, atol=1e-6)
+        _assert_exact_range(computed_lb, computed_ub, lb, ub)
 
     def test_get_range_single_dimension(self):
         """Test get_range() for a single dimension."""
@@ -1102,8 +1165,7 @@ class TestStar:
         # Test each dimension
         for i in range(3):
             min_val, max_val = star.get_range(i)
-            np.testing.assert_allclose(min_val, lb[i, 0], atol=1e-6)
-            np.testing.assert_allclose(max_val, ub[i, 0], atol=1e-6)
+            _assert_exact_range(min_val, max_val, lb[i, 0], ub[i, 0])
 
     def test_get_range_invalid_index(self):
         """Test that get_range() raises error for invalid index."""
@@ -1141,6 +1203,10 @@ class TestStar:
         # Results should be identical
         np.testing.assert_allclose(lb_par, lb_seq, atol=1e-6)
         np.testing.assert_allclose(ub_par, ub_seq, atol=1e-6)
+        # Independent reference: each row of W @ box + b by interval
+        # arithmetic on the dyadic data (W >= 0 here, so the row's range is
+        # W @ lb + b to W @ ub + b).
+        _assert_exact_range(lb_par, ub_par, W @ lb + b, W @ ub + b)
 
     def test_get_ranges_batch_matches_sequential(self):
         """Batch get_ranges matches per-dimension get_range."""
@@ -1165,6 +1231,9 @@ class TestStar:
 
         np.testing.assert_allclose(lb_batch, lb_seq, atol=1e-6)
         np.testing.assert_allclose(ub_batch, ub_seq, atol=1e-6)
+        # Independent reference (W >= 0): W @ lb + b to W @ ub + b.
+        _assert_exact_range(lb_batch, ub_batch, W @ lb + b, W @ ub + b)
+        _assert_exact_range(lb_seq, ub_seq, W @ lb + b, W @ ub + b)
 
     def test_get_ranges_consistency_with_get_box(self):
         """Test that get_ranges() and get_box() give consistent results."""
@@ -1181,6 +1250,9 @@ class TestStar:
         # Should match
         np.testing.assert_allclose(ranges_lb, box.lb, atol=1e-6)
         np.testing.assert_allclose(ranges_ub, box.ub, atol=1e-6)
+        # Independent reference: the box the star was built from.
+        _assert_exact_range(ranges_lb, ranges_ub, lb, ub)
+        _assert_exact_range(box.lb, box.ub, lb, ub)
 
     def test_estimate_ranges(self, simple_star):
         """Test estimate_ranges() - basic functionality."""
@@ -1206,8 +1278,8 @@ class TestStar:
         est_lb, est_ub = star.estimate_ranges()
 
         # Estimates should contain the true bounds (over-approximation)
-        assert np.all(est_lb <= lb + 1e-6)
-        assert np.all(est_ub >= ub - 1e-6)
+        assert np.all(est_lb <= lb)
+        assert np.all(est_ub >= ub)
 
     def test_estimate_ranges_over_approximation(self):
         """Test that estimate_ranges() over-approximates get_ranges()."""
@@ -1229,6 +1301,11 @@ class TestStar:
         # Estimates should over-approximate (contain) exact bounds
         assert np.all(est_lb <= exact_lb + 1e-6)
         assert np.all(est_ub >= exact_ub - 1e-6)
+        # Independent reference: the cut x0 + x1 <= 1 leaves both
+        # coordinates the range [0, 1]. The estimate encloses it with no
+        # slack; the LP range is that range.
+        assert np.all(est_lb <= 0.0) and np.all(est_ub >= 1.0)
+        _assert_exact_range(exact_lb, exact_ub, [0.0, 0.0], [1.0, 1.0])
 
     def test_estimate_ranges_after_translation(self):
         """Test estimate_ranges() after translation."""
@@ -1248,8 +1325,8 @@ class TestStar:
         expected_ub = np.array([[3.0], [4.0]])
 
         # Should over-approximate
-        assert np.all(est_lb <= expected_lb + 1e-6)
-        assert np.all(est_ub >= expected_ub - 1e-6)
+        assert np.all(est_lb <= expected_lb)
+        assert np.all(est_ub >= expected_ub)
 
     def test_estimate_ranges_after_scaling(self):
         """Test estimate_ranges() after scaling."""
@@ -1267,8 +1344,8 @@ class TestStar:
         expected_lb = np.array([[0.0], [2.0]])
         expected_ub = np.array([[2.0], [4.0]])
 
-        assert np.all(est_lb <= expected_lb + 1e-6)
-        assert np.all(est_ub >= expected_ub - 1e-6)
+        assert np.all(est_lb <= expected_lb)
+        assert np.all(est_ub >= expected_ub)
 
     def test_estimate_ranges_1d(self):
         """Test estimate_ranges() for 1D Star."""
@@ -1280,8 +1357,8 @@ class TestStar:
 
         assert est_lb.shape == (1, 1)
         assert est_ub.shape == (1, 1)
-        assert est_lb[0, 0] <= 2.0 + 1e-6
-        assert est_ub[0, 0] >= 5.0 - 1e-6
+        assert est_lb[0, 0] <= 2.0
+        assert est_ub[0, 0] >= 5.0
 
     def test_estimate_ranges_3d(self):
         """Test estimate_ranges() for 3D Star."""
@@ -1296,8 +1373,8 @@ class TestStar:
 
         # Should over-approximate
         for i in range(3):
-            assert est_lb[i, 0] <= lb[i, 0] + 1e-6
-            assert est_ub[i, 0] >= ub[i, 0] - 1e-6
+            assert est_lb[i, 0] <= lb[i, 0]
+            assert est_ub[i, 0] >= ub[i, 0]
 
     def test_estimate_ranges_negative(self):
         """Test estimate_ranges() with negative bounds."""
@@ -1307,8 +1384,8 @@ class TestStar:
 
         est_lb, est_ub = star.estimate_ranges()
 
-        assert np.all(est_lb <= lb + 1e-6)
-        assert np.all(est_ub >= ub - 1e-6)
+        assert np.all(est_lb <= lb)
+        assert np.all(est_ub >= ub)
 
     def test_estimate_range_single_dimension(self):
         """Test estimate_range() for a single dimension."""
@@ -1321,8 +1398,8 @@ class TestStar:
             min_est, max_est = star.estimate_range(i)
 
             # Should over-approximate the true bounds
-            assert min_est <= lb[i, 0] + 1e-6
-            assert max_est >= ub[i, 0] - 1e-6
+            assert min_est <= lb[i, 0]
+            assert max_est >= ub[i, 0]
 
     def test_estimate_ranges_fallback_no_predicate_bounds(self):
         """Test that estimate_range falls back to LP when no predicate bounds."""
@@ -1337,6 +1414,11 @@ class TestStar:
         d = np.array([[1.0], [1.0], [0.0], [0.0]])  # Box constraints: 0 <= alpha <= 1
         star = Star(V, C, d)  # No predicate bounds
 
+        # Independent reference: alpha in [0, 1]^2, so entry i ranges over
+        # V[i, 0] + [sum of the negative, sum of the positive generators].
+        true_lb = V[:, 0] + np.minimum(V[:, 1:], 0).sum(axis=1)
+        true_ub = V[:, 0] + np.maximum(V[:, 1:], 0).sum(axis=1)
+
         # Should fall back to LP (exact computation)
         for i in range(star.dim):
             est_min, est_max = star.estimate_range(i)
@@ -1347,6 +1429,10 @@ class TestStar:
             assert exact_min is not None
             np.testing.assert_allclose(est_min, exact_min, atol=1e-6)
             np.testing.assert_allclose(est_max, exact_max, atol=1e-6)
+            # The estimate is an enclosure (no slack inward); the LP range
+            # is the exact range.
+            assert est_min <= true_lb[i] and est_max >= true_ub[i]
+            _assert_exact_range(exact_min, exact_max, true_lb[i], true_ub[i])
 
     def test_estimate_ranges_faster_than_exact(self):
         """Test that estimate_ranges() is faster than get_ranges() for complex Stars."""
@@ -1382,6 +1468,10 @@ class TestStar:
         # Estimates should over-approximate
         assert np.all(est_lb <= exact_lb + 1e-6)
         assert np.all(est_ub >= exact_ub - 1e-6)
+        # Independent reference: the cuts x_i + x_{i+1} <= 1.5 leave every
+        # coordinate the range [0, 1] (x_i = 1 with its neighbours at 1/2).
+        assert np.all(est_lb <= 0.0) and np.all(est_ub >= 1.0)
+        _assert_exact_range(exact_lb, exact_ub, np.zeros(4), np.ones(4))
 
     # ========================================================================
     # _solve_lp Tests
@@ -1619,6 +1709,10 @@ class TestStar:
             # Should match get_range results
             np.testing.assert_allclose(computed_lb, exact_lb, atol=1e-6)
             np.testing.assert_allclose(computed_ub, exact_ub, atol=1e-6)
+            # Independent reference: the box the star was built from.
+            _assert_exact_range(exact_lb, exact_ub, lb[dim, 0], ub[dim, 0])
+            _assert_exact_range(computed_lb, computed_ub, lb[dim, 0],
+                                ub[dim, 0])
 
     def test_contains_point(self):
         """Test point containment."""

@@ -62,3 +62,42 @@ class TestDispatcherPrecomputedBounds:
             precomputed_bounds=(lb, ub),
         )
         assert len(result) >= 1
+
+
+# --------------------------------------------------------------------------- #
+# The dispatcher hands the bounds to the kernel, which reads them               #
+# --------------------------------------------------------------------------- #
+import pytest  # noqa: E402
+
+
+
+def _rows_of_neuron_zero(sets):
+    """Row 0 (centre and generators) of every returned star."""
+    return [np.asarray(s.V)[0] for s in sets]
+
+
+@pytest.mark.parametrize('method', ['exact', 'approx'])
+@pytest.mark.parametrize('layer, slope', [(nn.ReLU(), 0.0),
+                                          (nn.LeakyReLU(0.125), 0.125)])
+def test_handed_bounds_decide_a_neurons_phase(layer, slope, method):
+    """Star x0 in [-1, 1], x1 in [1/2, 3/2]. Handed bounds that put neuron 0
+    in [-1, -1/2] (a deliberate fault: its true range crosses 0) make the
+    kernel treat it as stably negative, so row 0 of every returned star is
+    the input row times the slope (0 for ReLU), exactly; without them the
+    neuron crosses and row 0 is not that. Catches a dispatcher that drops
+    ``precomputed_bounds`` or passes them under another name for a branch
+    (ReLU or LeakyReLU, exact or approx), and a kernel that ignores them."""
+    star = Star.from_bounds(np.array([[-1.0], [0.5]]),
+                            np.array([[1.0], [1.5]]))
+    given = (np.array([[-1.0], [0.5]]), np.array([[-0.5], [1.5]]))
+    expected = slope * np.asarray(star.V)[0]
+    with_bounds = reach_layer(layer, [star], method=method,
+                              precomputed_bounds=given)
+    assert with_bounds
+    for row in _rows_of_neuron_zero(with_bounds):
+        assert np.array_equal(row[:expected.size], expected), row
+        assert not np.any(row[expected.size:]), row
+    without = reach_layer(layer, [star], method=method)
+    assert any(not np.array_equal(row[:expected.size], expected)
+               or np.any(row[expected.size:])
+               for row in _rows_of_neuron_zero(without))

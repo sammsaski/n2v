@@ -41,14 +41,14 @@ ACASXU_LIKE = """\
 
 def test_acasxu_like_box_and_single_output():
     p = load_vnnlib(_write(ACASXU_LIKE))
-    np.testing.assert_allclose(p["lb"], [0.60, -0.50, -0.50, 0.45, -0.50])
-    np.testing.assert_allclose(p["ub"], [0.68, 0.50, 0.50, 0.50, -0.45])
+    np.testing.assert_array_equal(p["lb"], [0.60, -0.50, -0.50, 0.45, -0.50])
+    np.testing.assert_array_equal(p["ub"], [0.68, 0.50, 0.50, 0.50, -0.45])
     assert len(p["prop"]) == 1
     hg = p["prop"][0]["Hg"]
     assert isinstance(hg, HalfSpace)
     # (>= Y[0] 3.99) -> -Y[0] <= -3.99
-    np.testing.assert_allclose(hg.G, [[-1, 0, 0, 0, 0]])
-    np.testing.assert_allclose(hg.g, [[-3.99]])
+    np.testing.assert_array_equal(hg.G, [[-1, 0, 0, 0, 0]])
+    np.testing.assert_array_equal(hg.g, [[-3.99]])
 
 
 ROBUSTNESS_OR = """\
@@ -66,16 +66,16 @@ ROBUSTNESS_OR = """\
 
 def test_robustness_disjunction_and_y_to_y():
     p = load_vnnlib(_write(ROBUSTNESS_OR))
-    np.testing.assert_allclose(p["lb"], [0.0, 0.0, 0.0])
-    np.testing.assert_allclose(p["ub"], [1.0, 1.0, 1.0])
+    np.testing.assert_array_equal(p["lb"], [0.0, 0.0, 0.0])
+    np.testing.assert_array_equal(p["ub"], [1.0, 1.0, 1.0])
     assert len(p["prop"]) == 1
     hg = p["prop"][0]["Hg"]
     # OR -> list of two single-row halfspaces
     assert isinstance(hg, list) and len(hg) == 2
     # (<= Y[0] Y[1]) -> Y[0] - Y[1] <= 0
-    np.testing.assert_allclose(hg[0].G, [[1, -1, 0]])
-    np.testing.assert_allclose(hg[0].g, [[0]])
-    np.testing.assert_allclose(hg[1].G, [[1, 0, -1]])
+    np.testing.assert_array_equal(hg[0].G, [[1, -1, 0]])
+    np.testing.assert_array_equal(hg[0].g, [[0]])
+    np.testing.assert_array_equal(hg[1].G, [[1, 0, -1]])
 
 
 def test_disjunctive_input_regions():
@@ -91,10 +91,10 @@ def test_disjunctive_input_regions():
 """
     p = load_vnnlib(_write(spec))
     assert isinstance(p["lb"], list) and len(p["lb"]) == 2
-    np.testing.assert_allclose(p["lb"][0], [0.0, 0.0])
-    np.testing.assert_allclose(p["ub"][0], [1.0, 1.0])
-    np.testing.assert_allclose(p["lb"][1], [2.0, 2.0])
-    np.testing.assert_allclose(p["ub"][1], [3.0, 3.0])
+    np.testing.assert_array_equal(p["lb"][0], [0.0, 0.0])
+    np.testing.assert_array_equal(p["ub"][0], [1.0, 1.0])
+    np.testing.assert_array_equal(p["lb"][1], [2.0, 2.0])
+    np.testing.assert_array_equal(p["ub"][1], [3.0, 3.0])
 
 
 def test_nonlinear_spec_loads_as_ast():
@@ -116,8 +116,8 @@ def test_nonlinear_spec_loads_as_ast():
     assert p["format"] == "nonlinear"
     assert len(p["assertions"]) == 3
     # best-effort box from the affine single-var atoms
-    np.testing.assert_allclose(p["lb"], [20.0, -40.0])
-    np.testing.assert_allclose(p["ub"], [40.0, 0.0])
+    np.testing.assert_array_equal(p["lb"], [20.0, -40.0])
+    np.testing.assert_array_equal(p["ub"], [40.0, 0.0])
     # hand-computed truth table for the quadratic constraint
     assert evaluate_nonlinear(p, np.array([30.0, -3.0]), np.array([9.0]))
     assert not evaluate_nonlinear(p, np.array([30.0, -3.0]), np.array([9.1]))
@@ -162,6 +162,6 @@ def test_dispatcher_routes_legacy_1_0():
 (assert (<= Y_0 5.0))
 """
     p = load_vnnlib(_write(spec))
-    np.testing.assert_allclose(p["lb"], [0.0, 0.0])
-    np.testing.assert_allclose(p["ub"], [1.0, 1.0])
+    np.testing.assert_array_equal(p["lb"], [0.0, 0.0])
+    np.testing.assert_array_equal(p["ub"], [1.0, 1.0])
     assert len(p["prop"]) >= 1

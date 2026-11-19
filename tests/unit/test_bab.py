@@ -87,19 +87,26 @@ def test_bab_verified_is_sound():
     xs = rng.uniform(-1, 1, size=(20000, 2)).astype(np.float32)
     with torch.no_grad():
         ys = m(torch.from_numpy(xs)).numpy().reshape(-1)
-    assert np.all(ys <= thresh + 1e-5)         # no true input violates the proven bound
+    # no true input violates the proven bound; no slack: thresh lies at least
+    # 0.025 above the sampled maximum, far beyond float32 rounding
+    assert np.all(ys <= thresh)
 
 
 def test_bab_falsifies_false_property():
+    # The witness must lie in the box and violate the property at zero
+    # tolerance on the batch-1 float32 forward, which falsify() re-checks
+    # before it returns (a 1e-4 slack here accepted a safe point).
     m, tmax, smax = _gap_net()
     thresh = tmax - 0.2 * (smax - tmax)        # below true max -> falsifiable
     res = verify_bab_model(m, LB, UB, _spec_leq(thresh), branch="widest",
                            max_nodes=2000, falsify_method="random+pgd")
     assert res.verdict == "FALSIFIED", res
-    x = np.asarray(res.counterexample).reshape(-1).astype(np.float32)
+    x64 = np.asarray(res.counterexample, dtype=np.float64).reshape(-1)
+    assert np.all(LB <= x64) and np.all(x64 <= UB), x64
+    x = x64.astype(np.float32)
     with torch.no_grad():
         y = float(m(torch.from_numpy(x).unsqueeze(0)).reshape(-1)[0])
-    assert y >= thresh - 1e-4                  # counterexample really violates
+    assert y >= thresh                         # counterexample really violates
 
 
 def test_exact_relu_split_is_complete():
@@ -135,20 +142,33 @@ def test_bab_relu_neuron_split_sound():
     xs = rng.uniform(-1, 1, size=(20000, 2)).astype(np.float32)
     with torch.no_grad():
         ys = m(torch.from_numpy(xs)).numpy().reshape(-1)
-    assert np.all(ys <= tmax + 0.5 * (smax - tmax) + 1e-5)
+    assert np.all(ys <= tmax + 0.5 * (smax - tmax))     # no slack, as above
 
 
 def test_bab_relu_neuron_split_falsifies():
+    # The witness is the falsifier's input: inside the box, and the batch-1
+    # float32 forward reaches the threshold at zero tolerance.
     m, tmax, smax = _gap_net()
-    res = verify_bab_relu(m, LB, UB, _spec_leq(tmax - 0.2 * (smax - tmax)),
+    thresh = tmax - 0.2 * (smax - tmax)
+    res = verify_bab_relu(m, LB, UB, _spec_leq(thresh),
                           falsify_method="random+pgd", max_nodes=3000)
     assert res.verdict == "FALSIFIED", res
+    x64 = np.asarray(res.counterexample, dtype=np.float64).reshape(-1)
+    assert np.all(LB <= x64) and np.all(x64 <= UB), x64
+    with torch.no_grad():
+        y = float(m(torch.from_numpy(x64.astype(np.float32)).unsqueeze(0))
+                  .reshape(-1)[0])
+    assert y >= thresh
 
 
 def test_bab_budget_is_sound_unknown():
+    # One reach of the whole box does not prove this threshold (see
+    # test_bab_verifies_what_single_shot_cannot), so a search allowed one
+    # node must end UNKNOWN after that node; VERIFIED here would be the
+    # budget answered as a proof.
     m, tmax, smax = _gap_net()
     res = verify_bab_model(m, LB, UB, _spec_leq(tmax + 0.5 * (smax - tmax)),
                            branch="widest", max_nodes=1, falsify_method="random")
-    assert res.verdict in ("UNKNOWN", "VERIFIED")
-    if res.verdict == "UNKNOWN":
-        assert "budget" in res.reason or "timeout" in res.reason
+    assert res.verdict == "UNKNOWN", res
+    assert res.nodes == 1
+    assert "budget" in res.reason or "timeout" in res.reason

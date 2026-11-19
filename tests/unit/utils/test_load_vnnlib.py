@@ -8,6 +8,8 @@ import tempfile
 import os
 from n2v.utils.load_vnnlib import load_vnnlib
 from n2v.sets import HalfSpace
+from n2v.utils.vnnlib2 import VNNLibParseError, evaluate_nonlinear
+from tests.known_bugs import known_bug
 
 
 class TestLoadVNNLib:
@@ -287,3 +289,99 @@ class TestLoadVNNLibErrorHandling:
                 load_vnnlib(temp_file)
         finally:
             os.unlink(temp_file)
+
+
+def _load_text(tmp_path, text):
+    path = tmp_path / "spec.vnnlib"
+    path.write_text(text)
+    return load_vnnlib(str(path))
+
+
+class TestFormatDispatch:
+    """``load_vnnlib`` picks the reader from the text and returns the 2.0
+    nonlinear and relational forms as they are. The expected values are
+    written out by hand from each small file."""
+
+    def test_v2_file_without_a_version_line_is_read_by_the_2_0_reader(
+            self, tmp_path):
+        """The docstring routes a file with either marker, ``vnnlib-version``
+        or ``declare-network``, to the 2.0 reader. A test that needs both
+        hands this file to the 1.0 reader, which finds no ``declare-const``
+        and refuses it as empty."""
+        prop = _load_text(tmp_path, (
+            "(declare-network N\n"
+            "  (declare-input X float32 [1,2])\n"
+            "  (declare-output Y float32 [1,1])\n)\n"
+            "(assert (>= X[0,0] 0.25))\n(assert (<= X[0,0] 0.75))\n"
+            "(assert (>= X[0,1] -2.0))\n(assert (<= X[0,1] 3.0))\n"
+            "(assert (>= Y[0,0] 0.875))\n"))
+        (pair,) = prop["pairs"]
+        assert np.asarray(pair["lb"], dtype=np.float64).ravel().tolist() == [
+            0.25, -2.0]
+        assert np.asarray(pair["ub"], dtype=np.float64).ravel().tolist() == [
+            0.75, 3.0]
+        (group,) = pair["prop"]
+        assert np.asarray(group["Hg"].G).tolist() == [[-1.0]]
+        assert np.asarray(group["Hg"].g).ravel().tolist() == [-0.875]
+
+    @known_bug(6, "a 1.0 file whose comment holds the text 'vnnlib-version' "
+                  "or 'declare-network' is handed to the 2.0 reader, which "
+                  "refuses it (no declare-input): the version is detected by "
+                  "searching the raw text, comments included, so a legal "
+                  "1.0 file gets no verdict", raises=VNNLibParseError)
+    def test_v1_file_whose_comment_names_a_2_0_keyword_is_read_by_the_1_0_reader(
+            self, tmp_path):
+        """A comment has no meaning; the reader is chosen by what the file
+        states, here ``declare-const``."""
+        prop = _load_text(tmp_path, (
+            "; written by a tool that also writes declare-network files\n"
+            "(declare-const X_0 Real)\n(declare-const Y_0 Real)\n"
+            "(assert (>= X_0 0.25))\n(assert (<= X_0 0.75))\n"
+            "(assert (>= Y_0 0.875))\n"))
+        (pair,) = prop["pairs"]
+        assert np.asarray(pair["lb"], dtype=np.float64).ravel().tolist() == [
+            0.25]
+        assert np.asarray(pair["ub"], dtype=np.float64).ravel().tolist() == [
+            0.75]
+        (group,) = pair["prop"]
+        assert np.asarray(group["Hg"].G).tolist() == [[-1.0]]
+        assert np.asarray(group["Hg"].g).ravel().tolist() == [-0.875]
+
+    def test_nonlinear_spec_is_returned_as_parsed(self, tmp_path):
+        """A product of variables has no half-space reading: ``load_vnnlib``
+        returns the 2.0 nonlinear parse (``prop`` None, the assertions kept)
+        before its emptiness guard and its pairs, which would refuse it. The
+        kept assertions must decide y*y >= 4 as the text does."""
+        prop = _load_text(tmp_path, (
+            "(vnnlib-version <2.0>)\n(declare-network N\n"
+            "  (declare-input X real [1,1])\n"
+            "  (declare-output Y real [1,1])\n)\n"
+            "(assert (>= X[0,0] 1.0))\n(assert (<= X[0,0] 2.0))\n"
+            "(assert (>= (* Y[0,0] Y[0,0]) 4.0))\n"))
+        assert prop["format"] == "nonlinear"
+        assert prop["prop"] is None and "pairs" not in prop
+        assert np.asarray(prop["lb"]).ravel().tolist() == [1.0]
+        assert np.asarray(prop["ub"]).ravel().tolist() == [2.0]
+        for y in (-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0):
+            assert evaluate_nonlinear(prop, np.array([1.5]), np.array([y])) \
+                is (y * y >= 4.0), y
+
+    def test_relational_spec_is_returned_with_its_coupled_input_unbounded(
+            self, tmp_path):
+        """A two-network file bounds X_g only through the coupling
+        X_f == X_g, so its box leaves X_g unbounded. ``load_vnnlib`` returns
+        it after its emptiness guard and before the pairs validator, which
+        would refuse the infinite bound; the box is the one stated."""
+        prop = _load_text(tmp_path, (
+            "(vnnlib-version <2.0>)\n"
+            "(declare-network f\n  (declare-input X_f real [1])\n"
+            "  (declare-output Y_f real [1])\n)\n"
+            "(declare-network g\n  (equal-to f)\n"
+            "  (declare-input X_g real [1])\n"
+            "  (declare-output Y_g real [1])\n)\n"
+            "(assert (and (>= X_f[0] 0.25) (<= X_f[0] 0.75)))\n"
+            "(assert (== X_f[0] X_g[0]))\n"
+            "(assert (<= Y_f[0] Y_g[0]))\n"))
+        assert prop["format"] == "relational" and "pairs" not in prop
+        assert np.asarray(prop["lb"]).ravel().tolist() == [0.25, -np.inf]
+        assert np.asarray(prop["ub"]).ravel().tolist() == [0.75, np.inf]

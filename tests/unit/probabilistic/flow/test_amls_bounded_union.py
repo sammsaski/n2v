@@ -135,9 +135,16 @@ def test_certify_spec_union_single_group_certifies():
 def test_certify_spec_union_and_of_or_one_disjoint_group_unsat():
     """AND-of-OR: two groups, only the second is disjoint. UNSAT
     requires *at least one* group disjoint, so should certify.
+
+    The first group must overlap the ball. With ``y_0 <= -3``, which the
+    ball ``|z| <= 2`` does not reach either, both groups would be disjoint
+    and the case could not see a spec judged by its first group only (it
+    would be "detected" only through a proposal outside the ball, a defect
+    of its own). ``y_0 <= -1.5`` holds 4.6 % of the ball: 500 first-level
+    samples miss it with probability 6e-11, so the first group is detected.
     """
     flow = _IdentityFlow()
-    group_overlap = [_hs([1.0], -3.0)]      # y_0 <= -3 — has tail mass
+    group_overlap = [_hs([1.0], -1.5)]      # y_0 <= -1.5 — 4.6 % of the ball
     group_disjoint = [_hs([-1.0], -5.0)]    # y_0 >= 5 — far from ball
     spec_groups = [group_overlap, group_disjoint]
 
@@ -145,6 +152,8 @@ def test_certify_spec_union_and_of_or_one_disjoint_group_unsat():
         flow, spec_groups, q=2.0, eps_2_target=0.05,
         n_samples_per_level=500, max_levels=10, seed=47,
     )
+    assert res.per_hs_results[0][0].detected_unsafe is True
+    assert res.per_hs_results[1][0].detected_unsafe is False
     assert res.unsat_certified is True
 
 

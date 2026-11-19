@@ -29,6 +29,7 @@ from n2v.nn.neural_network import NeuralNetwork
 from n2v.nn.reach import _div_sets, _mul_sets
 from n2v.sets import Star
 from n2v.sets.image_star import ImageStar
+from tests.cell_support import assert_covered, replay_torch, samples
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +66,9 @@ def _reach_point(gm, value=1.0):
 def test_pad_value_from_a_split_of_constants_is_folded(value):
     """The value comes out of Split(constant). Folding could not index the
     Split's tuple, so the value 5 was reached as zero padding (the true
-    border is 5, the reach said 0) and the value 0 was refused."""
+    border is 5, the reach said 0) and the value 0 was refused. The true
+    output of the point input must be a member of the result (one-sided:
+    a wider set is sound)."""
     from onnx import helper
     gm = _pad_model(
         [helper.make_node('Split', ['v2'], ['va', 'vb'], axis=0),
@@ -79,9 +82,8 @@ def test_pad_value_from_a_split_of_constants_is_folded(value):
         with pytest.raises(NotImplementedError, match='non-zero constant'):
             _reach_point(gm)
         return
-    lo, hi = _reach_point(gm)[0].estimate_ranges()
-    np.testing.assert_array_equal(np.ravel(lo), ref.ravel())
-    np.testing.assert_array_equal(np.ravel(hi), ref.ravel())
+    assert_covered(_reach_point(gm), [ref], f"Pad value {value} from a Split",
+                   out_chw=(1, 4, 4))
 
 
 def test_pad_value_that_depends_on_the_input_is_refused():
@@ -96,7 +98,8 @@ def test_pad_value_that_depends_on_the_input_is_refused():
 
 def test_pad_of_a_constant_tensor_is_folded_with_its_value():
     """bias = Pad(B, pads, 5) is a constant; X + bias folds it with torch.
-    The value check refused it although no set is padded."""
+    The value check refused it although no set is padded. The true output
+    [5, 1, 2, 5] of the point input must be a member of the result."""
     import onnx
     onnx2torch = pytest.importorskip('onnx2torch')
     from onnx import TensorProto, helper, numpy_helper
@@ -113,9 +116,8 @@ def test_pad_of_a_constant_tensor_is_folded_with_its_value():
     onnx.checker.check_model(model)
     gm = onnx2torch.convert(model).eval()
     S = Star.from_bounds(np.zeros((4, 1)), np.zeros((4, 1)))
-    lo, hi = NeuralNetwork(gm).reach(S, method='approx')[0].estimate_ranges()
-    np.testing.assert_array_equal(np.ravel(lo), [5.0, 1.0, 2.0, 5.0])
-    np.testing.assert_array_equal(np.ravel(hi), [5.0, 1.0, 2.0, 5.0])
+    assert_covered(NeuralNetwork(gm).reach(S, method='approx'),
+                   [[5.0, 1.0, 2.0, 5.0]], "X + Pad(B, pads, 5)")
 
 
 def test_nonzero_pad_value_is_refused_on_every_reach():
@@ -128,13 +130,18 @@ def test_nonzero_pad_value_is_refused_on_every_reach():
             _reach_point(gm)
 
 
-@pytest.mark.parametrize('case', ['initializer', 'constant_node', 'omitted'])
+@pytest.mark.parametrize('case', ['constant_node', 'omitted'])
 def test_zero_pad_value_is_reached_exactly(case):
+    """A zero pad value given by an ONNX Constant node, or left out by an
+    empty input name (a third input that is None), must be resolved and
+    reached as zero padding, not refused: the true output of the point
+    input must be a member of the result. The value given as an initializer
+    is held by ``test_soundness_pad.py::
+    test_onnx_pad_holds_every_onnxruntime_output[13-0.0-*]`` (the item here
+    was removed as its duplicate)."""
     from onnx import helper, numpy_helper
     zero = np.array(0.0, np.float32)
-    if case == 'initializer':
-        gm = _pad_model([], 'v', [('v', zero)])
-    elif case == 'constant_node':
+    if case == 'constant_node':
         gm = _pad_model([helper.make_node(
             'Constant', [], ['v'], value=numpy_helper.from_array(zero))], 'v')
     else:
@@ -142,9 +149,7 @@ def test_zero_pad_value_is_reached_exactly(case):
     out = _reach_point(gm, 1.0)
     with torch.no_grad():
         ref = gm(torch.ones(1, 1, 2, 2))[0, 0].numpy()
-    lo, hi = out[0].estimate_ranges()
-    np.testing.assert_array_equal(np.ravel(lo), ref.ravel())
-    np.testing.assert_array_equal(np.ravel(hi), ref.ravel())
+    assert_covered(out, [ref], f"zero Pad value ({case})", out_chw=(1, 4, 4))
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +159,9 @@ def test_zero_pad_value_is_reached_exactly(case):
 def test_concat_operand_from_a_split_of_constants_is_kept():
     """Y = Relu(Concat(Split(const)[0], X)) with X in [0, 1]^2 is
     [10, X0, X1]. The constant operand could not be folded and was skipped:
-    the reach returned 2 dimensions, the first one X0 in [0, 1]."""
+    the reach returned 2 dimensions, the first one X0 in [0, 1]. The output
+    must have 3 entries and hold the float64 torch output of 128 points of
+    the box (one-sided)."""
     import onnx
     onnx2torch = pytest.importorskip('onnx2torch')
     from onnx import TensorProto, helper, numpy_helper
@@ -170,11 +177,10 @@ def test_concat_operand_from_a_split_of_constants_is_kept():
     onnx.checker.check_model(model)
     gm = onnx2torch.convert(model).eval()
     S = Star.from_bounds(np.zeros((2, 1)), np.ones((2, 1)))
-    out = NeuralNetwork(gm).reach(S, method='approx')[0]
-    assert out.dim == 3
-    lo, hi = out.estimate_ranges()
-    np.testing.assert_allclose(np.ravel(lo), [10.0, 0.0, 0.0], rtol=0, atol=1e-12)
-    np.testing.assert_allclose(np.ravel(hi), [10.0, 1.0, 1.0], rtol=0, atol=1e-12)
+    sets = NeuralNetwork(gm).reach(S, method='approx')
+    assert all(out.dim == 3 for out in sets)
+    assert_covered(sets, replay_torch(gm, samples(np.zeros(2), np.ones(2)),
+                                      [1, 2]), "Concat(Split(const)[0], X)")
 
 
 def test_concat_operand_without_sets_or_constant_value_is_refused():

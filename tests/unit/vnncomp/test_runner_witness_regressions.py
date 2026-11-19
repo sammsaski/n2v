@@ -14,10 +14,25 @@ case where the runner's own acceptance disagreed with that grading:
   * a ViT candidate accepted on its batched onnxruntime row, which can differ
     from the batch-1 replay;
   * an ONNX input without a batch dimension, on which every falsifier crashed.
+
+From the section "The checker" on, the tests read what the runner writes the
+way the competition does, with a checker of their own: the written witness is
+parsed in the format of the spec's version, its input must lie in the box at
+zero tolerance, its outputs must be the onnxruntime replay of that input, and
+the replay must violate the property, decided in exact arithmetic from the
+instance as the test wrote it down. They cover the witness writer
+(``_snap_into_box``, ``_v2_ce_meta``, ``_format_ce_v2``,
+``format_counterexample``), the sat gate (``_witness_satisfies_spec``,
+``_assertions_hold``, ``in_unsafe_region``) and the results file
+(``write_result``), directly and through ``verify_instance``, the nonlinear
+and ViT routes and ``main``.
 """
 
 import os
+import re
+import signal
 import sys
+from fractions import Fraction
 
 import numpy as np
 import pytest
@@ -32,6 +47,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..',
                                 'examples', 'Submission', 'VNN_COMP2026'))
 import vnncomp_runner as R  # noqa: E402
 from n2v.sets.halfspace import HalfSpace  # noqa: E402
+from tests.cell_support import replay_onnx  # noqa: E402
+from tests.known_bugs import known_bug  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -432,3 +449,552 @@ def test_falsify_model_leaves_batchable_models_alone(tmp_path):
     assert isinstance(wrapped, R._PerSampleModel)
     out = wrapped(torch.ones(3, 6))
     assert out.shape == (3, 1) and torch.allclose(out, torch.full((3, 1), 4.0))
+
+
+# ---------------------------------------------------------------------------
+# The checker: the test's own reading of what the runner wrote
+# ---------------------------------------------------------------------------
+#
+# An instance is written down here, independently of n2v: the ONNX input
+# tensor shape, one interval per input coordinate (row-major over the tensor),
+# the output tensor shape, and the unsafe region as a list of asserts that are
+# ANDed, each an OR of conjunctions of atoms (j, op, c) on the flat output,
+# y_j op c. Its spec is written in either VNN-LIB version. The checker parses
+# the written witness itself, demands the format of that version (variables
+# numbered from 0 in 1.0; blocks named, typed and shaped as declared, in
+# declaration order, in 2.0), checks the written input against the box and
+# replays it on onnxruntime, and decides the property on that replay; box and
+# property are compared in exact arithmetic on the decimal text of the spec.
+
+_NUMBER = re.compile(r"[-+]?(\d+\.?\d*|\.\d+)([eE][-+]?\d+)?")
+
+
+class _Instance:
+    def __init__(self, W, b, in_shape, lb, ub, out_shape, unsafe):
+        self.W, self.b = np.asarray(W, np.float32), np.asarray(b, np.float32)
+        self.in_shape, self.out_shape = tuple(in_shape), tuple(out_shape)
+        self.lb, self.ub = [float(v) for v in lb], [float(v) for v in ub]
+        self.unsafe = unsafe
+
+    def onnx(self, tmp_path):
+        """X (in_shape) -> Reshape [1, d] -> Gemm -> Y [1, n_out]."""
+        d = int(np.prod(self.in_shape))
+        nodes = [helper.make_node("Reshape", ["X", "sh"], ["f"]),
+                 helper.make_node("Gemm", ["f", "W", "B"], ["Y"], transB=1)]
+        inits = [numpy_helper.from_array(np.array([1, d], np.int64), "sh"),
+                 numpy_helper.from_array(self.W, "W"),
+                 numpy_helper.from_array(self.b, "B")]
+        return _save(nodes,
+                     [helper.make_tensor_value_info("X", TensorProto.FLOAT,
+                                                    list(self.in_shape))],
+                     [helper.make_tensor_value_info("Y", TensorProto.FLOAT,
+                                                    list(self.out_shape))],
+                     inits, tmp_path / "net.onnx")
+
+    def names(self, version):
+        if version == "1.0":
+            return ([f"X_{i}" for i in range(len(self.lb))],
+                    [f"Y_{j}" for j in range(int(np.prod(self.out_shape)))])
+        return ([f"X[{','.join(map(str, k))}]"
+                 for k in np.ndindex(*self.in_shape)],
+                [f"Y[{','.join(map(str, k))}]"
+                 for k in np.ndindex(*self.out_shape)])
+
+    def spec(self, tmp_path, version):
+        xs, ys = self.names(version)
+        if version == "1.0":
+            lines = [f"(declare-const {v} Real)" for v in xs + ys]
+        else:
+            lines = ["(vnnlib-version <2.0>)", "(declare-network N",
+                     f"    (declare-input X float32 [{_dims(self.in_shape)}])",
+                     f"    (declare-output Y float32 [{_dims(self.out_shape)}])",
+                     ")"]
+        for v, lo, hi in zip(xs, self.lb, self.ub):
+            lines += [f"(assert (>= {v} {lo!r}))", f"(assert (<= {v} {hi!r}))"]
+        for disjuncts in self.unsafe:
+            conj = [[f"({op} {ys[j]} {c!r})" for j, op, c in atoms]
+                    for atoms in disjuncts]
+            if len(conj) > 1:
+                lines.append("(assert (or " + " ".join(
+                    f"(and {' '.join(a)})" for a in conj) + "))")
+            elif version == "1.0" or len(conj[0]) == 1:
+                lines += [f"(assert {a})" for a in conj[0]]
+            else:
+                lines.append(f"(assert (and {' '.join(conj[0])}))")
+        path = tmp_path / f"spec_{version}.vnnlib"
+        path.write_text("\n".join(lines) + "\n")
+        return str(path)
+
+
+def _dims(shape):
+    return ", ".join(str(d) for d in shape)
+
+
+def _value(text, what):
+    """The exact value of one written number; anything else is malformed."""
+    if not _NUMBER.fullmatch(text):
+        pytest.fail(f"{what}: {text!r} is not a number")
+    return Fraction(text)
+
+
+def _read_v1(witness, n_in, n_out):
+    """The 1.0 witness ``((X_0 v) ... (Y_0 v) ...)``: every input numbered
+    0..n_in-1 and every output 0..n_out-1 exactly once; the written texts."""
+    body = witness.strip()
+    assert body.startswith("(") and body.endswith(")"), witness[:80]
+    atom = r"\(\s*([XY])_(\d+)\s+([^\s()]+)\s*\)"
+    assert re.sub(atom, "", body[1:-1]).strip() == "", witness[:200]
+    found = {"X": {}, "Y": {}}
+    for kind, i, v in re.findall(atom, body[1:-1]):
+        assert int(i) not in found[kind], f"{kind}_{i} written twice"
+        found[kind][int(i)] = v
+    assert sorted(found["X"]) == list(range(n_in)), sorted(found["X"])
+    assert sorted(found["Y"]) == list(range(n_out)), sorted(found["Y"])
+    return ([found["X"][i] for i in range(n_in)],
+            [found["Y"][j] for j in range(n_out)])
+
+
+def _read_v2(witness, declared):
+    """The 2.0 textual witness: for each declared (name, dtype, shape), in
+    declaration order, the header ``name dtype [d0,d1,...]`` with the
+    declared shape, then its values one per line; nothing else."""
+    lines = [ln.strip() for ln in witness.splitlines() if ln.strip()]
+    blocks, i = {}, 0
+    for name, dtype, shape in declared:
+        assert i < len(lines), f"no block for {name}"
+        m = re.fullmatch(r"(\S+) (\S+) \[([0-9,\s]*)\]", lines[i])
+        assert m, f"malformed header {lines[i]!r}"
+        dims = [int(d) for d in m.group(3).split(",") if d.strip()]
+        assert (m.group(1), m.group(2), dims) == (name, dtype, list(shape))
+        n = int(np.prod(shape))
+        blocks[name] = lines[i + 1:i + 1 + n]
+        assert len(blocks[name]) == n, f"{name}: {len(blocks[name])} values"
+        i += 1 + n
+    assert i == len(lines), f"trailing lines {lines[i:i + 3]}"
+    return blocks
+
+
+def _read_witness(witness, version, inst):
+    """The written input and output texts of the instance's witness."""
+    if version == "1.0":
+        return _read_v1(witness, len(inst.lb), int(np.prod(inst.out_shape)))
+    blocks = _read_v2(witness, [("X", "float32", inst.in_shape),
+                                ("Y", "float32", inst.out_shape)])
+    return blocks["X"], blocks["Y"]
+
+
+def _holds(y, op, c):
+    y, c = Fraction(float(y)), Fraction(repr(float(c)))
+    return {"<=": y <= c, ">=": y >= c, "<": y < c, ">": y > c}[op]
+
+
+def _replayed_point(witness, version, inst, onnx_path):
+    """Read the witness as the checker does: the written input inside the box
+    (zero tolerance), the written outputs equal to the onnxruntime replay of
+    the written input. Returns the replayed output."""
+    x_text, y_text = _read_witness(witness, version, inst)
+    x = [_value(t, f"input {i}") for i, t in enumerate(x_text)]
+    for i, (v, lo, hi) in enumerate(zip(x, inst.lb, inst.ub)):
+        assert Fraction(repr(lo)) <= v <= Fraction(repr(hi)), (
+            f"input {i} written as {x_text[i]}, outside [{lo!r}, {hi!r}]")
+    y = replay_onnx(onnx_path, [[float(v) for v in x]], inst.in_shape)[0]
+    written = [float(_value(t, f"output {j}")) for j, t in enumerate(y_text)]
+    assert written == y.tolist(), "written outputs are not the replay"
+    return y
+
+
+def _assert_accepted(witness, version, inst, onnx_path):
+    """The competition's verdict on a sat witness: correct only when the
+    replay of the written input violates the property."""
+    y = _replayed_point(witness, version, inst, onnx_path)
+    assert all(any(all(_holds(y[j], op, c) for j, op, c in atoms)
+                   for atoms in disjuncts) for disjuncts in inst.unsafe), (
+        f"replayed output {y.tolist()} is not in the unsafe region")
+
+
+# ---------------------------------------------------------------------------
+# A sat witness written by the runner is one the checker accepts
+# ---------------------------------------------------------------------------
+
+_ONE_TWO = [[1.0, 1.0], [1.0, -1.0]]
+_IMAGE_W = np.zeros((2, 24))
+_IMAGE_W[0, 5], _IMAGE_W[1, 17] = 1.0, -1.0
+
+_WITNESS_INSTANCES = {
+    # x0 pinned to 0.1, not a float32 value; X and Y of equal size, so a
+    # block filled from the wrong vector is still well formed.
+    "pinned at 0.1": _Instance(_ONE_TWO, [0.0, 0.0], (1, 2), [0.1, 0.0],
+                               [0.1, 1.0], (1, 2), [[[(0, ">=", 0.5)]]]),
+    # a bound that needs all 17 significant digits to be read back exactly
+    # (any shorter printing, 9 or 16 digits, writes 0.3)
+    "pinned at a 17-digit value": _Instance(
+        [[1.0, 1.0]], [0.0], (1, 2), [0.30000000000000004, 0.0],
+        [0.30000000000000004, 1.0], (1, 1), [[[(0, ">=", 0.75)]]]),
+    # y = x0 >= 0.3 is met by the replay only at x0 = 0.3, the upper face,
+    # which float32 rounds to 0.30000001192092896 (outside the box)
+    "on the upper face at 0.3": _Instance(
+        [[1.0, 0.0]], [0.0], (1, 2), [0.0, 0.0], [0.3, 1.0], (1, 1),
+        [[[(0, ">=", 0.3)]]]),
+    # a (2, 3, 4) image input, every entry with its own interval, so an
+    # entry written in another position or under another number leaves it
+    "image input with a box per entry": _Instance(
+        _IMAGE_W, [0.0, 0.0], (1, 2, 3, 4), [10.0 * k for k in range(24)],
+        [10.0 * k + 0.5 for k in range(24)], (1, 2),
+        [[[(0, ">=", 50.25)]], [[(1, ">=", -170.25)]]]),
+}
+
+
+class TestTheWrittenWitnessIsAcceptedByTheChecker:
+    @pytest.mark.parametrize("version", ["1.0", "2.0"])
+    @pytest.mark.parametrize("case", list(_WITNESS_INSTANCES))
+    def test_sat_witness_replays_inside_the_box(self, tmp_path, runner_env,
+                                                case, version):
+        """``verify_instance`` with the real falsifier on an instance with a
+        counterexample: the answer is sat and the written witness passes the
+        checker. Catches a witness snapped into the box and then rounded to
+        float32, a value printed with too few digits (9 in 1.0, 16 in 2.0), 1.0
+        inputs numbered from 1, a 2.0 block filled from the wrong vector, the
+        wrong format for the spec's version, an entry of an image written in
+        another position, and written outputs that are not the replay."""
+        inst = _WITNESS_INSTANCES[case]
+        onnx_p = inst.onnx(tmp_path)
+        res = R.verify_instance(onnx_p, inst.spec(tmp_path, version),
+                                "witness_demo", workers=1)
+        assert res["result"] == R.RESULT_SAT
+        _assert_accepted(res["counterexample"], version, inst, onnx_p)
+
+
+def test_nonlinear_route_writes_a_witness_the_checker_accepts(tmp_path,
+                                                              runner_env):
+    """``verify_nonlinear_instance`` searches and replays on onnxruntime
+    (``make_onnx_forward``, one batched call over a dynamic batch dim),
+    snaps, checks ``_assertions_hold`` and writes the 2.0 witness. X [N, 2, 2]
+    flattened row-major to r, y = (r1 - r2, r0 + r3); the box makes y0 lie in
+    [0.5, 1], so every point violates ``y0 * y0 >= 0.25 and y0 >= 0``.
+    Catches a batched run whose rows are reshaped column-major (it computes
+    r2 - r1 < 0 and finds nothing) and a witness whose pinned coordinates
+    (0.1, 0.30000000000000004) are not written exactly."""
+    W = np.zeros((2, 4), np.float32)
+    W[0, 1], W[0, 2], W[1, 0], W[1, 3] = 1.0, -1.0, 1.0, 1.0
+    nodes = [helper.make_node("Reshape", ["X", "sh"], ["f"]),
+             helper.make_node("Gemm", ["f", "W", "B"], ["Y"], transB=1)]
+    onnx_p = _save(
+        nodes,
+        [helper.make_tensor_value_info("X", TensorProto.FLOAT, ["N", 2, 2])],
+        [helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["N", 2])],
+        [numpy_helper.from_array(np.array([-1, 4], np.int64), "sh"),
+         numpy_helper.from_array(W, "W"),
+         numpy_helper.from_array(np.zeros(2, np.float32), "B")],
+        tmp_path / "n.onnx")
+    inst = _Instance(W, [0.0, 0.0], (1, 2, 2),
+                     [0.1, 0.75, 0.0, 0.30000000000000004],
+                     [0.1, 1.0, 0.25, 0.30000000000000004], (1, 2), [])
+    spec = inst.spec(tmp_path, "2.0")
+    with open(spec, "a") as f:
+        f.write("(assert (>= (* Y[0,0] Y[0,0]) 0.25))\n"
+                "(assert (>= Y[0,0] 0.0))\n")
+    assert R.load_vnnlib(spec)["format"] == "nonlinear"
+    res = R.verify_instance(onnx_p, spec, "nonlinear_demo", workers=1)
+    assert res["result"] == R.RESULT_SAT
+    y = _replayed_point(res["counterexample"], "2.0", inst, onnx_p)
+    y0 = Fraction(float(y[0]))
+    assert y0 * y0 >= Fraction("0.25") and y0 >= 0
+
+
+# ---------------------------------------------------------------------------
+# The sat gate decides on the onnxruntime replay at zero tolerance
+# ---------------------------------------------------------------------------
+
+_SUM = dict(W=[[1.0, 1.0]], b=[0.0], in_shape=(1, 2), lb=[0.0, 0.0],
+            ub=[0.25, 0.25], out_shape=(1, 1))
+_PAIR = dict(W=[[1.0, 0.0], [0.0, 1.0]], b=[0.0, 0.0], in_shape=(1, 2),
+             lb=[0.0, 0.0], ub=[1.0, 0.5], out_shape=(1, 2))
+
+# (instance, the falsifier's candidate, its replay is a counterexample)
+_GATE_CASES = {
+    # max y = 0.5 < 0.5 + 2^-15: no counterexample; the candidate's replay
+    # misses the region by less than the default slack of 1e-4
+    "misses by 2^-15": (dict(_SUM, unsafe=[[[(0, ">=", 0.5 + 2.0 ** -15)]]]),
+                        [0.25, 0.25], False),
+    # the closed boundary: y = 0.5 at the corner is a counterexample
+    "on the closed boundary": (dict(_SUM, unsafe=[[[(0, ">=", 0.5)]]]),
+                               [0.25, 0.25], True),
+    # two asserts y0 >= 0.75, y1 >= 0.75 (y1 <= 0.5: no counterexample);
+    # 1.0 reads them as two rows of one half-space, 2.0 as two AND groups
+    "two asserts, the first met": (
+        dict(_PAIR, unsafe=[[[(0, ">=", 0.75)]], [[(1, ">=", 0.75)]]]),
+        [1.0, 0.5], False),
+    # y0 <= 0.25 and y1 <= 0.75 with y1 = 0.5 between the two bounds
+    "two rows, the output between their bounds": (
+        dict(_PAIR, unsafe=[[[(0, "<=", 0.25), (1, "<=", 0.75)]]]),
+        [0.125, 0.5], True),
+    # (or y0 >= 0.75, y1 >= 0.375): the candidate meets the second disjunct
+    "the second disjunct met": (
+        dict(_PAIR, unsafe=[[[(0, ">=", 0.75)], [(1, ">=", 0.375)]]]),
+        [0.5, 0.5], True),
+}
+
+
+def _stub_falsifier(monkeypatch, candidate):
+    """A falsifier that claims a counterexample at ``candidate``, as an
+    attack on the converted model can where the replay disagrees."""
+    def fake(model, lb, ub, prop, **kwargs):
+        x = np.asarray(candidate, np.float64).reshape(np.shape(lb))
+        return 0, (x, None)
+    monkeypatch.setattr(R, "falsify", fake)
+
+
+class TestTheSatGateDecidesOnTheReplayAtZeroTolerance:
+    # The gate does not depend on the version; both are run only where the
+    # two parsers group the asserts differently (rows of one half-space in
+    # 1.0, AND groups in 2.0).
+    @pytest.mark.parametrize("case,version", [
+        ("misses by 2^-15", "1.0"),
+        ("on the closed boundary", "2.0"),
+        ("two asserts, the first met", "1.0"),
+        ("two asserts, the first met", "2.0"),
+        ("two rows, the output between their bounds", "2.0"),
+        ("the second disjunct met", "1.0"),
+    ])
+    def test_sat_only_for_a_replayed_counterexample(self, tmp_path,
+                                                    monkeypatch, runner_env,
+                                                    case, version):
+        """The falsifier claims a counterexample; the runner writes sat only
+        when the onnxruntime replay of the candidate lies in the unsafe
+        region at zero tolerance, and then with a witness the checker
+        accepts; otherwise unknown (no reach method runs). Catches a gate
+        with the default slack of 1e-4, an AND group counted as met after an
+        earlier group was, a half-space met by one of its rows, each row
+        compared with every right-hand side, a closed boundary read as
+        strict, and an OR group that looks at its first disjunct only."""
+        data, candidate, is_counterexample = _GATE_CASES[case]
+        inst = _Instance(**data)
+        onnx_p = inst.onnx(tmp_path)
+        _stub_falsifier(monkeypatch, candidate)
+        res = R.verify_instance(onnx_p, inst.spec(tmp_path, version),
+                                "gate_demo", workers=1)
+        if not is_counterexample:
+            assert res["result"] == R.RESULT_UNKNOWN
+            assert res["counterexample"] is None
+            return
+        assert res["result"] == R.RESULT_SAT
+        _assert_accepted(res["counterexample"], version, inst, onnx_p)
+
+
+def test_strict_sum_true_only_in_float32_is_not_sat(tmp_path, runner_env):
+    """Y = [1, 2^-24, 2^-24] everywhere and ``Y0 + Y1 + Y2 < 1 + 2^-23``
+    (written exactly). The sum is exactly 1 + 2^-23, so there is no
+    counterexample in exact or float64 arithmetic; only the float32
+    evaluation (1 + 2^-24 rounds to 1, twice) says the sum is below. The
+    closed row accepts the point, so the decision is the assertions', and
+    both evaluations must hold. Catches an assertion check that trusts the
+    float32 evaluation alone (or either one of the two)."""
+    y = [1.0, 2.0 ** -24, 2.0 ** -24]
+    assert np.float32(y[0]) + np.float32(y[1]) + np.float32(y[2]) == 1.0
+    onnx_p = _const_net(tmp_path / "n.onnx", y)
+    spec = _v2_spec(tmp_path / "s.vnnlib", [("X", "1, 2")], [("Y", "1, 3")],
+                    _box_asserts("X", 2)
+                    + ["(< (+ Y[0,0] Y[0,1] Y[0,2]) 1.00000011920928955078125)"])
+    assert Fraction("1.00000011920928955078125") == 1 + Fraction(1, 2 ** 23)
+    res = R.verify_instance(onnx_p, spec, "sum_demo", workers=1)
+    assert res["result"] == R.RESULT_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# The ViT route snaps its batch of candidates into the float64 box
+# ---------------------------------------------------------------------------
+
+def test_vit_witness_is_snapped_into_the_float64_box(monkeypatch):
+    """Box x0 in [0, 0.1], x1 in [0, 0.2], unsafe x0 + x1 >= 0.3: only the
+    corner (0.1, 0.2) is a counterexample. The gradient search (stubbed)
+    returns the corner as float32 rounds it, (0.10000000149..., 0.2000000029...),
+    outside the box. Catches a snap that leaves the upper side unclipped and
+    one that rounds the snapped batch to float32: the witness must be
+    written as 0.1 and 0.2 exactly."""
+    _vit_stubs(monkeypatch, batched_shift=0.0)
+    corner32 = np.array([np.float32(0.1), np.float32(0.2)], np.float64)
+    monkeypatch.setattr(R, "_vit_pgd",
+                        lambda md, lb, ub, gp, rng: corner32[None, :])
+    hs = HalfSpace(np.array([[-1.0]]), np.array([[-0.3]]))
+    prop = {"pairs": [{"lb": np.array([0.0, 0.0]),
+                       "ub": np.array([0.1, 0.2]), "prop": [{"Hg": hs}]}]}
+    res = R.verify_vit_instance("vit.onnx", prop, (2,), "vit_2023", 0.0)
+    assert res["result"] == R.RESULT_SAT
+    x_text, _ = _read_v1(res["counterexample"], 2, 1)
+    assert [float(t) for t in x_text] == [0.1, 0.2]
+
+
+# ---------------------------------------------------------------------------
+# _snap_into_box: every coordinate onto its own float64 bound
+# ---------------------------------------------------------------------------
+
+_SNAP_LB = [0.1, -0.7, 0.30000000000000004, 2.5, -1e10, 0.0]
+_SNAP_UB = [0.1, 0.2, 0.30000000000000004, 3.75, 1e10, 0.3]
+# float32 roundings just outside, a point below, one inside, one far above
+_SNAP_X = [float(np.float32(0.1)), -0.75, float(np.float32(0.3)), 3.0, 2e10,
+           float(np.float32(0.3))]
+_SNAPPED = [0.1, -0.7, 0.30000000000000004, 3.0, 1e10, 0.3]
+
+
+@pytest.mark.parametrize("shape", [(6,), (2, 3), (3, 6)],
+                         ids=["flat", "shaped", "batch of rows"])
+def test_snap_puts_each_coordinate_on_its_own_float64_bound(shape):
+    """A flat witness, a tensor-shaped one (row-major over the box) and an
+    (N, d) batch: each coordinate is clipped to its own interval, an inside
+    value is left as it is, the result keeps the input's shape and stays
+    float64, so 0.1 and 0.30000000000000004 come back exactly. Catches a
+    snap rounded to float32, an upper or a lower side left unclipped, and a
+    batch or a shaped witness that loses its shape."""
+    rows = int(np.prod(shape)) // 6
+    x = np.array(_SNAP_X * rows).reshape(shape)
+    out = R._snap_into_box(x, _SNAP_LB, _SNAP_UB)
+    assert out.shape == x.shape and out.dtype == np.float64
+    assert out.reshape(-1).tolist() == _SNAPPED * rows
+
+
+# ---------------------------------------------------------------------------
+# The witness text: numbering, order and exact values
+# ---------------------------------------------------------------------------
+
+_TEXT_X = [0.1, 0.30000000000000004, 0.123456789123, -12345.678901234567,
+           1.0 / 3.0, 5e-324]
+_TEXT_Y = np.array([0.1, -2.5], np.float32)
+
+
+@pytest.mark.parametrize("spec_kind", ["no path", "1.0 file"])
+def test_v1_witness_numbers_inputs_from_zero_with_exact_values(tmp_path,
+                                                               spec_kind):
+    """A (2, 3) witness tensor and two float32 outputs in the 1.0 s-expression:
+    X_0..X_5 in row-major order and Y_0, Y_1, each value read back exactly.
+    Catches inputs numbered from 1, a column-major flatten, values printed
+    with too few digits, and outputs written from the input vector."""
+    path = None
+    if spec_kind == "1.0 file":
+        decls = ([f"(declare-const X_{i} Real)" for i in range(6)]
+                 + ["(declare-const Y_0 Real)", "(declare-const Y_1 Real)"])
+        path = tmp_path / "s.vnnlib"
+        path.write_text("\n".join(decls) + "\n(assert (>= Y_0 0.0))\n")
+    text = R.format_counterexample(np.array(_TEXT_X).reshape(2, 3), _TEXT_Y,
+                                   None if path is None else str(path))
+    x_text, y_text = _read_v1(text, 6, 2)
+    assert [float(t) for t in x_text] == _TEXT_X
+    assert [float(t) for t in y_text] == [float(v) for v in _TEXT_Y]
+
+
+def test_v2_witness_gives_each_input_tensor_its_own_slice(tmp_path):
+    """Two input tensors A [1, 2] and B [3] and an output Y [2, 1]: the blocks
+    are A = x[0:2], B = x[2:5], Y = y, in declaration order, each value read
+    back exactly. Catches a second tensor filled from the first one's slice
+    (the input offset not advanced) and inexact value text."""
+    spec = tmp_path / "s.vnnlib"
+    spec.write_text("(vnnlib-version <2.0>)\n(declare-network N\n"
+                    "    (declare-input A float32 [1, 2])\n"
+                    "    (declare-input B float32 [3])\n"
+                    "    (declare-output Y float32 [2, 1])\n)\n"
+                    "(assert (>= Y[0,0] 0.0))\n")
+    x = np.array(_TEXT_X[:5])
+    text = R.format_counterexample(x, _TEXT_Y, str(spec))
+    blocks = _read_v2(text, [("A", "float32", (1, 2)), ("B", "float32", (3,)),
+                             ("Y", "float32", (2, 1))])
+    assert [float(t) for t in blocks["A"]] == _TEXT_X[:2]
+    assert [float(t) for t in blocks["B"]] == _TEXT_X[2:5]
+    assert [float(t) for t in blocks["Y"]] == [float(v) for v in _TEXT_Y]
+
+
+# ---------------------------------------------------------------------------
+# The result file
+# ---------------------------------------------------------------------------
+
+def test_result_file_holds_the_verdict_and_then_the_witness(tmp_path):
+    """``write_result`` replaces the file: a verdict without a witness is the
+    whole file; ``sat`` is alone on the first line and the witness follows
+    line for line. Catches the newline after ``sat`` dropped (the grader
+    reads the first line as the verdict) and a file appended to instead of
+    replaced (an earlier verdict would stay first)."""
+    f = tmp_path / "result.txt"
+    f.write_text("sat\nX float32 [1]\n0.5\n")
+    R.write_result(str(f), R.RESULT_UNSAT)
+    assert f.read_text().splitlines() == [R.RESULT_UNSAT]
+    witness = "X float32 [1,2]\n0.1\n0.5\nY float32 [1,1]\n0.6000000238418579"
+    R.write_result(str(f), R.RESULT_SAT, witness)
+    assert f.read_text().splitlines() == [R.RESULT_SAT] + witness.splitlines()
+
+
+@pytest.fixture
+def alarm_restored():
+    """``main`` installs a SIGALRM handler and arms the timer."""
+    if not hasattr(signal, "SIGALRM"):
+        pytest.skip("no SIGALRM on this platform")
+    saved = signal.getsignal(signal.SIGALRM)
+    yield
+    signal.setitimer(signal.ITIMER_REAL, 0)
+    signal.signal(signal.SIGALRM, saved)
+
+
+@pytest.mark.parametrize("version", ["1.0", "2.0"])
+def test_main_writes_a_result_file_the_checker_accepts(
+        tmp_path, monkeypatch, capsys, runner_env, alarm_restored, version):
+    """The public route: ``main`` with the competition's arguments on an
+    instance with a counterexample (x0 pinned to 0.1). The results file's
+    first line is ``sat`` and the rest is a witness the checker accepts."""
+    inst = _WITNESS_INSTANCES["pinned at 0.1"]
+    onnx_p = inst.onnx(tmp_path)
+    results = tmp_path / "results.txt"
+    monkeypatch.setenv("N2V_WORKERS", "1")
+    monkeypatch.setattr(sys, "argv", [
+        "vnncomp_runner.py", "witness_demo", onnx_p,
+        inst.spec(tmp_path, version), str(results), "120"])
+    assert R.main() == 0
+    lines = results.read_text().splitlines()
+    assert lines[0] == R.RESULT_SAT
+    _assert_accepted("\n".join(lines[1:]), version, inst, onnx_p)
+
+
+# ---------------------------------------------------------------------------
+# The 2.0 witness follows the declarations, not the comments
+# ---------------------------------------------------------------------------
+
+@known_bug(20, "_v2_ce_meta reads the declarations from the raw spec text, "
+               "comments included, so a commented-out (declare-input ...) adds "
+               "a witness block that the parser does not have; "
+               "format_counterexample then raises and the runner answers "
+               "unknown on an instance with a counterexample")
+def test_v2_witness_ignores_declarations_in_comments(tmp_path, runner_env):
+    """The instance "pinned at 0.1" in 2.0 (its passing neighbour is
+    ``test_sat_witness_replays_inside_the_box[pinned at 0.1-2.0]``) with a
+    header comment that quotes an old declaration: the runner answers sat with
+    a witness of the declared X and Y blocks only. VNN-LIB comments run from
+    ';' to the end of the line and the parser drops them."""
+    comment = ("; generated; an earlier version declared\n"
+               "; (declare-input image float32 [1, 2])\n")
+    inst = _WITNESS_INSTANCES["pinned at 0.1"]
+    onnx_p = inst.onnx(tmp_path)
+    spec = inst.spec(tmp_path, "2.0")
+    with open(spec) as f:
+        text = f.read()
+    with open(spec, "w") as f:
+        f.write(comment + text)
+    res = R.verify_instance(onnx_p, spec, "comment_demo", workers=1)
+    assert res["result"] == R.RESULT_SAT
+    _assert_accepted(res["counterexample"], "2.0", inst, onnx_p)
+
+
+@known_bug(6, "SPEC-5: the 1.0 parser stores a strict output comparison as "
+              "the closed one and keeps no source assertion, so the runner's "
+              "sat gate accepts an output on the boundary and writes a "
+              "witness the checker rejects")
+def test_strict_output_bound_on_boundary_is_not_sat_in_a_v1_spec(tmp_path,
+                                                                 runner_env):
+    """The 1.0 form of ``test_strict_output_bound_on_boundary_is_not_sat``
+    (its passing neighbour): y = relu(-x0 - x1 - 1) is 0 on [0, 1]^2, so
+    ``Y_0 < 0`` is unreachable, but every sample lies on the closed row."""
+    onnx_p = _relu_net(tmp_path / "n.onnx", [-1.0, -1.0], -1.0)
+    spec = tmp_path / "s.vnnlib"
+    spec.write_text("(declare-const X_0 Real)\n(declare-const X_1 Real)\n"
+                    "(declare-const Y_0 Real)\n"
+                    "(assert (>= X_0 0.0))\n(assert (<= X_0 1.0))\n"
+                    "(assert (>= X_1 0.0))\n(assert (<= X_1 1.0))\n"
+                    "(assert (< Y_0 0.0))\n")
+    res = R.verify_instance(onnx_p, str(spec), "strict_demo", workers=1)
+    assert res["result"] == R.RESULT_UNKNOWN
+    assert res["counterexample"] is None

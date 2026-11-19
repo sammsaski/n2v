@@ -1,9 +1,13 @@
 """Tests for Star.contains single/batch + LP/algebraic parity."""
 
+from fractions import Fraction
+
 import numpy as np
 import pytest
 
 from n2v.sets.star import Star
+from tests._oracles import rational
+from tests.known_bugs import known_bug
 
 
 def _identity_star(dim, lb=-1.0, ub=1.0, C=None, d=None):
@@ -32,6 +36,25 @@ class TestSinglePoint:
         s = _identity_star(2)
         assert s.contains(np.array([[0.0], [0.0]])) is True
 
+    @pytest.mark.parametrize("point", ["finite-far", pytest.param("non-finite", marks=known_bug(
+        8, "Star.contains with the default LP method answers True for a point with a NaN or an infinite "
+           "entry: the point is the right-hand side of the equality rows of a feasibility check whose "
+           "answer True means only 'not shown empty', and contains reads that answer as 'a member' "
+           "(the algebraic method answers False; registry row SET-50, the Hexatope and Octatope twin has "
+           "a row of its own)"))])
+    def test_point_far_outside_or_not_finite_is_not_contained(self, point):
+        """A point far outside the box [-1, 3] x [2, 5], and points with a NaN or an infinite entry, are not members of a bounded set: ``contains`` answers False, or refuses a point that is not finite with ``ValueError``. The finite point is the passing neighbour. Catches a membership test that a NaN passes."""
+        s = Star.from_bounds(np.array([-1.0, 2.0]), np.array([3.0, 5.0]))
+        points = ([[100.0, 3.0]] if point == "finite-far"
+                  else [[np.nan, 3.0], [1.0, np.nan], [np.inf, 3.0], [-np.inf, 3.0]])
+        for p in points:
+            try:
+                answer = s.contains(np.array(p))
+            except ValueError:
+                assert point == "non-finite", "a finite point was refused"
+                continue
+            assert not answer, f"Star.contains({p}) is True"
+
 
 class TestBatch:
     def test_batch_shape_output(self):
@@ -50,6 +73,8 @@ class TestBatch:
         single = np.array([s.contains(X[i]) for i in range(X.shape[0])])
         batch = s.contains(X)
         np.testing.assert_array_equal(single, batch)
+        # Independent truth: the star is the box [-1, 1]^3.
+        np.testing.assert_array_equal(batch, np.all(np.abs(X) <= 1, axis=1))
 
     def test_batch_vs_single_on_cd_star(self):
         """Predicate [-1,1]^3 intersected with {alpha[0] + alpha[1] <= 0.5}."""
@@ -61,11 +86,33 @@ class TestBatch:
         single = np.array([s.contains(X[i]) for i in range(X.shape[0])])
         batch = s.contains(X)
         np.testing.assert_array_equal(single, batch)
+        # Independent truth: the box [-1, 1]^3 with x0 + x1 <= 1/2, decided
+        # in rationals (the random points are never within rounding of the
+        # boundary).
+        truth = [all(abs(Fraction(v)) <= 1 for v in x)
+                 and Fraction(x[0]) + Fraction(x[1]) <= Fraction(1, 2)
+                 for x in X]
+        np.testing.assert_array_equal(batch, truth)
 
     def test_batch_wrong_second_dim_raises(self):
         s = _identity_star(2)
         with pytest.raises(ValueError):
             s.contains(np.array([[0.0, 0.0, 0.0]]))
+
+    def test_input_of_rank_three_raises(self):
+        """A point array of three axes cannot be read as a point or a batch:
+        ``ValueError``, not a guess."""
+        s = _identity_star(2)
+        with pytest.raises(ValueError):
+            s.contains(np.zeros((1, 2, 1)))
+
+    def test_unknown_method_raises(self):
+        """A containment method other than 'lp' and 'algebraic' is refused
+        with ``ValueError`` (a misspelt method must not fall back to one of
+        them silently)."""
+        s = _identity_star(2)
+        with pytest.raises(ValueError):
+            s.contains(np.zeros(2), method="exact")
 
 
 class TestAlgebraicParity:
@@ -99,6 +146,12 @@ class TestAlgebraicParity:
                 r_lp, r_alg,
                 err_msg=f'trial={trial}: LP {r_lp.sum()} vs alg {r_alg.sum()}',
             )
+            # Independent truth: exact membership in rationals of the same
+            # arrays (no n2v code), so a defect both paths share is seen.
+            member = rational.Membership(rational.star(s))
+            truth = np.array([member(x) for x in X])
+            np.testing.assert_array_equal(
+                r_lp, truth, err_msg=f'trial={trial}: LP vs exact')
 
     def test_algebraic_raises_on_wide_basis(self):
         """Wide basis (more predicate vars than output dim) -> algebraic not
@@ -111,6 +164,22 @@ class TestAlgebraicParity:
         s = Star(V=V, C=None, d=None, pred_lb=plb, pred_ub=pub)
         with pytest.raises(ValueError):
             s.contains(np.array([0.0, 0.0]), method='algebraic')
+
+    def test_algebraic_raises_on_rank_deficient_basis(self):
+        """A basis whose columns are dependent has no unique predicate point
+        for a point, so the algebraic path must refuse with ``ValueError``
+        (tall: 3 entries, 2 parallel generators; square: 2 by 2 of rank 1),
+        and never answer from an arbitrary least-squares solution."""
+        V = np.zeros((3, 3))
+        V[:, 1] = [1.0, 2.0, 0.5]
+        V[:, 2] = [2.0, 4.0, 1.0]
+        tall = Star(V=V, C=None, d=None, pred_lb=-np.ones(2), pred_ub=np.ones(2))
+        with pytest.raises(ValueError):
+            tall.contains(np.array([3.0, 6.0, 1.5]), method='algebraic')
+        W = np.array([[0.0, 1.0, 2.0], [0.0, 0.5, 1.0]])
+        square = Star(V=W, C=None, d=None, pred_lb=-np.ones(2), pred_ub=np.ones(2))
+        with pytest.raises(ValueError):
+            square.contains(np.array([1.0, 0.5]), method='algebraic')
 
 
 class TestEmptyStar:

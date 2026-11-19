@@ -10,6 +10,7 @@ from n2v.utils.lpsolver import (
     solve_lp,
     solve_lp_batch,
 )
+from tests.known_bugs import known_bug
 
 
 class TestSolveLpBatch:
@@ -184,7 +185,9 @@ class TestSolveLpHighspy:
     """Tests for the direct highspy backend in solve_lp."""
 
     def test_highspy_matches_scipy(self):
-        """Direct highspy gives same results as scipy for a constrained LP."""
+        """Direct highspy gives the same result as scipy for a constrained
+        LP, and both give the exact minimum -5/4 (at x = 1/2, y = 7/4), on
+        the outward side: two n2v paths that agree can be wrong together."""
         from n2v.utils.lpsolver import _solve_lp_highspy, _solve_lp_scipy
 
         A = np.array([[1.0, 2.0], [-1.0, 0.0]])
@@ -203,6 +206,8 @@ class TestSolveLpHighspy:
         assert status_h == 'optimal'
         assert status_s == 'optimal'
         assert fval_h == pytest.approx(fval_s, abs=1e-6)
+        for fval in (fval_h, fval_s):
+            assert fval <= -1.25 and fval == pytest.approx(-1.25, abs=1e-9)
 
     def test_highspy_maximization(self):
         """Maximization returns correct result."""
@@ -360,3 +365,315 @@ class TestHighspyUndecidedRetry:
                                       lp_solver='linprog', minimize=True)
         assert x is None and fval is None
         assert status.startswith('failed')
+
+
+# --------------------------------------------------------------------------- #
+# The point a solve returns                                                     #
+# --------------------------------------------------------------------------- #
+# x + 2y <= 4, x >= 0.5 and x - y <= 2.5 in the box [0, 3]^2 (three rows for
+# two variables): min x - y = -5/4 at the single vertex (1/2, 7/4); max x - y
+# = 5/2 on the whole edge from (5/2, 0) to (3, 1/2).
+_PA = np.array([[1.0, 2.0], [-1.0, 0.0], [1.0, -1.0]])
+_PB = np.array([4.0, -0.5, 2.5])
+
+
+def _exact_optimum(f, A, b, lb, ub, minimize):
+    from fractions import Fraction
+    from tests._oracles import rational as R
+    rows = [[Fraction(float(v)) for v in r] for r in A]
+    rhs = [Fraction(float(v)) for v in b]
+    n = A.shape[1]
+    for j in range(n):
+        for sign, bound in ((1, ub), (-1, lb)):
+            unit = [Fraction(0)] * n
+            unit[j] = Fraction(sign)
+            rows.append(unit)
+            rhs.append(sign * Fraction(float(bound[j])))
+    values = [R.dot([Fraction(float(v)) for v in f], x)
+              for x in R.vertices(rows, rhs)]
+    if not values:
+        pytest.fail("test setup: the polytope is empty")
+    return min(values) if minimize else max(values)
+
+
+@pytest.mark.parametrize("route", [
+    "default", "linprog", "highs", "highs-ds", "highs-ipm", "CLARABEL",
+    "solve_lp_no_presolve", "_solve_lp_careful"])
+def test_the_returned_point_attains_the_optimum(route):
+    """``x`` of ``solve_lp`` (each HiGHS name and a CVXPY solver), of the
+    careful re-solve and of its wrapper: a point of the polytope (every row
+    and bound within the solver's tolerance) whose objective value is the
+    exact optimum, for a minimum at a single vertex and a maximum on a whole
+    edge, with three rows for two variables. ``x`` is what the refinement
+    engine takes as a counterexample candidate (``refine/witness.py``).
+    Catches the row activities ``A x`` returned in place of ``x``, a point
+    of the other sense, and a point read from another model."""
+    from n2v.utils.lpsolver import _solve_lp_careful, solve_lp_no_presolve
+    tol = 1e-6 if route == "CLARABEL" else 1e-9
+    f = np.array([1.0, -1.0])
+    for minimize in (True, False):
+        if route == "solve_lp_no_presolve":
+            x, fval, status, _ = solve_lp_no_presolve(f, _PA, _PB, _LB, _UB,
+                                                      minimize=minimize)
+        elif route == "_solve_lp_careful":
+            x, fval, status, _ = _solve_lp_careful(f, _PA, _PB, _LB, _UB,
+                                                   minimize=minimize)
+        else:
+            x, fval, status, _ = solve_lp(f, _PA, _PB, lb=_LB, ub=_UB,
+                                          lp_solver=route, minimize=minimize)
+        assert status == 'optimal', (route, status)
+        x = np.asarray(x, dtype=np.float64).ravel()
+        assert x.shape == (2,), (route, x)
+        assert np.all(_PA @ x <= _PB + tol * (1 + np.abs(_PB))), (route, x)
+        assert np.all(x >= _LB - tol) and np.all(x <= _UB + tol), (route, x)
+        exact = float(_exact_optimum(f, _PA, _PB, _LB, _UB, minimize))
+        assert abs(f @ x - exact) <= tol * (1 + abs(exact)), (
+            route, minimize, x, f @ x, exact)
+
+
+# --------------------------------------------------------------------------- #
+# Without highspy                                                               #
+# --------------------------------------------------------------------------- #
+def test_without_highspy_every_entry_answers_on_scipy(monkeypatch):
+    """With highspy absent (``_HAS_HIGHSPY`` set to False, as on an install
+    without it) the default solver runs on scipy: ``solve_lp`` and the batch
+    loop give the exact optimum of min and max x - y over the three rows with
+    and without the box [0, 3]^2 (outward, within the pad of 1e-7 relative),
+    ``_solve_lp_careful`` does the same on scipy with presolve off, and
+    ``solve_lp_no_presolve`` reports a failure rather than a value. Catches
+    the fallback routes reading the sense, the rows or the bounds wrongly,
+    and a careful re-solve that answers without a solver."""
+    import n2v.utils.lpsolver as lpsolver
+    from fractions import Fraction
+    monkeypatch.setattr(lpsolver, "_HAS_HIGHSPY", False)
+    f = np.array([1.0, -1.0])
+    box_rows = np.vstack([np.eye(2), -np.eye(2)])
+    for lb, ub, A, b in ((_LB, _UB, _PA, _PB),
+                         (None, None, np.vstack([_PA, box_rows]),
+                          np.concatenate([_PB, _UB, -_LB]))):
+        exact = {mn: _exact_optimum(f, _PA, _PB, _LB, _UB, mn)
+                 for mn in (True, False)}
+
+        def check(value, minimize, what):
+            assert value is not None, what
+            got = Fraction(float(value))
+            assert (got <= exact[minimize]) if minimize else (
+                got >= exact[minimize]), (what, value)
+            assert abs(float(got - exact[minimize])) <= 1e-7 * (
+                1 + abs(float(exact[minimize]))), (what, value)
+
+        for minimize in (True, False):
+            _, fval, status, info = lpsolver.solve_lp(f, A, b, lb=lb, ub=ub,
+                                                      minimize=minimize)
+            assert status == 'optimal', status
+            assert info['solver'].startswith('scipy'), info
+            check(fval, minimize, "solve_lp")
+            _, fval, status, _ = lpsolver._solve_lp_careful(f, A, b, lb, ub,
+                                                            minimize=minimize)
+            assert status == 'optimal', status
+            check(fval, minimize, "_solve_lp_careful")
+            x, fval, status, _ = lpsolver.solve_lp_no_presolve(
+                f, A, b, lb, ub, minimize=minimize)
+            assert x is None and fval is None and status.startswith('failed')
+        lo, hi = lpsolver.solve_lp_batch([f, f], A, b, lb, ub, [True, False])
+        check(lo, True, "solve_lp_batch minimum")
+        check(hi, False, "solve_lp_batch maximum")
+
+
+# --------------------------------------------------------------------------- #
+# scipy's numerical-trouble retry                                               #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("retry_decides", [True, False])
+def test_a_numerical_failure_is_retried_without_presolve(monkeypatch,
+                                                         retry_decides):
+    """scipy's ``linprog`` stubbed to report numerical trouble (status 4)
+    whenever presolve is on: the scipy routes (``solve_lp`` and the batch
+    loop on 'highs-ds') solve again with presolve off, and with that solve
+    deciding give its exact optimum; when the retry fails too, the result is
+    a failure with no value. Catches the retry dropped, run with presolve
+    still on, or its failure taken over a decided first solve."""
+    import n2v.utils.lpsolver as lpsolver
+    from scipy.optimize import OptimizeResult
+    real = lpsolver.scipy_linprog
+    calls = []
+
+    def troubled(c, *args, options=None, **kwargs):
+        options = dict(options or {})
+        calls.append(options.get('presolve', True))
+        if options.get('presolve', True) is not False or not retry_decides:
+            return OptimizeResult(
+                x=None, fun=None, status=4, success=False, nit=0,
+                message="(HiGHS Status 4: model_status is Solve error; "
+                        "primal_status is Infeasible)")
+        return real(c, *args, options=options, **kwargs)
+
+    monkeypatch.setattr(lpsolver, "scipy_linprog", troubled)
+    f = np.array([1.0, -1.0])
+    _, fval, status, _ = lpsolver.solve_lp(f, _PA, _PB, lp_solver='highs-ds',
+                                           minimize=True, lb=_LB, ub=_UB)
+    values = lpsolver.solve_lp_batch([f, f], _PA, _PB, _LB, _UB,
+                                     [True, False], lp_solver='highs-ds')
+    assert calls and calls[0] is not False, calls
+    assert False in calls, f"no solve with presolve off: {calls}"
+    if retry_decides:
+        assert status == 'optimal', status
+        assert fval <= -1.25 and fval == pytest.approx(-1.25, abs=1e-9)
+        assert values[0] <= -1.25 and values[0] == pytest.approx(-1.25,
+                                                                  abs=1e-9)
+        assert values[1] >= 2.5 and values[1] == pytest.approx(2.5, abs=1e-9)
+    else:
+        assert fval is None and status.startswith('failed'), status
+        assert values == [None, None], values
+
+
+# --------------------------------------------------------------------------- #
+# Solver keywords and malformed problems                                        #
+# --------------------------------------------------------------------------- #
+def _limit_lp():
+    """A feasible LP in 4 variables (x = 0 meets every row) that the scipy
+    methods do not finish in one iteration (data in multiples of 1/64)."""
+    rng = np.random.default_rng(3)
+    A = np.round(rng.normal(size=(6, 4)) * 64) / 64
+    b = np.round(rng.uniform(1, 2, size=6) * 64) / 64
+    c = np.round(rng.normal(size=4) * 64) / 64
+    return c, A, b, -np.ones(4), np.ones(4)
+
+
+@pytest.mark.parametrize("solver, keywords", [
+    pytest.param("default", {"options": {"maxiter": 1}}, marks=known_bug(
+        17, "solve_lp drops its solver keywords on the direct highspy route "
+            "('default', 'linprog' and 'highs' without equality rows): "
+            "options={'maxiter': 1}, which the same call honours on "
+            "'highs-ds' and 'highs-ipm', is ignored and the LP is solved to "
+            "optimality, as is any time limit given the same way"),
+        id="default"),
+    pytest.param("highs-ds", {"options": {"maxiter": 1}}, id="highs-ds"),
+    pytest.param("highs-ipm", {"options": {"maxiter": 1}}, id="highs-ipm"),
+    pytest.param("CLARABEL", {"max_iter": 1}, id="CLARABEL"),
+    pytest.param("OSQP", {"max_iter": 1}, id="OSQP")])
+def test_solver_options_reach_the_solver_or_are_refused(solver, keywords):
+    """``solve_lp(..., **keywords)``, which its docstring forwards to the
+    solver, with an iteration limit of 1 (scipy's ``options={'maxiter': 1}``,
+    CVXPY's ``max_iter=1``) on an LP that needs more than one iteration: the
+    limit must stop the solve (no value and no optimal status or verdict) or
+    the call must refuse the keyword (``NotImplementedError``,
+    ``ValueError`` or ``TypeError``). An optimum means the keyword was
+    dropped. Catches solver keywords dropped on a route."""
+    c, A, b, lb, ub = _limit_lp()
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Solution may be "
+                                    "inaccurate", category=UserWarning)
+            _, fval, status, _ = solve_lp(c, A, b, lb=lb, ub=ub,
+                                          lp_solver=solver, **keywords)
+    except (NotImplementedError, ValueError, TypeError):
+        return
+    assert fval is None and status not in (
+        'optimal', 'optimal_inaccurate', 'infeasible', 'unbounded'), (
+        status, fval)
+
+
+# Each case keeps a finite box wherever its kind allows, so that every way of
+# reading the arrays has a finite optimum and an answer shows as a value.
+_MALFORMED = {
+    # A with a column count other than len(f), wider and narrower
+    "columns": [dict(A=np.hstack([_PA, np.ones((3, 1))]), b=_PB, lb=_LB,
+                     ub=_UB),
+                dict(A=_PA[:, :1], b=_PB, lb=_LB, ub=_UB)],
+    # lb or ub with a size other than len(f)
+    "bounds": [dict(A=_PA, b=_PB, lb=_LB[:1], ub=_UB),
+               dict(A=_PA, b=_PB, lb=_LB, ub=np.full(3, 3.0))],
+    # rows given without their right-hand side
+    "rhs-missing": [dict(A=_PA, lb=_LB, ub=_UB),
+                    dict(A=_PA, b=_PB, Aeq=np.array([[1.0, 1.0]]), lb=_LB,
+                         ub=_UB)],
+    # a right-hand side of another length than the rows (the neighbour)
+    "rhs-length": [dict(A=_PA, b=_PB[:2], lb=_LB, ub=_UB)],
+}
+
+
+def _malformed_marker(kind, what):
+    return known_bug(
+        17, f"solve_lp and solve_lp_batch answer an LP whose {what} instead "
+            f"of refusing it with ValueError: the highspy route answers "
+            f"another LP (rows naming a missing column are dropped, a short "
+            f"bound array is read past its end), and the scipy and CVXPY "
+            f"routes answer where they can broadcast or ignore an argument")
+
+
+@pytest.mark.parametrize("kind", [
+    pytest.param("columns", marks=_malformed_marker(
+        "columns", "rows have another number of columns than the objective")),
+    pytest.param("bounds", marks=_malformed_marker(
+        "bounds", "bounds have another size than the objective")),
+    pytest.param("rhs-missing", marks=_malformed_marker(
+        "rhs-missing", "rows come without their right-hand side")),
+    "rhs-length"])
+def test_a_malformed_lp_is_refused(kind):
+    """An LP whose arrays do not fit together cannot be read: ``solve_lp``
+    on each route (highspy, scipy, CVXPY) and ``solve_lp_batch`` must raise
+    ``ValueError``, or at least give neither a value nor a verdict (a
+    failure status, None in a batch). A value answers some other LP than the
+    one given (rows dropped or broadcast, a bound read from beyond the
+    array), and 'infeasible' would call it empty. Catches a shape check that
+    is missing on a route."""
+    f = np.array([1.0, -1.0])
+    for args in _MALFORMED[kind]:
+        for solver in ("default", "highs-ds", "CLARABEL"):
+            try:
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message="LP solve failed",
+                                            category=RuntimeWarning)
+                    single = solve_lp(f, lp_solver=solver, **args)
+                    batch = solve_lp_batch(
+                        [f], args.get('A'), args.get('b'), args.get('lb'),
+                        args.get('ub'), [True], lp_solver=solver) if (
+                        'Aeq' not in args) else [None]
+            except ValueError:
+                continue
+            what = f"{kind} {sorted(args)} on {solver}"
+            assert single[1] is None and single[2] not in (
+                'optimal', 'optimal_inaccurate', 'infeasible', 'unbounded'), (
+                f"{what}: solve_lp answered {single[1:3]}")
+            assert batch == [None], f"{what}: solve_lp_batch answered {batch}"
+
+
+def test_an_unknown_solver_name_is_refused():
+    """``solve_lp`` and ``solve_lp_batch`` with a solver name that is not one
+    (``'simplex'``) raise ``ValueError``, and with a name of another type
+    (``3``) ``TypeError``, before any solve; the names are matched without
+    regard to case, so ``'HIGHS-DS'`` and ``'clarabel'`` answer with the
+    exact minimum -5/4. Catches an unknown name passed on to a backend that
+    picks some solver of its own (CVXPY's default) or answers nothing."""
+    f = np.array([1.0, -1.0])
+    for call in (lambda s: solve_lp(f, _PA, _PB, lb=_LB, ub=_UB, lp_solver=s),
+                 lambda s: solve_lp_batch([f], _PA, _PB, _LB, _UB,
+                                          lp_solver=s)):
+        with pytest.raises(ValueError, match="Unknown LP solver"):
+            call('simplex')
+        with pytest.raises(TypeError):
+            call(3)
+    for name, tol in (('HIGHS-DS', 1e-9), ('clarabel', 1e-6)):
+        _, fval, status, _ = solve_lp(f, _PA, _PB, lb=_LB, ub=_UB,
+                                      lp_solver=name)
+        assert status == 'optimal', (name, status)
+        assert fval == pytest.approx(-1.25, abs=tol), (name, fval)
+
+
+@pytest.mark.skipif(not _HAS_HIGHSPY, reason="highspy not installed")
+def test_new_highs_models_carry_the_documented_options():
+    """``_new_highs`` builds every highspy model of the module: silent, with
+    the small-matrix threshold lowered from HiGHS's 1e-9 to 1e-12 (entries
+    above it reach the solver) and, when asked, presolve off (the careful
+    re-solve and the feasibility check behind ``confirm_infeasible`` rely on
+    it: presolve was measured to call tiny-scale feasible systems
+    infeasible). Read back from the model, exact. Catches the threshold not
+    set and the presolve flag ignored or inverted (the latter changes no
+    certified answer, only which of two solves decides)."""
+    from n2v.utils.lpsolver import _new_highs
+    for presolve, expected in ((True, 'choose'), (False, 'off')):
+        h = _new_highs(presolve=presolve)
+        assert h.getOptionValue('small_matrix_value')[1] == 1e-12, presolve
+        assert h.getOptionValue('presolve')[1] == expected, presolve
+        assert h.getOptionValue('output_flag')[1] is False, presolve
+    assert _new_highs().getOptionValue('presolve')[1] == 'choose'

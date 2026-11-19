@@ -63,13 +63,14 @@ class TestMonotonic:
         p = load_vnnlib(_write(MONOTONIC))
         lb = np.asarray(p["lb"]).flatten()
         ub = np.asarray(p["ub"]).flatten()
-        # f's box, per the spec lines
-        np.testing.assert_allclose(lb[:5], [-0.16247807, -0.25, 0.25,
-                                            0.227272727, 0.25])
-        np.testing.assert_allclose(ub[:5], [0.667245963, 0.0, 0.5,
-                                            0.227272727, 0.25])
+        # f's box, per the spec lines; a parsed bound is the float the
+        # spec's number reads as, compared exactly (no tolerance)
+        assert lb[:5].tolist() == [-0.16247807, -0.25, 0.25,
+                                   0.227272727, 0.25]
+        assert ub[:5].tolist() == [0.667245963, 0.0, 0.5,
+                                   0.227272727, 0.25]
         # g's dims: only X_g[0] has a direct bound; 6-9 bounded via coupling
-        assert lb[5] == pytest.approx(-0.16247807)
+        assert lb[5] == -0.16247807
         assert np.isinf(lb[6:]).all() and np.isinf(ub[5:]).all()
 
     def test_coupling_rows(self):
@@ -78,8 +79,7 @@ class TestMonotonic:
         p = load_vnnlib(_write(MONOTONIC))
         C = p["input_coupling"]
         assert C is not None
-        rows = {tuple(np.round(r, 9)) for r in
-                np.hstack([C.G, C.g]).tolist()}
+        rows = {tuple(r) for r in np.hstack([C.G, C.g]).tolist()}
         expect = set()
         r = np.zeros(11)
         r[5], r[0] = 1.0, -1.0  # x_g0 - x_f0 <= 0
@@ -100,8 +100,8 @@ class TestMonotonic:
         hs = p["prop"][0]["Hg"]
         expect = np.zeros(10)
         expect[3], expect[8] = 1.0, -1.0
-        np.testing.assert_allclose(hs.G, [expect])
-        np.testing.assert_allclose(hs.g, [[0.0]])
+        assert np.asarray(hs.G).tolist() == [expect.tolist()]
+        assert np.asarray(hs.g).tolist() == [[0.0]]
 
 
 ISOMORPHIC = """\
@@ -139,8 +139,7 @@ class TestIsomorphic:
             G = np.zeros((2, 4))
             G[0, i], G[0, 2 + i] = 1.0, -1.0   # y_fi - y_gi <= -0.05
             G[1, 2 + i], G[1, i] = 1.0, -1.0   # y_gi - y_fi <= -0.05
-            rows_got = {tuple(np.round(r, 9)) for r in
-                        np.hstack([hs.G, hs.g]).tolist()}
+            rows_got = {tuple(r) for r in np.hstack([hs.G, hs.g]).tolist()}
             rows_exp = {tuple(list(G[0]) + [-0.05]),
                         tuple(list(G[1]) + [-0.05])}
             assert rows_got == rows_exp

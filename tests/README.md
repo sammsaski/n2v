@@ -6,17 +6,20 @@ The tests exist to fail when n2v is wrong. A test earns its place by naming a bu
 
 | Directory | What it checks | Oracle |
 |---|---|---|
-| `contracts/` | the public promises: import layering today; the reach coverage, set protocol, spec, verify and witness contracts as the API redesign lands | the design document, read with `ast` or exercised through public names only |
+| `contracts/` | the public promises: import layering, reach coverage, the set protocol, specs, the verify entry, verdicts, the probabilistic guarantees, outward rounding of smooth operations | the design document, read with `ast` or exercised through public names only; values are checked by the oracles below |
+| `_oracles/` | not n2v: the three oracles the tests are checked against, each with a self-test that plants bugs in a correct enclosure and watches the oracle reject them | `rational` (exact image and membership in `fractions.Fraction`), `interval_proof` (containment proof for smooth operations, mpmath intervals), `membership` (one LP on the set's own rows; it reads Star, ImageStar, Zono, ImageZono, Box, Hexatope with its anchor pinned to 0 and Octatope, and solves in scaled variables, rechecking the solver's point, so a predicate box as narrow as the solver tolerance stays reliable) |
 | `soundness/` | enclosure soundness of every reach kernel, pre-pass, certificate and spec check, plus witness validity; guards for fixed soundness bugs, one file per component | onnxruntime samples, exact arithmetic (`fractions.Fraction`, mpmath) and LP membership against the constraint rows, never the code's own helpers |
 | `unit/` | internal behaviour that nothing above reaches, light touch | small analytic cases |
 | `integration/` | small real models end to end, the competition runner | onnxruntime replay |
 | `differential/` | the VNN-LIB parsers against the external corpus, reference parsers and a golden snapshot | the corpus (`corpus` tier) |
 
-A failing verdict path is a bug to fix, or a strict `xfail` naming the step of the plan that fixes it (`xfail_strict = true`: a fixed bug fails the test until its marker is removed).
+`cell_support.py`, beside `known_bugs.py`, holds the shared parts of a soundness cell (input sets of every type, sample points, ONNX and torch reference models with their replays, reach wrappers that refuse an empty result and a reach that changed its input set, the coverage assertion) and is self-tested by `test_cell_support.py`.
+
+A failing verdict path is a bug to fix, or a strict `xfail` naming the step of the plan that fixes it (`xfail_strict = true`: a fixed bug fails the test until its marker is removed). The markers are in `known_bugs.py`: `known_bug(step, defect)` for a defect a plan step fixes, `deferred_bug(number, defect)` for one the owner deferred. Every marked case belongs to a row of the defect registry (`.claude/research/34-API-Redesign/test-audit/DEFECTS.md`), which states the defect, the cases that show it and the proposed fix; the change that fixes a defect removes its markers and updates its row. Each marker names the one exception the test may fail with today, so the marker absorbs the documented failure and nothing else; a precondition inside such a test uses `pytest.fail`, which the marker does not absorb, never `assert`.
 
 ## Tiers and markers
 
-The default run is the fast tier, about four and a half minutes on one process:
+The default run takes about 35 minutes on one process with four threads:
 
 ```bash
 pytest                 # the default tier: everything not marked slow, gpu or corpus
@@ -40,7 +43,7 @@ Two autouse fixtures in `conftest.py` keep tests independent of their order:
 ## Running
 
 ```bash
-pytest tests/soundness/test_soundness_relu.py          # one file
+pytest tests/soundness/test_soundness_relu_cells.py    # one file
 pytest -k "relu and exact"                             # by name
 pytest --durations=50                                  # the slow end of the tier
 pytest -m slow tests/unit/probabilistic/flow           # one tier in one directory
@@ -57,3 +60,15 @@ The default tier needs `onnx`, `onnxruntime` (pinned to the VNN-COMP grading ver
 - Prefer a deterministic injected fault (a stubbed solver, a patched bound) to a search for a host where the fault happens to occur; a test must not skip when the host is well behaved.
 - A missing tracked asset is a broken checkout: raise, never skip. Skip only for the optional packages above, and mark external data `corpus` and CUDA `gpu`.
 - Before accepting a new soundness test, break the kernel once (drop a row, flip a sign, reverse a split) and watch the test fail.
+
+### A soundness cell
+
+A soundness cell is one (operation, set type, method, option), checked by a test built from the helpers in `cell_support.py`; read its module docstring first, since its layout convention (a tensor is channel, height, width; an image set stores height, width, channel; a flat set keeps the tensor's own order) is the one every cell follows. A cell has these parts:
+
+1. An independent oracle: the exact image in rationals (`_oracles/rational.py`) for piecewise-linear operations, the containment proof (`_oracles/interval_proof.py`) for smooth ones, and on every cell sample points replayed on onnxruntime or on torch in float64 (`replay_onnx`, `replay_torch`) whose membership the LP oracle decides (`assert_covered`). Never n2v's own helpers, never two n2v paths compared with each other as the verdict.
+2. Inputs that can trigger the bug: an image with more than one channel and height different from width, such as (2, 3, 5), with its own interval per pixel (`pixel_box`); coordinates on both sides of every kink and one of zero width (`flat_box`); a Star with a binding row that is not a box row (`constrained_star`, `constrained_image_star`); several input sets at once (`split_cover`, `image_split_cover`); asymmetric kernels, strides, pads and dilations.
+3. Membership against the set's own rows, one-sided, with an image output converted to the stored order explicitly (`assert_covered(..., out_chw=(C, H, W))`): no slack against exact references, a pad of the `1e-12` class against float64 ones, `LP_TOL` for the LP check, never a two-sided `allclose` on a bound.
+4. Composition: affine, then the operation, then affine, checked the same way, and through the model entry point (`reach_model`) when the option is only reachable there.
+5. Exactness where the method claims it, in both directions: no true output outside the result, and no vertex of a returned set without a preimage.
+6. Refusal: a combination the library does not support must raise `NotImplementedError`, and the test asserts the raise; `reach_model` and `reach_one_layer` never catch it, and fail on an empty result. They also fail, through `pytest.fail` so that no marker absorbs it, when the reach changed an input set in anything but the ranges the set caches about itself (`state_lb`, `state_ub`): a kernel that works on its input's arrays in place answers correctly once and wrongly for the second reader of the same set, which in a graph is the other branch of a residual connection.
+7. A docstring that names the bug the test catches.

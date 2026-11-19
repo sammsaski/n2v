@@ -1,4 +1,12 @@
-"""Tests for VNN-COMP per-benchmark configuration."""
+"""Tests for VNN-COMP per-benchmark configuration.
+
+A configuration value is a choice, not a promise; what the table promises is
+checked from the section "What every configuration promises" on: every
+configuration the runner can resolve names falsifier knobs the runner passes
+on and the configured method reads, and reach options the relaxation reads;
+the runner reads this table; an unknown category gets the documented
+default.
+"""
 
 import sys
 import os
@@ -7,6 +15,9 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..', 'examples', 'VNN-COMP'))
 from benchmark_configs import get_config, BENCHMARK_CONFIGS, DEFAULT_CONFIG
 from n2v.utils.falsify import METHODS as VALID_FALSIFY_METHODS  # canonical falsifier list
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..',
+                                'examples', 'Submission', 'VNN_COMP2026'))
+import vnncomp_runner as R  # noqa: E402
 
 
 class TestGetConfig:
@@ -205,3 +216,90 @@ class TestGetConfig:
         for cat in BENCHMARK_DIRS:
             assert cat in BENCHMARK_CONFIGS or cat in INTENTIONAL_DEFAULT, \
                 f"{cat} has no explicit config and is not on the intentional-DEFAULT allowlist"
+
+
+# --------------------------------------------------------------------------- #
+# What every configuration promises                                            #
+# --------------------------------------------------------------------------- #
+
+def _resolved():
+    """Every configuration ``get_config`` can resolve: each category with
+    each of its per-property, per-model and transformer variants."""
+    for category, config in BENCHMARK_CONFIGS.items():
+        paths = [(None, None)]
+        paths += [(None, f"{key}.vnnlib")
+                  for key in config.get('reach_methods_by_prop', {})
+                  if key != '_default']
+        paths += [(f"net{key}.onnx", None)
+                  for key in config.get('reach_methods_by_model', {})
+                  if key != '_default']
+        if 'reach_methods_transformer' in config:
+            paths.append(("net_transformer.onnx", None))
+        for onnx_path, vnnlib_path in paths:
+            yield (f"{category} {onnx_path or ''} {vnnlib_path or ''}",
+                   get_config(category, onnx_path, vnnlib_path))
+
+
+# The keyword arguments each attack of ``n2v.utils.falsify`` reads, from the
+# signatures of ``_falsify_pgd``, ``_falsify_apgd`` and ``_falsify_square``
+# (``random`` reads only ``n_samples``, which the runner passes itself).
+_KNOBS_READ = {"random": set(),
+               "pgd": {"n_restarts", "n_steps", "step_size"},
+               "apgd": {"n_restarts", "n_steps", "step_size"},
+               "square": {"n_iters", "batch", "p_init"}}
+_LEGS = {"strong": ["random", "apgd", "square"]}
+
+
+def test_every_configured_falsifier_knob_reaches_an_attack_that_reads_it():
+    """For every resolved configuration, the runner's whitelist passes each
+    configured falsifier knob on unchanged, and some attack of the
+    configured method reads it. Catches a knob the runner drops (sat_relu's
+    and soundnessbench's Square budget ``n_iters`` then never reaches the
+    attack) and a knob configured for a method that ignores it."""
+    for name, cfg in _resolved():
+        knobs = cfg['falsify_kwargs']
+        assert R._whitelist_falsify_kwargs(knobs) == knobs, name
+        method = cfg['falsify_method']
+        legs = _LEGS.get(method, method.split('+'))
+        read = set().union(*(_KNOBS_READ[leg] for leg in legs))
+        assert set(knobs) <= read, (name, method, knobs)
+
+
+def test_every_configured_reach_option_is_one_the_relaxation_reads():
+    """Every resolved reach method is a sound one (approx or exact), and its
+    options are a relax factor in (0, 1] and a relax method the ReLU
+    relaxation reads ('area', 'range' or 'bound', in
+    ``n2v/nn/layer_ops/relu_reach.py``). The reach accepts unknown keywords
+    and unknown relax methods silently (registry REACH-3), so a misspelt
+    option would change nothing without this check."""
+    for name, cfg in _resolved():
+        for method, kwargs in cfg['reach_methods']:
+            assert method in ('approx', 'exact'), (name, method)
+            assert set(kwargs) <= {'relax_factor', 'relax_method'}, name
+            if 'relax_method' in kwargs:
+                assert kwargs['relax_method'] in ('area', 'range', 'bound'), \
+                    name
+            if 'relax_factor' in kwargs:
+                assert 0.0 < kwargs['relax_factor'] <= 1.0, name
+
+
+def test_the_runner_reads_this_table():
+    """The 2026 runner's ``get_config`` is this module's, not its fallback
+    default: every tuned category would otherwise run untuned. Catches a
+    broken import that the runner's fallback hides."""
+    assert R.get_config is get_config
+    assert R.get_config('sat_relu')['falsify_method'] == 'random+square'
+
+
+def test_an_unknown_category_gets_the_documented_default():
+    """An unknown category gets approx then exact reach, 100 random
+    samples, the 'random+pgd' falsifier and no knobs, whatever paths are
+    given. Catches a default that changes with the paths or loses its
+    falsifier default."""
+    for onnx_path, vnnlib_path in [(None, None),
+                                   ('model_transformer-set.onnx',
+                                    'prop_3.vnnlib')]:
+        cfg = get_config('nonexistent_benchmark_2099', onnx_path, vnnlib_path)
+        assert cfg == {'reach_methods': [('approx', {}), ('exact', {})],
+                       'n_rand': 100, 'falsify_method': 'random+pgd',
+                       'falsify_kwargs': {}}

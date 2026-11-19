@@ -12,6 +12,7 @@ import os
 import tempfile
 
 import numpy as np
+import pytest
 
 from n2v.sets import Star
 from n2v.utils.load_vnnlib import load_vnnlib
@@ -204,3 +205,133 @@ def test_multi_star_requires_every_star_safe():
                  pred_lb=np.array([-1.0]), pred_ub=np.array([1.0]))
     assert verify_nonlinear_reach([safe, safe], iset, p) == "UNSAT"
     assert verify_nonlinear_reach([safe, maybe], iset, p) == "UNKNOWN"
+
+
+# --------------------------------------------------------------------------- #
+# The falsifier's documented search, and conjuncts the                        #
+# interval rules are documented to decide                                       #
+# --------------------------------------------------------------------------- #
+def _alternating_net(n):
+    """y = x0 - x1 + x2 - ... (weights +1 and -1 by turns)."""
+    import torch
+
+    model = torch.nn.Linear(n, 1)
+    with torch.no_grad():
+        model.weight.copy_(torch.tensor([[(-1.0) ** i for i in range(n)]]))
+        model.bias.zero_()
+    return model
+
+
+def _box_text(n, out_assert):
+    box = " ".join(f"(>= X[{i}] 0.0) (<= X[{i}] 1.0)" for i in range(n))
+    return _write_spec(
+        "(vnnlib-version <2.0>)\n"
+        f"(declare-network f (declare-input X real [{n}]) (declare-output Y real [1]))\n"
+        f"(assert (and {box}))\n"
+        f"(assert {out_assert})\n")
+
+
+
+@pytest.mark.parametrize("n", [1, 12])
+def test_falsify_tries_every_corner_of_a_box_of_up_to_twelve_entries(n):
+    """y = x0 - x1 + x2 - ... on [0, 1]^n with ``y * y >= m^2``, m = ceil(n/2):
+    only the corners with x_i = 1 on the even entries and 0 on the odd ones
+    (and, for even n, the mirror corner) reach it, a set of measure zero that
+    interior draws never hit, and neither is the all-upper or all-lower
+    corner. The docstring promises the corners first for a box of at most 12
+    entries, so the search must return one of them. Catches the corner
+    enumeration cut off below 12 entries and corners built from one bound
+    only."""
+    import numpy as np
+
+    m = (n + 1) // 2
+    p = _box_text(n, f"(>= (* Y[0] Y[0]) {float(m * m)})")
+    x = falsify_nonlinear(_alternating_net(n), p["lb"], p["ub"], p, (n,),
+                          n_samples=50, seed=0)
+    even = np.array([1.0 - i % 2 for i in range(n)])
+    witnesses = [even] + ([1.0 - even] if n % 2 == 0 else [])
+    assert x is not None and any(np.array_equal(np.asarray(x), w) for w in witnesses)
+
+
+@pytest.mark.parametrize("n, n_samples, corners", [(2, 37, 4), (2, 0, 4), (13, 5, 0)])
+def test_falsify_draws_n_samples_points_of_the_box_from_its_seed(n, n_samples, corners):
+    """The candidates handed to the forward are the 2^n corners (none above
+    12 entries) and then ``n_samples`` draws inside [lb, ub] from ``seed``:
+    the same seed gives the same draws, another seed other draws, and
+    ``n_samples=0`` leaves the corners alone. The box [-3, -1] x [2, 7] (and
+    its 13-entry extension) does not start at 0, so draws scaled by ub
+    instead of ub - lb leave it. Catches a hard-wired draw count, a seed that
+    is not used, and draws outside the box."""
+    import numpy as np
+
+    lb = np.array([-3.0, 2.0] + [0.5] * (n - 2))
+    ub = np.array([-1.0, 7.0] + [1.5] * (n - 2))
+    p = _box_text(1, "(>= (* Y[0] Y[0]) 1e9)")       # never satisfied
+    seen = []
+
+    def record(X):
+        seen.append(np.array(X, dtype=np.float64))
+        return np.zeros((len(X), 1))
+
+    for seed in (1, 1, 2):
+        assert falsify_nonlinear(None, lb, ub, p, (n,), n_samples=n_samples,
+                                 seed=seed, forward=record) is None
+    first, again, other = seen
+    assert first.shape == (corners + n_samples, n)
+    assert np.all(first >= lb) and np.all(first <= ub)
+    interior = first[corners:]
+    assert np.array_equal(interior, again[corners:])
+    if n_samples:
+        assert not np.array_equal(interior, other[corners:])
+
+
+def _two_output_star():
+    """Y0 = 0.5 + 0.5 a0, Y1 = 0.5 - 0.5 a0 (so Y0 + Y1 = 1), Y2 = a1, with
+    a0, a1 in [-1, 1]."""
+    return Star(V=np.array([[0.5, 0.5, 0.0], [0.5, -0.5, 0.0], [0.0, 0.0, 1.0]]),
+                C=None, d=None, pred_lb=-np.ones(2), pred_ub=np.ones(2))
+
+
+@pytest.mark.parametrize("assertions", [
+    # affine sums keep the correlation through the star's own predicates
+    ["(>= (+ Y[0] Y[1]) 1.5)"],
+    # a constant factor keeps the affine form
+    ["(>= (+ (* 2.0 Y[0]) (* Y[1] 2.0)) 2.5)"],
+    # a constant 0 times an unbounded quotient is exactly 0
+    ["(>= (* 0.0 (/ Y[0] Y[2])) 1.0)"],
+    # a division by the constant 0 leaves the other conjunct to decide (inside
+    # an 'or': as a top-level conjunct the parser's box pass divides by it)
+    ["(or (and (>= (/ Y[0] 0.0) 1.0) (>= Y[0] 5.0)) (>= Y[0] 5.0))"],
+    # each comparison, clear of its threshold
+    ["(<= Y[0] -0.5)"], ["(< Y[0] -0.5)"], ["(>= Y[0] 1.5)"], ["(> Y[0] 1.5)"],
+    ["(== Y[0] 2.0)"],
+    # 'and' is false once a conjunct is, 'or' once every disjunct is
+    ["(and (>= (* Y[2] Y[2]) 0.5) (>= Y[0] 1.5))"],
+    ["(or (>= Y[0] 1.5) (<= (* Y[0] Y[1]) -0.5))"],
+    # a provably false assertion decides although a later one is undecided
+    ["(>= (* Y[0] Y[0]) 5.0)", "(>= (* Y[0] Y[1]) 0.1)"],
+], ids=["affine-correlation", "constant-factor-correlation", "zero-times-unbounded",
+        "division-by-constant-zero", "le", "lt", "ge", "gt", "eq", "and-false",
+        "or-all-false", "false-then-undecided-assertion"])
+def test_a_conjunct_the_interval_rules_decide_is_proved_false(assertions):
+    """Y0 + Y1 = 1 with Y0, Y1 in [0, 1] and Y2 in [-1, 1]. Each spec is
+    false at every point of the star, by a margin, and the rules the module
+    documents decide it: the sum of affine forms is recomputed from the
+    combined coefficients, a constant keeps the affine form, 0 times anything
+    is the exact 0, a division by the constant 0 degrades only its own
+    conjunct, a comparison clear of its threshold is surely false, ``and`` is
+    false once one conjunct is, ``or`` once all are, and a false assertion
+    ends the star although a later one is undecided. So the verdict must be
+    UNSAT. Catches each of these rules lost (a wrong True, an interval sum
+    for affine forms, NaN from 0 times inf, a raise on a zero divisor, an
+    assertion loop that lets a later undecided assertion overwrite a
+    false one)."""
+    body = "".join(f"(assert {a})\n" for a in assertions)
+    p = _write_spec(
+        "(vnnlib-version <2.0>)\n"
+        "(declare-network f (declare-input X real [1]) (declare-output Y real [3]))\n"
+        "(assert (and (>= X[0] 0.0) (<= X[0] 1.0)))\n"
+        "(assert (>= (* X[0] X[0]) 0.0))\n" + body)
+    assert p["format"] == "nonlinear"
+    iset = Star.from_bounds(np.array([[0.0]]), np.array([[1.0]]))
+    assert verify_nonlinear_reach([_two_output_star()], iset, p) == "UNSAT"

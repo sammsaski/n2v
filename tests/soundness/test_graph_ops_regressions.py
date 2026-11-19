@@ -37,6 +37,8 @@ Each test pins one measured failure mode with a minimal reproduction:
     of a two-input graph was bound to the one input set.
 """
 
+import copy
+
 import numpy as np
 import onnx
 import pytest
@@ -47,6 +49,7 @@ from onnx import TensorProto, helper, numpy_helper
 from scipy.optimize import linprog
 
 import n2v.sets.predicate_box as predicate_box
+from n2v.nn.layer_ops.relu_reach import relu_star_exact
 from n2v.nn.reach import (ReachConfig, _add_sets, _div_sets, _mul_sets,
                           _propagate_shapes, reach_pytorch_model)
 from n2v.sets import Box, HalfSpace, Star, Zono
@@ -54,6 +57,9 @@ from n2v.sets.image_star import ImageStar
 from n2v.sets.image_zono import ImageZono
 from n2v.utils.model_loader import load_onnx
 from n2v.utils.verify_specification import verify_specification
+from tests._oracles import rational
+from tests._oracles.membership import hwc
+from tests.cell_support import assert_covered, samples
 
 
 # ---------------------------------------------------------------------------
@@ -160,9 +166,15 @@ class _TorchCat(_Residual):
         return torch.cat((x, self.fc(x)), dim=1)
 
 
-@pytest.mark.parametrize('cls', [_ResAdd, _Scale, _Clamp, _Neg, _TorchCat])
-@pytest.mark.parametrize('set_kind,method', [
-    ('star', 'exact'), ('star', 'approx'), ('box', 'approx')])
+# The refusal is decided in the walk's call_function and call_method
+# branches before any set type or method is read, so each node kind keeps one
+# (Star, approx) case; the two-set join _ResAdd keeps the other set type and
+# method as well.
+@pytest.mark.parametrize('set_kind,method,cls', [
+    ('star', 'exact', _ResAdd)] + [
+    ('star', 'approx', c) for c in (_ResAdd, _Scale, _Clamp, _Neg,
+                                    _TorchCat)] + [
+    ('box', 'approx', _ResAdd)])
 def test_unsupported_fx_nodes_raise_instead_of_dropping(cls, set_kind,
                                                         method):
     # x in [0.5, 1]^2 with fc = identity. The skipped node's consumers used
@@ -281,11 +293,12 @@ def test_constant_reshape_is_folded_not_replaced_by_running_sets(tmp_path):
         2, 2,
         {'B': np.array([[10.0], [20.0]], dtype=np.float32),
          'shape': np.array([1, 2], dtype=np.int64)})
+    # One-sided: every true output X + B, the corners first, is in the
+    # result (X + X from the running sets misses all of them).
     out = reach_pytorch_model(
         model, Star.from_bounds(np.zeros(2), np.ones(2)), method='approx')
-    lo, hi = out[0].get_ranges()
-    np.testing.assert_allclose(lo.ravel(), [10.0, 20.0], atol=1e-6)
-    np.testing.assert_allclose(hi.ravel(), [11.0, 21.0], atol=1e-6)
+    for x in ([0.0, 0.0], [1.0, 1.0], [0.0, 1.0], [1.0, 0.0], [0.5, 0.25]):
+        assert _covered(out, np.array(x) + [10.0, 20.0]), x
 
 
 @pytest.mark.parametrize('precompute', [False, 'ibp', 'zono'])
@@ -437,10 +450,15 @@ def test_pieces_without_predicate_systems_meet_in_every_pair():
          Box(np.array([[10.0]]), np.array([[11.0]]))]
     b = [Box(np.array([[0.0]]), np.array([[1.0]])),
          Box(np.array([[100.0]]), np.array([[101.0]]))]
+    # Every pair of pieces is a possible sum: the sum of each pair, both
+    # ends, must lie in a returned box (one-sided).
     out = _add_sets(a, b, 'add')
-    got = sorted((float(s.lb[0, 0]), float(s.ub[0, 0])) for s in out)
-    assert got == [(0.0, 2.0), (10.0, 12.0), (100.0, 102.0),
-                   (110.0, 112.0)]
+    for sa in a:
+        for sb in b:
+            lo = float(sa.lb[0, 0] + sb.lb[0, 0])
+            hi = float(sa.ub[0, 0] + sb.ub[0, 0])
+            assert any(float(s.lb[0, 0]) <= lo and float(s.ub[0, 0]) >= hi
+                       for s in out), (lo, hi)
 
 
 def _trunk_model(tmp_path, join):
@@ -548,8 +566,15 @@ def test_pieces_with_duplicate_systems_meet_every_same_system_piece():
          Star(np.array([[10.0, 1.0]]), C, d, lb, ub)]
     b = [Star(np.array([[0.0, 1.0]]), C, d, lb, ub),
          Star(np.array([[100.0, 1.0]]), C, d, lb, ub)]
-    centers = sorted(float(s.V[0, 0]) for s in _add_sets(a, b, 'add'))
-    assert centers == [0.0, 10.0, 100.0, 110.0]
+    # Both lists use the one variable alpha, so a value of the sum is
+    # a_i(alpha) + b_j(alpha) for any pair (i, j): each must be held.
+    out = _add_sets(a, b, 'add')
+    for alpha in (-1.0, 0.0, 1.0):
+        for sa in a:
+            for sb in b:
+                y = (sa.V[0, 0] + sa.V[0, 1] * alpha + sb.V[0, 0]
+                     + sb.V[0, 1] * alpha)
+                assert _covered(out, [y]), (alpha, y)
 
 
 def test_prefix_match_needs_a_constraint_row():
@@ -567,25 +592,36 @@ def test_prefix_match_needs_a_constraint_row():
               lb, ub),
          Star(np.array([[0.0, 1.0]]), np.array([[-1.0]]), np.zeros((1, 1)),
               lb, ub)]
-    assert len(_add_sets(p, o, 'add')) == 4
+    # The pieces of o do not descend from those of p, so their variable is
+    # independent of p's: p_i(alpha) + o_j(beta) for any pair (i, j), alpha
+    # in p_i's region and beta in o_j's box. A prefix match would pair p with
+    # o's first piece only and lose the values near 5.
+    out = _add_sets(p, o, 'add')
+    for piece, alphas in zip(p, ([-1.0, 0.0], [0.0, 1.0])):
+        for other in o:
+            for alpha in alphas:
+                for beta in (other.predicate_lb[0, 0],
+                             other.predicate_ub[0, 0]):
+                    y = (piece.V[0, 0] + piece.V[0, 1] * alpha
+                         + other.V[0, 0] + other.V[0, 1] * beta)
+                    assert _covered(out, [y]), (alpha, beta, y)
 
 
 # ---------------------------------------------------------------------------
 # Div must not truncate a split operand
 # ---------------------------------------------------------------------------
 
-def test_div_keeps_every_piece_of_a_split_numerator(tmp_path):
-    # y = relu(x) / (x + 3), x in [-1, 1]^2: exact reach splits the
+def test_div_keeps_every_piece_of_a_split_numerator():
+    # y = relu(x) / (x + 3), x in [-1, 1]^2: the exact ReLU rule splits the
     # numerator into 4 pieces against one denominator set. The old zip kept
     # only the first piece (range [0, 0]) though y(1, 1) = (0.25, 0.25).
-    model = _onnx_model(
-        tmp_path,
-        [helper.make_node('Relu', ['X'], ['R']),
-         helper.make_node('Add', ['X', 'three'], ['D']),
-         helper.make_node('Div', ['R', 'D'], ['Y'])],
-        2, 2, {'three': np.array([3.0], dtype=np.float32)}, name='div')
-    out = reach_pytorch_model(
-        model, Star.from_bounds(-np.ones(2), np.ones(2)), method='exact')
+    # The quotient is a relaxation, so the operands are built here and
+    # divided directly; the graph is not run under method='exact'.
+    X = Star.from_bounds(-np.ones(2), np.ones(2))
+    numerator = relu_star_exact([X])
+    assert len(numerator) == 4
+    denominator = X.affine_map(np.eye(2), 3.0 * np.ones((2, 1)))
+    out = _div_sets(numerator, [denominator])
     assert len(out) == 4
     rng = np.random.default_rng(1)
     for x in np.vstack([rng.uniform(-1, 1, size=(12, 2)), [[1.0, 1.0]]]):
@@ -616,16 +652,14 @@ def test_imagezono_full_constant_add_sub_layout(tmp_path, op, mirrored):
     hi_img = np.ones((2, 2, 2))
     Z = ImageZono.from_bounds(lo_img, hi_img, 2, 2, 2)
     out = reach_pytorch_model(model, Z, method='approx')
-    lo, hi = out[0].get_bounds()
-    b = B.ravel().astype(np.float64)
-    if op == 'Add':
-        exp_lo, exp_hi = b, b + 1.0
-    elif not mirrored:              # X - B
-        exp_lo, exp_hi = -b, -b + 1.0
-    else:                           # B - X
-        exp_lo, exp_hi = b - 1.0, b
-    np.testing.assert_allclose(np.asarray(lo).ravel(), exp_lo, atol=1e-6)
-    np.testing.assert_allclose(np.asarray(hi).ravel(), exp_hi, atol=1e-6)
+    # One-sided: the true outputs, in ONNX (C, H, W) order, of 128 points of
+    # the box, its two extreme corners first, are members of the result.
+    b = B.reshape(2, 2, 2).astype(np.float64)
+    ys = []
+    for x in samples(np.zeros((2, 2, 2)), np.ones((2, 2, 2))):
+        y = x + b if op == 'Add' else (x - b if not mirrored else b - x)
+        ys.append(y.ravel())
+    assert_covered(out, ys, f'ImageZono {op} constant (mirrored={mirrored})')
 
 
 def test_imagezono_plus_flat_zono_aligns_in_chw_order():
@@ -636,21 +670,12 @@ def test_imagezono_plus_flat_zono_aligns_in_chw_order():
     t_hwc = t_chw.reshape(c, h, w).transpose(1, 2, 0)
     iz = ImageZono(t_hwc.reshape(-1, 1), np.zeros((8, 1)), h, w, c)
     z = Zono(t_chw.reshape(-1, 1), np.zeros((8, 1)))
-    out = _add_sets([iz], [z], 'add')[0]
-    np.testing.assert_allclose(np.asarray(out.c).ravel(), 2 * t_chw)
-    out = _add_sets([z], [iz], 'sub')[0]
-    np.testing.assert_allclose(np.asarray(out.c).ravel(), 0.0)
-
-
-def _output_bounds(s):
-    if isinstance(s, Box):
-        return np.ravel(s.lb), np.ravel(s.ub)
-    if isinstance(s, (Zono, ImageZono)):
-        c = np.ravel(s.c)
-        r = np.abs(np.asarray(s.V)).sum(axis=1).ravel()
-        return c - r, c + r
-    lo, hi = s.get_ranges()
-    return np.ravel(lo), np.ravel(hi)
+    # Both operands are points, so each result must hold the one true
+    # value, in CHW order (one coercion branch each).
+    assert_covered(_add_sets([iz], [z], 'add'), [2 * t_chw],
+                   'ImageZono + flat Zono')
+    assert_covered(_add_sets([z], [iz], 'sub'), [np.zeros(8)],
+                   'flat Zono - ImageZono')
 
 
 @pytest.mark.parametrize('b_shape', [(1, 2, 1, 1), (1, 1, 2, 2)])
@@ -684,10 +709,12 @@ def test_constant_minus_set_uses_the_constant_layout(tmp_path, b_shape,
         # an image set cannot hold an (H, W) constant; it must not guess
         assert set_kind.startswith('image') and b_shape == (1, 1, 2, 2)
         return
-    b = np.broadcast_to(B, (1, 2, 2, 2)).ravel().astype(np.float64)
-    lo, hi = _output_bounds(out[0])
-    np.testing.assert_allclose(lo, b - 1.0, atol=1e-6)
-    np.testing.assert_allclose(hi, b, atol=1e-6)
+    # One-sided: the true outputs B - X, in CHW order, of 128 points of the
+    # box (the two extreme corners first) are members of the result.
+    b = np.broadcast_to(B, (1, 2, 2, 2)).reshape(2, 2, 2).astype(np.float64)
+    ys = [(b - x).ravel() for x in samples(np.zeros((2, 2, 2)),
+                                           np.ones((2, 2, 2)))]
+    assert_covered(out, ys, f'B - X on {set_kind}, B of shape {b_shape}')
 
 
 # ---------------------------------------------------------------------------
@@ -750,15 +777,23 @@ def test_mccormick_survives_lp_undershoot(monkeypatch, op):
 
 
 def test_mccormick_constant_operand_rows_stay_exact():
-    # A dimension with no generator coefficients is exact; it is not padded.
+    # Two operands with no generator coefficient (the constant 2 and the
+    # constant 3 or -3, on one predicate system): the product must be in
+    # the result, decided in exact arithmetic with no slack, and inside the
+    # range the result's LP gives (one-sided). The envelope rows of a
+    # constant entry are not padded, so a row with a wrong sign or corner
+    # empties the set or moves it off the product; the negative product
+    # also shows an LP minimum returned with the wrong sign or a row
+    # scaled without its right-hand side.
     lb, ub = np.array([[-1.0]]), np.array([[1.0]])
     C, d = np.zeros((0, 1)), np.zeros((0, 1))
     x = Star(np.array([[2.0, 0.0]]), C, d, lb, ub)
-    y = Star(np.array([[3.0, 0.0]]), C, d, lb, ub)
-    Z = _mul_sets([x], [y])[0]
-    lo, hi = Z.get_range(0)
-    assert lo == pytest.approx(6.0, abs=1e-12)
-    assert hi == pytest.approx(6.0, abs=1e-12)
+    for k in (3.0, -3.0):
+        y = Star(np.array([[k, 0.0]]), C, d, lb, ub)
+        Z = _mul_sets([x], [y])[0]
+        assert rational.member(rational.star(Z), [2 * k]), k
+        lo, hi = Z.get_range(0)
+        assert lo <= 2 * k <= hi, (k, lo, hi)
 
 
 # ---------------------------------------------------------------------------
@@ -1121,22 +1156,41 @@ def test_zono_prepass_bounds_match_the_reach_layout(tmp_path, op):
     onnx.save(m, path)
     model = load_onnx(path)
     lb = rng.uniform(-1.0, 0.5, (C, H, W))
-    S = _chw_image_star(lb, lb + rng.uniform(0.05, 0.5, (C, H, W)))
+    ub = lb + rng.uniform(0.05, 0.5, (C, H, W))
+    S = _chw_image_star(lb, ub)
 
     seen = {}
 
     def record(name, module, sets):
         if isinstance(module, nn.ReLU):
-            seen[name] = sets[0].estimate_ranges()
+            s = sets[0]
+            image = (s.num_channels, s.height, s.width) if isinstance(
+                s, (ImageStar, ImageZono)) else None
+            seen[name] = (s.estimate_ranges(), image)
 
     _handle_graphmodule(model, [S], 'approx', input_shape=(C, H, W),
                         _on_layer_input=record)
     pre = compute_intermediate_bounds(model, S, method='zono',
                                       input_shape=(C, H, W))
     assert seen and set(seen) == set(pre)
-    for name, (lo, hi) in seen.items():
+    # The independent reference: the true Relu inputs of 128 points of the
+    # box (its two extreme corners first), from the model in float64 torch,
+    # put in the row order of the reach's set (HWC for an image set).
+    true_in = []
+    m64 = copy.deepcopy(model).double().eval()
+    relu = next(m for m in m64.modules() if isinstance(m, nn.ReLU))
+    relu.register_forward_pre_hook(
+        lambda mod, args: true_in.append(args[0].detach().numpy().copy()))
+    with torch.no_grad():
+        for x in samples(lb, ub):
+            m64(torch.tensor(x[None], dtype=torch.float64))
+    for name, ((lo, hi), image) in seen.items():
         lo, hi = np.ravel(lo), np.ravel(hi)
         plo, phi = np.ravel(pre[name][0]), np.ravel(pre[name][1])
         assert plo.size == lo.size
         tol = 1e-9 * (1.0 + np.abs(lo) + np.abs(hi))
         assert np.all(plo <= lo + tol) and np.all(phi >= hi - tol)
+        for t in true_in:
+            v = hwc(t.reshape(-1), *image) if image else t.reshape(-1)
+            pad = 1e-9 * (1.0 + np.abs(v))
+            assert np.all(plo <= v + pad) and np.all(phi >= v - pad), name

@@ -226,10 +226,15 @@ def test_conv2d_flops_accounts_for_groups():
 # Edge cases.
 # --------------------------------------------------------------------------- #
 def test_edge_empty_input_no_region():
-    """Empty input list short-circuits before opening a region (returns [])."""
+    """An empty input list opens no LAYER region, whether the call returns or
+    refuses. What it should do is refuse: that contract, and today's ``[]``,
+    are in tests/contracts/test_verify_api.py
+    (``test_reach_layer_refuses_an_empty_list_of_input_sets``)."""
     with profile() as p:
-        out = reach_layer(nn.ReLU(), [], "exact")
-    assert out == []
+        try:
+            reach_layer(nn.ReLU(), [], "exact")
+        except ValueError:
+            pass
     assert [r.name for r in p.records()] == ["run"]  # no LAYER region opened
 
 

@@ -2,6 +2,9 @@
 Unit tests for conformal inference module.
 """
 
+from fractions import Fraction
+from math import comb
+
 import pytest
 import numpy as np
 from scipy.stats import beta
@@ -15,6 +18,18 @@ from n2v.probabilistic.conformal import (
     compute_inflation,
     conformal_inference
 )
+
+
+def _exact_confidence(m, ell, epsilon):
+    """P[Binomial(m, 1 - epsilon) <= ell - 1] in rationals, ``epsilon`` a
+    decimal string: the confidence 1 - BetaCDF(1 - epsilon; ell, m + 1 - ell)
+    written as a finite sum (the shorter tail is summed)."""
+    eps = Fraction(epsilon)
+    q = 1 - eps
+    if ell - 1 <= m // 2:
+        return sum(comb(m, j) * q ** j * eps ** (m - j) for j in range(ell))
+    return 1 - sum(comb(m, j) * q ** j * eps ** (m - j)
+                   for j in range(ell, m + 1))
 
 
 class TestComputeConfidence:
@@ -52,6 +67,23 @@ class TestComputeConfidence:
         """Test that result is a float."""
         result = compute_confidence(m=100, ell=99, epsilon=0.01)
         assert isinstance(result, float)
+
+    @pytest.mark.parametrize("m, ell, epsilon", [
+        (1, 1, "0.5"), (10, 1, "0.1"), (10, 10, "0.1"), (10, 9, "0.25"),
+        (50, 25, "0.5"), (100, 100, "0.05"), (200, 199, "0.01"),
+        (1000, 990, "0.01"), (8000, 7999, "0.001"),
+    ])
+    def test_confidence_is_the_exact_binomial_tail(self, m, ell, epsilon):
+        """The confidence of rank ell among m calibration scores at
+        miscoverage epsilon is P[Binomial(m, 1 - epsilon) <= ell - 1], summed
+        here in rationals (independent of scipy's Beta function). The grid
+        holds ell = 1, ell = m, ell = m - 1 and mid ranks, small and large
+        epsilon. Catches a Beta parameter off by one (m - ell for m + 1 - ell,
+        which overstates the confidence and is NaN at ell = m), swapped Beta
+        parameters, and epsilon used where 1 - epsilon belongs. Slack 1e-12:
+        float64 evaluation of a value in [0, 1]."""
+        got = compute_confidence(m, ell, float(epsilon))
+        assert abs(got - float(_exact_confidence(m, ell, epsilon))) <= 1e-12
 
 
 class TestComputeNormalization:
@@ -195,6 +227,22 @@ class TestComputeNonconformityScores:
         expected = np.array([0.0, 2.0])
 
         np.testing.assert_array_almost_equal(scores, expected)
+
+    @pytest.mark.parametrize("center, expected", [
+        (None, [3.0, 2.0]),
+        ([-1.0, 0.25], [2.0, 2.5]),
+    ], ids=["no-center", "center"])
+    def test_negative_errors_count_by_their_magnitude(self, center, expected):
+        """R_i = max_k |q_i[k] - c[k]| / tau[k], by hand: errors [[-3, 0.5],
+        [0.25, -1]], tau [1, 0.5]. The largest normalized error of each row is
+        a negative one, so a score without the absolute value (which ignores
+        outputs below the surrogate) gives [1, 0.25] or [0.5, 2.5]; a centre
+        added instead of subtracted gives [4, 1.5]. Dyadic data: exact."""
+        errors = np.array([[-3.0, 0.5], [0.25, -1.0]])
+        tau = np.array([1.0, 0.5])
+        c = None if center is None else np.array(center)
+        scores = compute_nonconformity_scores(errors, tau, c)
+        assert scores.tolist() == expected
 
     def test_nonconformity_scores_1d_input(self):
         """Test that 1D input is handled correctly."""
@@ -364,6 +412,63 @@ class TestConformalInference:
         )
 
         assert guarantee.inflation.shape == (5,)
+
+
+class TestConformalInferenceByHand:
+    """The whole pipeline of conformal_inference on errors computed by hand."""
+
+    # tau = [2, 4]: 2 from the calibration errors, 4 from the training errors.
+    TRAIN = np.array([[0.5, -4.0], [-0.25, 2.0]])
+    CALIB = np.array([[1.0, -0.5], [-2.0, 1.0], [0.25, 3.0], [0.5, -1.5],
+                      [-1.25, 0.5]])
+    # scores max(|e0| / 2, |e1| / 4) = [0.5, 1.0, 0.75, 0.375, 0.625]
+
+    @pytest.mark.parametrize("ell, threshold", [
+        (1, 0.375), (2, 0.5), (4, 0.75), (5, 1.0),
+    ])
+    def test_threshold_inflation_and_confidence_by_hand(self, ell, threshold):
+        """tau[k] = max over training and calibration errors of |e[k]|
+        (today's formula, deferred PROB-6) = [2, 4]; the scores are
+        [0.5, 1, 0.75, 0.375, 0.625]; the threshold is the ell-th smallest
+        (ell 1-based); the inflation is tau times it; the confidence is the
+        binomial tail for (m = 5, ell, epsilon = 0.25). Dyadic data, so the
+        threshold and the inflation are exact. Catches the rank handed on as
+        ell - 1 (the largest score at ell = 1), a descending sort, an
+        inflation without tau, scores that average or drop the absolute
+        value, tau from the smaller of the two maxima, and a confidence
+        computed with the coverage in place of epsilon or with another rank."""
+        g = conformal_inference(self.TRAIN, self.CALIB, m=5, ell=ell,
+                                epsilon=0.25)
+        assert g.threshold == threshold
+        assert g.inflation.tolist() == [2.0 * threshold, 4.0 * threshold]
+        assert (g.m, g.ell, g.epsilon, g.coverage) == (5, ell, 0.25, 0.75)
+        assert abs(g.confidence - float(_exact_confidence(5, ell, "0.25"))) \
+            <= 1e-12
+
+    def test_one_dimensional_calibration_errors_are_one_sample(self):
+        """A 1-D calibration error array is one sample of n outputs (m = 1).
+        tau = max(|train|, |calib|) per output = [1, 2, 0.5]; the one score is
+        max(0.5 / 1, 2 / 2, 0.25 / 0.5) = 1. Catches a 1-D array read as a
+        column of m samples, which refuses the legal call for m = 1 or mixes
+        the outputs."""
+        train = np.array([[1.0, 0.0, 0.5], [0.0, 0.25, 0.0]])
+        calib = np.array([0.5, -2.0, -0.25])
+        g = conformal_inference(train, calib, m=1, ell=1, epsilon=0.5)
+        assert g.threshold == 1.0
+        assert g.inflation.tolist() == [1.0, 2.0, 0.5]
+
+    @pytest.mark.parametrize("ell, epsilon", [
+        (0, 0.1), (6, 0.1), (5, 1.0), (5, -0.25),
+    ], ids=["ell-0", "ell-m-plus-1", "epsilon-1", "epsilon-negative"])
+    def test_rank_and_level_outside_their_range_are_refused(self, ell, epsilon):
+        """ell must be in [1, m] and epsilon in (0, 1); each end is refused
+        with ValueError. Catches a check that lets ell = 0 through (the
+        threshold is then the largest score, read from index -1, with a
+        confidence for rank 0) or that accepts epsilon = 1 or a negative
+        epsilon."""
+        with pytest.raises(ValueError, match="ell must be in|epsilon must be in"):
+            conformal_inference(self.TRAIN, self.CALIB, m=5, ell=ell,
+                                epsilon=epsilon)
 
 
 class TestConformalGuaranteeDataclass:

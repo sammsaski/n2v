@@ -107,6 +107,11 @@ class _BN1d(nn.Module):
 # ---------------------------------------------------------------------------
 
 def test_box_div_by_constant_does_not_give_a_false_unsat():
+    """ONNX Div of a point Box by a constant, minus the float32 nearest
+    quotient: the reach result holds the exact output, and a half-space that
+    holds it is not answered UNSAT. Catches a Box scaled by the reciprocal
+    rounded to nearest (the exact output left out by about 1e-18, a false
+    UNSAT)."""
     # y = x / c - d with d the float32 nearest x / c: the old Box was
     # x * fl(1/c) rounded outward and missed the exact output by ~1e-18.
     x, c = 1.391450047492981, 7.420313358306885
@@ -126,6 +131,9 @@ def test_box_div_by_constant_does_not_give_a_false_unsat():
 
 
 def test_box_div_by_constant_encloses_every_exact_quotient():
+    """ONNX Div of 1000 point coordinates by float32 constants of both signs
+    and of magnitudes 1 to 20: every exact quotient lies in the returned box.
+    Catches a quotient bound rounded inward."""
     rng = np.random.default_rng(0)
     n = 1000
     x = rng.uniform(-2.0, 2.0, n).astype(np.float32).astype(np.float64)
@@ -161,6 +169,10 @@ def _bn_params(m):
 
 
 def test_box_batchnorm_on_nchw_layout_does_not_give_a_false_unsat():
+    """BatchNorm1d on a Box of the (1, 2, 3) layout whose beta nearly
+    cancels scale times mean: the result holds the real-number output
+    (60 digits), and a half-space touching it is not answered UNSAT. Catches
+    the rounding of the folded scale and shift left out of the bounds."""
     m = _bn_model([500.0, 300.0], [3.0, 5.0], [1.5, 0.75],
                   [433.0127, 100.6231])
     mu, var, gamma, beta = _bn_params(m)
@@ -175,6 +187,11 @@ def test_box_batchnorm_on_nchw_layout_does_not_give_a_false_unsat():
 
 
 def test_box_batchnorm_on_nchw_layout_encloses_the_real_layer():
+    """BatchNorm1d with beta equal to scale times mean, 20 random layers of
+    2 channels on point boxes of the (1, 2, 3) layout: every real-number
+    output (60 digits) of the 120 entries lies in the returned box. Catches
+    the rounding of the folded shift, far larger than the map's own, left
+    out of the bounds."""
     # beta = scale * mean: the folded shift cancels, and its rounding is far
     # larger than the rounding of the map itself.
     rng = np.random.default_rng(0)
@@ -208,6 +225,10 @@ def test_box_batchnorm_on_nchw_layout_encloses_the_real_layer():
 # ---------------------------------------------------------------------------
 
 def test_bilinear_matmul_box_encloses_the_exact_interval_product():
+    """The Box set-times-set MatMul holds the exact interval product: the
+    point case 2^53 + 1 + 1, which round-to-nearest sums to 2^53, and 300
+    random products of mixed magnitudes. Catches the midpoint-radius product
+    summed in round-to-nearest with no margin."""
     # Point case: fl(2^53 + 1 + 1) = 2^53, the exact product is 2^53 + 2.
     out = bilinear_matmul_box([Box([2.0 ** 53, 1, 1], [2.0 ** 53, 1, 1])],
                               [Box([1.0, 1, 1], [1.0, 1, 1])], (1, 3), (3, 1))[0]
@@ -256,6 +277,10 @@ def _above(v, exact):
     (_div_dir, 1e300, 1e-100, Fraction(1e300) / Fraction(1e-100)),
 ])
 def test_directed_rounding_of_an_overflow_is_an_outward_bound(op, a, b, exact):
+    """``_add_dir``, ``_mul_dir`` and ``_div_dir`` of finite operands whose
+    result overflows: the lower bound is at or below the exact value and the
+    upper at or above, and one side stays finite. Catches an overflow
+    returned as an exact infinity on the side where it claims too much."""
     lo = float(op(np.array([a]), np.array([b]), -1.0)[0])
     hi = float(op(np.array([a]), np.array([b]), 1.0)[0])
     assert _below(lo, exact) and _above(hi, exact)
@@ -264,12 +289,19 @@ def test_directed_rounding_of_an_overflow_is_an_outward_bound(op, a, b, exact):
 
 
 def test_box_sum_that_overflows_keeps_an_outward_lower_bound():
+    """``Box.minkowski_sum`` of the point 1e308 with itself: the lower bound
+    is at or below the exact 2e308 (the largest double) and the upper bound
+    is infinite. Catches a lower bound of +inf from the overflow and a lower
+    bound rounded upward."""
     s = Box([1e308], [1e308]).minkowski_sum(Box([1e308], [1e308]))
     exact = Fraction(1e308) * 2
     assert _below(float(s.lb[0, 0]), exact) and s.ub[0, 0] == np.inf
 
 
 def test_directed_rounding_of_float32_operands_is_outward():
+    """``_add_dir``, ``_mul_dir`` and ``_div_dir`` of two float32 operands:
+    each directed result holds the exact sum, product or quotient. Catches a
+    result rounded in float32 and moved by one float64 ulp only."""
     a32, b32 = np.float32(1.0), np.float32(2.0 ** -30)
     exact = Fraction(1) + Fraction(2) ** -30
     assert Fraction(float(_add_dir(a32, b32, 1.0))) >= exact
@@ -288,6 +320,10 @@ def test_directed_rounding_of_float32_operands_is_outward():
 # ---------------------------------------------------------------------------
 
 def test_half_infinite_box_keeps_its_finite_side_through_batchnorm():
+    """BatchNorm1d on a Box with an infinite upper bound and on one with an
+    infinite lower bound: the infinite side stays infinite, the finite side
+    stays finite and holds the real output, and exact zero lower bounds stay
+    0. Catches both bounds charged for the larger endpoint magnitude."""
     box = Box([0.0, 0.0], [np.inf, 1.0])
     out = batchnorm_reach.batchnorm_box(nn.BatchNorm1d(2).eval(), [box])[0]
     # Default BN (mean 0, beta 0): the lower bounds are exact zeros.
@@ -306,6 +342,10 @@ def test_half_infinite_box_keeps_its_finite_side_through_batchnorm():
 
 @pytest.mark.parametrize("op", ['sum', 'mean'])
 def test_half_infinite_box_keeps_its_finite_side_through_reduce(op):
+    """ReduceSum and ReduceMean of a flat Box with one infinite end: the
+    finite side of the result stays the exact 0 and the other side is
+    infinite. Catches both bounds charged for the larger endpoint
+    magnitude."""
     out = reduce_reach._reduce_flat_box(Box([0.0, 0.0], [np.inf, 1.0]),
                                         None, op, True)
     assert out.lb[0, 0] == 0.0 and out.ub[0, 0] == np.inf

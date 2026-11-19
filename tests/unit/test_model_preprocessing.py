@@ -691,3 +691,446 @@ class TestOpset9UpsampleLoadShim:
             RuntimeError("Got unexpected input value type (ValueType.UNKNOWN)"))
         # An unrelated failure must propagate, not trigger an opset upgrade.
         assert not _is_upgradeable_conversion_error(RuntimeError("some other error"))
+
+
+# --------------------------------------------------------------------------- #
+# has_* on every form, the state fusion and stripping leave, modules that     #
+# are not fused, dtypes.                                                      #
+# --------------------------------------------------------------------------- #
+from tests.known_bugs import known_bug  # noqa: E402
+
+_EPS = 0.75  # with running variances 1/4 and 13/4 the fold is exact
+
+
+def _dyadic_bn(bn):
+    """Dyadic statistics whose fold is exact: var + eps is 1 or 4."""
+    n = bn.num_features
+    with torch.no_grad():
+        bn.running_mean.copy_(torch.arange(n) / 2.0 - 1.0)
+        bn.running_var.copy_(torch.tensor([0.25, 3.25] * n)[:n])
+        if bn.weight is not None:
+            bn.weight.copy_(torch.tensor([2.0, -0.5] * n)[:n])
+            bn.bias.copy_(torch.arange(n) / 4.0)
+    return bn
+
+
+def _dyadic_linear(fc):
+    with torch.no_grad():
+        fc.weight.copy_(torch.arange(fc.weight.numel()).reshape(
+            fc.weight.shape) % 7 / 4.0 - 0.75)
+        fc.bias.copy_(torch.arange(fc.bias.numel()) / 2.0 - 0.5)
+    return fc
+
+
+class _Block(nn.Module):
+    """A custom module holding a Linear and its BatchNorm1d."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc = _dyadic_linear(nn.Linear(3, 4))
+        self.bn = _dyadic_bn(nn.BatchNorm1d(4, eps=_EPS))
+
+    def forward(self, x):
+        return self.bn(self.fc(x))
+
+
+class _HoldsABlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.block = _Block()
+        self.head = _dyadic_linear(nn.Linear(4, 2))
+
+    def forward(self, x):
+        return self.head(torch.relu(self.block(x)))
+
+
+class _Untraceable(nn.Module):
+    """Data-dependent control flow: torch.fx cannot trace it."""
+
+    def __init__(self):
+        super().__init__()
+        self.fc = _dyadic_linear(nn.Linear(3, 4))
+        self.bn = _dyadic_bn(nn.BatchNorm1d(4, eps=_EPS))
+
+    def forward(self, x):
+        y = self.bn(self.fc(x))
+        if y.sum() > 0:
+            return y
+        return -y
+
+
+def _dyadic_input(rows=8, cols=3):
+    return (torch.arange(rows * cols, dtype=torch.float32).reshape(rows, cols)
+            % 9 - 4.0) / 2.0
+
+
+def _module_kinds(model):
+    return {type(m) for m in model.modules()}
+
+
+def _traced_call(form):
+    """A traced module whose forward is ``form(x)``."""
+    class _Net(nn.Module):
+        def forward(self, x):
+            return form(x)
+    return torch.fx.symbolic_trace(_Net())
+
+
+class TestHasBatchNormForms:
+    """has_batchnorm decides whether reach fuses; every form must be found."""
+
+    def test_every_batchnorm_kind_at_any_depth(self):
+        """BatchNorm1d, BatchNorm2d and BatchNorm3d, a model that is itself a
+        BatchNorm, one two containers deep and a subclass are found; layers
+        with a similar role (LayerNorm, GroupNorm, InstanceNorm2d) are not.
+        Catches a kind left out of the checked classes and a search of the
+        direct children only."""
+        class _MyBatchNorm(nn.BatchNorm2d):
+            pass
+
+        found = [nn.BatchNorm1d(3), nn.BatchNorm2d(3), nn.BatchNorm3d(3),
+                 nn.Sequential(nn.Conv3d(1, 2, 1), nn.BatchNorm3d(2)),
+                 nn.Sequential(nn.Sequential(nn.ReLU(), nn.Sequential(
+                     nn.Linear(2, 2), nn.BatchNorm1d(2)))),
+                 nn.Sequential(nn.Conv2d(1, 2, 1), _MyBatchNorm(2)),
+                 _HoldsABlock()]
+        for model in found:
+            assert has_batchnorm(model) is True, model
+        for model in (nn.Sequential(nn.Linear(2, 2), nn.LayerNorm(2)),
+                      nn.Sequential(nn.Conv2d(2, 2, 1), nn.GroupNorm(1, 2)),
+                      nn.Sequential(nn.Conv2d(2, 2, 1), nn.InstanceNorm2d(2))):
+            assert has_batchnorm(model) is False, model
+
+
+class TestHasSoftmaxForms:
+    """has_softmax on every form of a softmax and of a log-softmax."""
+
+    def test_every_softmax_call_form_is_found(self):
+        """``torch.softmax``, ``F.softmax`` with its input by keyword and the
+        tensor method ``.softmax`` in a traced graph count as softmax.
+        Catches a call form that is not recognized (the method form, a match
+        on the function object instead of its name)."""
+        forms = [lambda z: torch.softmax(z, -1),
+                 lambda z: torch.nn.functional.softmax(input=z, dim=-1),
+                 lambda z: z.softmax(-1)]
+        for form in forms:
+            assert has_softmax(_traced_call(form)) is True
+
+    def test_log_softmax_forms_are_not_softmax(self):
+        """A LogSoftmax is not a plain softmax in any form: an nn.LogSoftmax
+        in a Sequential or a traced graph, ``F.log_softmax`` and the tensor
+        method ``.log_softmax``. Catches a LogSoftmax module accepted as a
+        softmax and a call matched by a name that contains 'softmax'
+        (stripping either would turn log-probabilities into logits)."""
+        forms = [lambda z: torch.nn.functional.log_softmax(z, -1),
+                 lambda z: z.log_softmax(-1)]
+        models = [nn.Sequential(nn.Linear(3, 3), nn.LogSoftmax(dim=-1)),
+                  torch.fx.symbolic_trace(
+                      nn.Sequential(nn.Linear(3, 3), nn.LogSoftmax(dim=-1)))]
+        models += [_traced_call(form) for form in forms]
+        for model in models:
+            assert has_softmax(model) is False, model
+
+
+class TestFuseBatchNormState:
+    """fuse_batchnorm works on a copy and returns it in eval mode."""
+
+    def test_callers_graph_module_is_left_unchanged(self):
+        """A traced GraphModule in training mode: after fusion the caller's
+        model has the same module classes, training flags, hooks, parameters,
+        buffers and graph code, and the fused copy is another object. Catches
+        a fusion that rewrites the caller's graph in place (its BatchNorm
+        replaced by an identity, its Linear by a float64 layer with hooks)
+        or switches the caller's model to eval mode."""
+        gm = torch.fx.symbolic_trace(_HoldsABlock()).train()
+
+        def view(m):
+            return ([(n, type(x), x.training, len(x._forward_hooks),
+                      len(x._forward_pre_hooks))
+                     for n, x in m.named_modules()],
+                    {k: v.clone() for k, v in m.state_dict().items()}, m.code)
+
+        before = view(gm)
+        fused = fuse_batchnorm(gm)
+        after = view(gm)
+        assert fused is not gm
+        assert after[0] == before[0], "module classes, flags or hooks changed"
+        assert after[2] == before[2], "the caller's graph was rewritten"
+        assert all(torch.equal(v, after[1][k]) for k, v in before[1].items())
+        assert not has_batchnorm(fused)
+
+    def test_result_is_in_eval_mode(self):
+        """From a model in training mode (a fused pair, a standalone
+        BatchNorm, a Dropout), every module of the result is in eval mode, on
+        the Sequential path and on the traced path; the docstring promises
+        eval mode. Catches the final eval() left out (the rebuilt Sequential
+        and the new fused layer and identity come back in training mode)."""
+        for model in (nn.Sequential(
+                _dyadic_linear(nn.Linear(3, 4)),
+                _dyadic_bn(nn.BatchNorm1d(4, eps=_EPS)), nn.ReLU(),
+                nn.Dropout(0.5), _dyadic_bn(nn.BatchNorm1d(4, eps=_EPS))),
+                _HoldsABlock()):
+            fused = fuse_batchnorm(model.train())
+            training = [n for n, m in fused.named_modules() if m.training]
+            assert not training, f"modules in training mode: {training}"
+            assert model.training, "the caller's model was switched to eval"
+
+    def test_traced_model_in_training_mode_is_fused_for_its_eval_function(
+            self):
+        """A custom module, which the fusion traces, handed over in training
+        mode, whose forward calls ``F.dropout(..., self.training)``: tracing
+        reads the training flag as a constant, so the fusion must switch its
+        copy to eval mode before it traces. The fused model computes the
+        eval-mode function exactly on dyadic data, on two calls in a row, and
+        the caller's model stays in training mode. Catches the eval() before
+        the trace left out (the fused graph then keeps a dropout with
+        training=True and returns random outputs, which the final eval()
+        cannot undo)."""
+        class _Dropping(_HoldsABlock):
+            def forward(self, x):
+                return self.head(torch.nn.functional.dropout(
+                    torch.relu(self.block(x)), 0.5, self.training))
+
+        model = _Dropping().train()
+        x = _dyadic_input().double()
+        with torch.no_grad():
+            expected = copy.deepcopy(model).eval().double()(x)
+            fused = fuse_batchnorm(model).double()
+            assert nn.BatchNorm1d not in _module_kinds(fused)
+            for _ in range(2):
+                assert torch.equal(fused(x), expected)
+        assert model.training
+
+
+class TestFuseBatchNormLeavesUnfused:
+    """Modules fuse_batchnorm must return unfused, with their function."""
+
+    def test_untraceable_module_is_returned_unfused(self):
+        """A module with data-dependent control flow cannot be traced: it is
+        returned unfused (its BatchNorm is reached as a standalone layer) and
+        computes what it computed, and the reach refuses it with the
+        deliberate TypeError naming tracing. Catches the tracing failure let
+        through (fusion then raises torch.fx's TraceError, a ValueError)."""
+        from n2v.nn.reach import reach_pytorch_model
+        from n2v.sets import Star
+        import numpy as np
+
+        model = _Untraceable().eval()
+        fused = fuse_batchnorm(model)
+        assert nn.BatchNorm1d in _module_kinds(fused)
+        x = _dyadic_input()
+        with torch.no_grad():
+            assert torch.equal(fused(x), model(x))
+        star = Star.from_bounds(-np.ones((3, 1)), np.ones((3, 1)))
+        with pytest.raises(TypeError, match="traceable"):
+            reach_pytorch_model(model, star, method="approx")
+
+    def test_batchnorm_without_running_statistics_is_kept(self):
+        """A BatchNorm built with track_running_stats=False normalizes by
+        batch statistics even in eval mode, so it is not fused: fusion
+        returns the model with that BatchNorm and the same function on a
+        batch of 8, after a Linear and after a Conv2d. Catches the
+        running-statistics check dropped (the fold then raises
+        AttributeError on the missing running variance)."""
+        for model, x in (
+                (nn.Sequential(nn.Linear(3, 4),
+                               nn.BatchNorm1d(4, track_running_stats=False)),
+                 _dyadic_input()),
+                (nn.Sequential(nn.Conv2d(2, 3, 2),
+                               nn.BatchNorm2d(3, track_running_stats=False)),
+                 torch.arange(8 * 2 * 3 * 3, dtype=torch.float32).reshape(
+                     8, 2, 3, 3) % 5 / 4.0)):
+            model.eval()
+            fused = fuse_batchnorm(model)
+            kept = [m for m in fused.modules()
+                    if isinstance(m, nn.modules.batchnorm._BatchNorm)]
+            assert len(kept) == 1 and kept[0].running_mean is None
+            with torch.no_grad():
+                assert torch.equal(fused(x), model(x))
+
+    def test_pair_inside_a_custom_module_is_fused(self):
+        """A custom module holding Linear then BatchNorm1d, alone and as a
+        child of another custom module (traced, the pair under the dotted
+        name ``block.fc``): fusion removes the BatchNorm and the result
+        computes the original function exactly on dyadic data. The passing
+        neighbour of the marked Sequential case below. Catches a graph fusion
+        that skips BatchNorm1d (only BatchNorm2d fused)."""
+        for model in (_Block().eval(), _HoldsABlock().eval()):
+            fused = fuse_batchnorm(model)
+            assert nn.BatchNorm1d not in _module_kinds(fused)
+            x = _dyadic_input()
+            with torch.no_grad():
+                assert torch.equal(fused.double()(x.double()),
+                                   copy.deepcopy(model).double()(x.double()))
+
+    @known_bug(12, "fuse_batchnorm does not descend into a child of a "
+                   "Sequential that is neither a Sequential nor a fusable "
+                   "layer, so a Linear+BatchNorm1d pair inside a custom "
+                   "module held by a Sequential stays unfused, although the "
+                   "docstring says every pair is fused and replaced by an "
+                   "identity")
+    def test_pair_inside_a_custom_child_of_a_sequential_is_fused(self):
+        """Sequential(custom module holding Linear then BatchNorm1d, ReLU):
+        the docstring promises every Linear+BatchNorm1d pair fused and its
+        BatchNorm replaced by an identity, as for the same module alone (the
+        neighbour above), with the function unchanged. Today the BatchNorm
+        stays; reach then takes the standalone BatchNorm rule, which is
+        sound, so the harm is the broken promise of the returned model."""
+        model = nn.Sequential(_Block(), nn.ReLU()).eval()
+        fused = fuse_batchnorm(model)
+        assert nn.BatchNorm1d not in _module_kinds(fused)
+        x = _dyadic_input().double()
+        with torch.no_grad():
+            assert torch.equal(fused.double()(x),
+                               copy.deepcopy(model).double()(x))
+
+
+class TestFuseBatchNormNames:
+    """fuse_batchnorm keeps the names of a Sequential's children."""
+
+    @known_bug(12, "fuse_batchnorm rebuilds an nn.Sequential with the child "
+                   "names '0', '1', ... although _fuse_sequential says it "
+                   "keeps the original keys, so a Sequential built from an "
+                   "OrderedDict loses its names (fused.fc raises "
+                   "AttributeError, the state_dict keys change)")
+    def test_named_sequential_keeps_its_child_names(self):
+        """Sequential(OrderedDict(fc=Linear, bn=BatchNorm1d, act=ReLU)): the
+        fused copy computes the original function exactly on dyadic data and
+        keeps the names fc, bn and act (``_fuse_sequential``: "Preserve the
+        original keys"). The passing neighbour is
+        ``TestFuseBatchNormEdgeCases::test_no_batchnorm_returns_copy``, whose
+        integer keys are kept."""
+        from collections import OrderedDict
+
+        model = nn.Sequential(OrderedDict(
+            fc=_dyadic_linear(nn.Linear(3, 4)),
+            bn=_dyadic_bn(nn.BatchNorm1d(4, eps=_EPS)),
+            act=nn.ReLU())).eval()
+        fused = fuse_batchnorm(model)
+        x = _dyadic_input().double()
+        with torch.no_grad():
+            assert torch.equal(copy.deepcopy(fused).double()(x),
+                               copy.deepcopy(model).double()(x))
+        assert [n for n, _ in fused.named_children()] == ["fc", "bn", "act"]
+
+
+class TestFusedLayerDtype:
+    """The fused layers keep float64 parameters and take and return the
+    network's dtype."""
+
+    def test_fused_layers_are_float64_and_return_the_networks_dtype(self):
+        """A float32 network: the fused layers hold float64 weights and
+        biases, a fused layer in the middle (followed by a float32 Linear) and
+        one at the end take float32 and the model returns float32; after
+        ``.double()`` it returns float64 and after ``.float()`` its fused
+        layers are float32 and it returns float32; a float64 network fuses to
+        a float64 model. Every forward agrees with the original's exactly on
+        dyadic data, and fusing the fused model again changes nothing. Catches
+        a fused layer whose output is not cast back (a float64 result, or a
+        dtype error in the next layer), an input not cast to the parameters'
+        dtype, and parameters stored in the network's dtype."""
+        def build():
+            return nn.Sequential(
+                _dyadic_linear(nn.Linear(3, 4)),
+                _dyadic_bn(nn.BatchNorm1d(4, eps=_EPS)), nn.ReLU(),
+                _dyadic_linear(nn.Linear(4, 2)),
+                _dyadic_bn(nn.BatchNorm1d(2, eps=_EPS))).eval()
+
+        model = build()
+        x = _dyadic_input()
+        with torch.no_grad():
+            expected = model(x)
+            fused = fuse_batchnorm(model)
+            assert fused[0].weight.dtype == torch.float64
+            assert fused[0].bias.dtype == torch.float64
+            assert fused[3].weight.dtype == torch.float64
+            out = fused(x)
+            assert out.dtype == torch.float32
+            assert torch.equal(out, expected)
+            assert fused[0](x).dtype == torch.float32
+            double = copy.deepcopy(fused).double()(x.double())
+            assert double.dtype == torch.float64
+            assert torch.equal(double, expected.double())
+            single = copy.deepcopy(fused).float()
+            assert single[0].weight.dtype == torch.float32
+            assert single(x).dtype == torch.float32
+            assert torch.equal(single(x), expected)
+            model64 = build().double()
+            fused64 = fuse_batchnorm(model64)
+            out64 = fused64(x.double())
+            assert out64.dtype == torch.float64
+            assert torch.equal(out64, model64(x.double()))
+            again = fuse_batchnorm(fused)
+            assert again(x).dtype == torch.float32
+            assert torch.equal(again(x), expected)
+
+
+    def test_fused_model_scripts_and_float_records_no_casts(self):
+        """The cast hooks are typed so that ``torch.jit.script`` accepts the
+        fused model, which then computes the original function exactly on
+        dyadic data; after ``.float()`` the hooks skip the cast, so a trace
+        records no ``aten::to`` (an ONNX export has no Cast nodes there).
+        Catches hooks without type annotations and a cast that is applied
+        even when the dtypes already match."""
+        model = nn.Sequential(
+            _dyadic_linear(nn.Linear(3, 4)),
+            _dyadic_bn(nn.BatchNorm1d(4, eps=_EPS)), nn.ReLU()).eval()
+        x = _dyadic_input()
+        with torch.no_grad():
+            expected = model(x)
+            fused = fuse_batchnorm(model)
+            assert torch.equal(torch.jit.script(fused)(x), expected)
+            traced = torch.jit.trace(fused.float(), x)
+        assert not [n for n in traced.graph.nodes() if n.kind() == "aten::to"]
+
+
+class TestStripFinalSoftmaxState:
+    """strip_final_softmax works on a copy and returns it in eval mode."""
+
+    def test_result_is_in_eval_mode_and_the_caller_keeps_its_mode(self):
+        """From a Sequential with a Dropout and a trailing softmax in training
+        mode, and from a traced GraphModule in training mode, every module of
+        the result is in eval mode (the docstring promises it), while the
+        caller's model stays in training mode with its softmax. Catches the
+        final eval() left out (the rebuilt Sequential comes back in training
+        mode) and a stripping that works on the caller's model."""
+        for model in (nn.Sequential(nn.Linear(4, 6), nn.Dropout(0.5),
+                                    nn.Linear(6, 3), nn.Softmax(dim=-1)),
+                      torch.fx.symbolic_trace(_SoftmaxNet())):
+            model.train()
+            stripped = strip_final_softmax(model)
+            training = [n or "<root>" for n, m in stripped.named_modules()
+                        if m.training]
+            assert not training, f"modules in training mode: {training}"
+            assert all(m.training for m in model.modules())
+            assert has_softmax(model)
+
+    @known_bug(12, "strip_final_softmax raises torch.fx's RuntimeError ('Tried "
+                   "to erase Node ... but it still had 1 users') when the "
+                   "trailing softmax node also feeds a node whose result is "
+                   "unused", raises=RuntimeError)
+    def test_trailing_softmax_with_a_second_user_is_stripped(self):
+        """A traced module whose trailing softmax output also feeds an unused
+        ``.sum()``: the output node reads the softmax, so it is a trailing
+        softmax and the stripped model must return exactly the logits, not
+        crash (a model returned with its softmax would be verified for
+        probabilities where logits are specified). The neighbour without the
+        second user is
+        ``TestStripFinalSoftmax::test_graph_module_removes_softmax``."""
+        class _Net(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fc = nn.Linear(4, 3)
+                self.sm = nn.Softmax(dim=-1)
+
+            def forward(self, x):
+                p = self.sm(self.fc(x))
+                _ = p.sum()
+                return p
+
+        net = _Net().eval()
+        gm = torch.fx.symbolic_trace(net)
+        x = torch.randn(5, 4)
+        with torch.no_grad():
+            got = strip_final_softmax(gm)(x)
+            assert torch.equal(got, net.fc(x))

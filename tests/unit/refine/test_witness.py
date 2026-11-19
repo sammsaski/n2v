@@ -327,3 +327,279 @@ def test_is_unsafe_defaults_to_zero_tolerance():
     s = LinearSpec(np.array([[1.0]]), np.array([0.0]))
     assert s.is_unsafe([0.0]) is True
     assert s.is_unsafe([1e-12]) is False
+
+
+# ---------------------------------------------------------------------------
+# Branching guidance read against the network itself
+# ---------------------------------------------------------------------------
+
+from fractions import Fraction  # noqa: E402
+
+from n2v.refine.types import Witness  # noqa: E402
+from n2v.refine.witness import (  # noqa: E402
+    make_witness,
+    preactivation,
+    violation_witness_wave,
+)
+from tests.known_bugs import known_bug  # noqa: E402
+
+_GW1 = [[1.0, 0.5], [-0.5, 1.0], [1.0, -1.0]]
+_GB1 = [0.25, -0.125, 2.0]
+_GW2 = [[1.0, -1.0, 0.5], [-0.75, 0.5, 0.25]]
+_GB2 = [-0.5, 0.375]
+_GW3 = [[1.0, -2.0]]
+# A predicate point of the output star: input prefix, then the fresh
+# variables of the three relaxed neurons of ReLU layer 0 and the two of layer 1.
+_GALPHA = [-1.0, 0.5, 0.0, 1.25, 0.5, 0.375, 1.5]
+
+
+def _guidance_net():
+    """2-3-2-1 ReLU net with dyadic weights and nonzero biases on the box
+    [-1, 1/2] x [-1/2, 1]: every neuron of both ReLU layers is relaxed (the
+    third one of layer 0 only by the outward pad of its range [0, 3])."""
+    net = nn.Sequential(nn.Linear(2, 3), nn.ReLU(), nn.Linear(3, 2), nn.ReLU(),
+                        nn.Linear(2, 1)).double()
+    with torch.no_grad():
+        for mod, W, b in ((net[0], _GW1, _GB1), (net[2], _GW2, _GB2),
+                          (net[4], _GW3, [0.0])):
+            mod.weight.copy_(torch.tensor(W, dtype=torch.float64))
+            mod.bias.copy_(torch.tensor(b, dtype=torch.float64))
+    S_in = Star.from_bounds(np.array([[-1.0], [-0.5]]), np.array([[0.5], [1.0]]))
+    S_out, meta = relaxed_reach(S_in, extract_layers(net))
+    if [(m.key.layer, m.key.neuron, m.pred_col) for m in meta] != \
+            [(0, 0, 2), (0, 1, 3), (0, 2, 4), (1, 0, 5), (1, 1, 6)]:
+        pytest.fail("instance builder: unexpected relaxed neurons")
+    return S_in, S_out, meta
+
+
+def _true_preactivations(S_in, alpha):
+    """Pre-activations from the network weights, in Fractions: layer 0 from
+    the input x = c + V alpha[:2], layer 1 from the relaxed outputs of layer 0,
+    which are the fresh variables alpha[2:5]."""
+    a = [Fraction(v) for v in alpha]
+    x = [Fraction(float(S_in.V[i, 0])) + sum(Fraction(float(S_in.V[i, 1 + j])) * a[j]
+                                             for j in range(2))
+         for i in range(2)]
+    pre0 = [sum(Fraction(w) * xi for w, xi in zip(row, x)) + Fraction(b)
+            for row, b in zip(_GW1, _GB1)]
+    pre1 = [sum(Fraction(w) * hi for w, hi in zip(row, a[2:5])) + Fraction(b)
+            for row, b in zip(_GW2, _GB2)]
+    return pre0 + pre1
+
+
+def test_preactivation_is_the_network_preactivation_at_the_witness():
+    """The pre-activation read of every relaxed neuron, on both ReLU layers,
+    equals the pre-activation the network computes from the witness: center
+    plus generators over the prefix of the neuron's own layer. Catches a read
+    that drops the center (bias and off-center box make it nonzero) and a read
+    over the wrong slice of alpha."""
+    S_in, _, meta = _guidance_net()
+    alpha = np.array(_GALPHA)
+    want = _true_preactivations(S_in, alpha)
+    got = [preactivation(nm, alpha) for nm in meta]
+    for k, (g, w) in enumerate(zip(got, want)):
+        assert abs(g - float(w)) <= 1e-12, f"neuron {k}: {g} != {float(w)}"
+
+
+def test_epsilon_vector_is_the_gap_above_the_relu_of_the_preactivation():
+    """eps_j = alpha_r - max(0, x_hat_j), with x_hat_j the network's
+    pre-activation at the witness: two of the five pre-activations are
+    negative (-7/16 and -3/2), so a formula that drops the max(0, .) inflates
+    them by |x_hat_j|."""
+    S_in, _, meta = _guidance_net()
+    alpha = np.array(_GALPHA)
+    pre = _true_preactivations(S_in, alpha)
+    if sum(1 for p in pre if p < 0) != 2:
+        pytest.fail("instance builder: two negative pre-activations expected")
+    want = [Fraction(alpha[nm.pred_col]) - max(Fraction(0), p)
+            for nm, p in zip(meta, pre)]
+    eps = epsilon_vector(alpha, meta)
+    assert eps.shape == (len(meta),)
+    for k, (e, w) in enumerate(zip(eps, want)):
+        assert abs(e - float(w)) <= 1e-12, f"neuron {k}: {e} != {float(w)}"
+
+
+def test_score_vector_weights_eps_by_the_magnitude_of_the_influence():
+    """score_j = eps_j * |h . V_out[:, p(j)]|: the output is y = W3 (fresh
+    variables of layer 1), so the influence of layer-1 neuron j is W3[:, j]
+    (1 and -2) and that of a layer-0 neuron is 0. With h = (1,) the second
+    influence is negative: a score without the absolute value is negative
+    there and the selector never splits that neuron."""
+    S_in, S_out, meta = _guidance_net()
+    alpha = np.array(_GALPHA)
+    pre = _true_preactivations(S_in, alpha)
+    eps_want = [Fraction(alpha[nm.pred_col]) - max(Fraction(0), p)
+                for nm, p in zip(meta, pre)]
+    influence = [0, 0, 0, 1, 2]
+    sc, eps = score_vector(alpha, meta, S_out, np.array([1.0]))
+    for k in range(len(meta)):
+        assert abs(eps[k] - float(eps_want[k])) <= 1e-12
+        assert abs(sc[k] - float(eps_want[k] * influence[k])) <= 1e-12, \
+            f"neuron {k}: score {sc[k]}"
+    assert sc[4] > 0
+
+
+def test_make_witness_records_the_solution_and_its_binding_row():
+    """``make_witness`` wraps ``(alpha, t)`` with the given mode and the
+    binding row, the spec row with the largest margin at alpha (here row 2 of
+    three: margins -1, 1/4 and 3/4 at y = (1/2, -1/4))."""
+    S = Star(np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]), np.zeros((0, 2)),
+             np.zeros((0, 1)), np.array([-1.0, -1.0]), np.array([1.0, 1.0]))
+    spec = LinearSpec(G=np.array([[1.0, 0.0], [0.0, -1.0], [1.0, -1.0]]),
+                      g=np.array([1.5, 0.0, 0.0]))
+    alpha = np.array([0.5, -0.25])
+    w = make_witness(S, spec, alpha, -0.125, "box")
+    assert isinstance(w, Witness)
+    assert np.array_equal(w.alpha, alpha) and w.t == -0.125 and w.mode == "box"
+    assert w.binding_row == 2
+
+
+def test_binding_row_of_a_point_star_reads_its_center():
+    """A point star (no predicate variable): the binding row is the largest
+    margin at its center (row 1: margins -1/4 and 1/2)."""
+    P = Star(np.array([[0.75], [-1.25]]), np.zeros((0, 0)), np.zeros((0, 1)))
+    spec = LinearSpec(G=np.array([[1.0, 0.0], [0.0, -1.0]]),
+                      g=np.array([1.0, 0.75]))
+    assert binding_row(P, spec, np.zeros(0)) == 1
+
+
+@pytest.mark.parametrize("g,want", [((1.0, 0.75), 0.5), ((1.0, 2.0), -0.25)],
+                         ids=["one row violated", "inside"])
+def test_violation_lp_of_a_point_star_is_its_worst_row_margin(g, want):
+    """A point star is decided by its worst row margin: the point (3/4, -5/4)
+    satisfies y0 <= 1 (margin -1/4) and violates -y1 <= 3/4 by 1/2, so t =
+    1/2 > 0 (it does not reach the region); with -y1 <= 2 it is inside, with
+    margins -1/4 and -3/4, and t = -1/4. The smallest margin would read the
+    first point as reaching the region and misstate the depth of the second."""
+    P = Star(np.array([[0.75], [-1.25]]), np.zeros((0, 0)), np.zeros((0, 1)))
+    spec = LinearSpec(G=np.array([[1.0, 0.0], [0.0, -1.0]]), g=np.array(g))
+    alpha, t = violation_lp(P, spec, include_Cd=True)
+    assert alpha.shape == (0,)
+    assert t == want
+
+
+def test_violation_lp_hands_the_solver_choice_to_the_solver(monkeypatch):
+    """The ``lp_solver`` argument reaches ``solve_lp`` (a spy around the real
+    solver), and the answer with it is still the exact optimum (-1)."""
+    import n2v.refine.witness as wmod
+
+    seen = []
+    real = wmod.solve_lp
+
+    def spy(**kw):
+        seen.append(kw.get("lp_solver"))
+        return real(**kw)
+
+    monkeypatch.setattr(wmod, "solve_lp", spy)
+    S = Star(np.array([[0.0, 1.0]]), np.zeros((0, 1)), np.zeros((0, 1)),
+             np.array([[-1.0]]), np.array([[1.0]]))
+    spec = LinearSpec(G=np.array([[1.0]]), g=np.array([0.0]))
+    for solver in ("linprog", "highs"):
+        _, t = violation_lp(S, spec, include_Cd=True, lp_solver=solver)
+        assert t == pytest.approx(-1.0, abs=1e-9)
+    assert seen == ["linprog", "highs"]
+
+
+# ---------------------------------------------------------------------------
+# The wave witness (population solve on CPU torch)
+# ---------------------------------------------------------------------------
+
+def _wave_stars():
+    """Two stars of different shapes (2 and 3 predicate variables, 1 and 2
+    rows) and two point stars, in an order where each kind follows another."""
+    SA = Star(np.array([[0.25, 1.0, 0.5], [-0.5, -0.25, 1.0]]),
+              np.array([[1.0, 1.0]]), np.array([[0.5]]),
+              np.array([[-1.0], [-0.5]]), np.array([[0.5], [1.0]]))
+    SB = Star(np.array([[0.5, 1.0, -0.5, 0.25], [0.25, 0.5, 1.0, -1.0]]),
+              np.array([[1.0, 1.0, 1.0], [-1.0, 0.0, 0.5]]),
+              np.array([[1.0], [0.75]]),
+              np.array([[-1.0], [-2.0], [0.0]]), np.array([[1.0], [0.5], [3.0]]))
+    P1 = Star(np.array([[0.75], [-1.25]]), np.zeros((0, 0)), np.zeros((0, 1)))
+    P2 = Star(np.array([[-0.5], [0.25]]), np.zeros((0, 0)), np.zeros((0, 1)))
+    return [P1, SA, SB, P2]
+
+
+# unsafe: y0 >= 1/4 and y1 <= 1/8
+_WAVE_SPEC = LinearSpec(G=np.array([[-1.0, 0.0], [0.0, 1.0]]),
+                        g=np.array([-0.25, 0.125]))
+
+
+def test_witness_wave_t_is_the_worst_margin_at_each_stars_own_alpha():
+    """For every star of a mixed wave, the returned t is the largest row
+    margin at the returned alpha (computed again in Fractions), alpha has the
+    star's own number of predicate variables, and a point star gets its own
+    worst margin through the exact fallback. Catches the smallest margin in
+    place of the largest and results written to the wrong position."""
+    stars = _wave_stars()
+    res = violation_witness_wave(stars, _WAVE_SPEC, device="cpu")
+    assert len(res) == len(stars)
+    G = [[Fraction(v) for v in row] for row in _WAVE_SPEC.G]
+    g = [Fraction(v) for v in _WAVE_SPEC.g]
+    for k, (S, r) in enumerate(zip(stars, res)):
+        alpha, t = r
+        assert np.asarray(alpha).shape == (S.nVar,), f"star {k}"
+        a = [Fraction(float(v)) for v in alpha]
+        y = [Fraction(float(S.V[i, 0])) + sum(Fraction(float(S.V[i, 1 + j])) * a[j]
+                                              for j in range(S.nVar))
+             for i in range(S.dim)]
+        want = max(sum(gi * yi for gi, yi in zip(row, y)) - gr
+                   for row, gr in zip(G, g))
+        assert abs(t - float(want)) <= 1e-12, f"star {k}: t {t} != {float(want)}"
+
+
+def test_witness_wave_alpha_of_a_float32_exact_box_lies_in_the_box():
+    """Neighbour of the marked case below: with box bounds that float32 holds
+    exactly, the population iterate stays in the predicate box."""
+    S = Star(np.array([[0.0, 1.0]]), np.zeros((0, 1)), np.zeros((0, 1)),
+             np.array([[-0.375]]), np.array([[0.125]]))
+    spec = LinearSpec(G=np.array([[-1.0]]), g=np.array([-1.0]))     # y >= 1
+    (alpha, t), = violation_witness_wave([S], spec, device="cpu")
+    assert -0.375 <= alpha[0] <= 0.125
+
+
+@known_bug(19, "violation_witness_wave returns the float32 population iterate "
+           "as alpha, so a predicate box bound that float32 does not hold "
+           "exactly (0.1) is overshot by the float32 rounding although the "
+           "docstring promises a box-feasible alpha; the counterexample check "
+           "then rejects that candidate")
+def test_witness_wave_alpha_lies_in_the_float64_predicate_box():
+    """y = alpha over [-0.3, 0.1], unsafe y >= 1: the minimizer of the worst
+    margin is the upper bound 0.1; the returned alpha must lie in the float64
+    box, as the docstring promises ("box-feasible by construction")."""
+    S = Star(np.array([[0.0, 1.0]]), np.zeros((0, 1)), np.zeros((0, 1)),
+             np.array([[-0.3]]), np.array([[0.1]]))
+    spec = LinearSpec(G=np.array([[-1.0]]), g=np.array([-1.0]))
+    (alpha, t), = violation_witness_wave([S], spec, device="cpu")
+    assert -0.3 <= alpha[0] <= 0.1, f"alpha {alpha[0]!r} outside [-0.3, 0.1]"
+
+
+_ROWS_ONLY = (np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+              np.array([[1., 0.], [-1., 0.], [0., 1.], [0., -1.]]),
+              np.ones((4, 1)))
+
+
+@known_bug(19, "violation_witness_wave promises to fall back to the exact LP "
+           "for a star without a predicate box, but violation_lp reads the box "
+           "to build its bound on t and fails on None", raises=AttributeError)
+def test_witness_wave_falls_back_for_a_star_without_a_box():
+    """A star bounded by its rows alone ([-1, 1]**2, no predicate box), unsafe
+    y0 <= 0: the exact fallback's optimum is t = -1."""
+    S = Star(*_ROWS_ONLY)
+    spec = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([0.0]))
+    (alpha, t), = violation_witness_wave([S], spec, device="cpu")
+    assert t == pytest.approx(-1.0, abs=1e-9)
+
+
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
+@known_bug(19, "violation_witness_wave sends a star with an infinite predicate "
+           "box to the population solve instead of the exact fallback its "
+           "docstring promises, and returns a NaN witness")
+def test_witness_wave_falls_back_for_a_star_with_an_infinite_box():
+    """The same star with an infinite predicate box: a finite witness of the
+    polytope with t = -1, not NaN."""
+    V, C, d = _ROWS_ONLY
+    S = Star(V, C, d, np.full((2, 1), -np.inf), np.full((2, 1), np.inf))
+    spec = LinearSpec(G=np.array([[1.0, 0.0]]), g=np.array([0.0]))
+    (alpha, t), = violation_witness_wave([S], spec, device="cpu")
+    assert np.all(np.isfinite(alpha)) and np.all(np.abs(alpha) <= 1.0 + 1e-9)
+    assert t == pytest.approx(-1.0, abs=1e-9)

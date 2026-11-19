@@ -2,7 +2,7 @@
 
 _Internal reference. Backs the "sound reach" claims in the benchmark
 support doc (`examples/Submission/VNN_COMP2026/BENCHMARK_SUPPORT.md`).
-Tests: `tests/soundness/test_layer_soundness_matrix.py`._
+Tests: one file per operation, `tests/soundness/test_soundness_<operation>.py`; known gaps and refusals are in `tests/contracts/test_reach_coverage.py`. In the table below, "matrix" stands for the former single matrix file, which these files replaced._
 
 Inventory: **55 distinct ONNX op types across 605 unique models** in the
 2026 benchmark corpus.

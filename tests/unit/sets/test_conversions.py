@@ -205,9 +205,10 @@ class TestToStarConversion:
         # Check that Star is valid
         pytest.assert_star_valid(star)
 
-        # Check that predicate bounds are [-1, 1]
-        np.testing.assert_array_equal(star.predicate_lb, np.full((hexatope.nVar, 1), -1.0))
-        np.testing.assert_array_equal(star.predicate_ub, np.full((hexatope.nVar, 1), 1.0))
+        # This test used to assert that every predicate variable, the anchor
+        # included, ranges over [-1, 1]. The anchor is the constant 0, and
+        # leaving it free lets a cut escape: see tests/contracts/
+        # test_set_protocol.py::test_to_star_after_a_cut_is_the_same_set.
 
     def test_octatope_to_star_basic(self):
         """Test basic Octatope to Star conversion."""
@@ -312,13 +313,10 @@ class TestToStarConversion:
 
         star = hexatope.to_star()
 
-        # V1 soundness: Anchor variable provides implicit bounds through DCS
-        # The star should have exactly the DCS constraints (no additional explicit box constraints)
-        n_dcs_constraints = len(hexatope.dcs.constraints)
-
-        assert star.C.shape[0] == n_dcs_constraints
-
-        # Verify the bounds are correct (most important check)
+        # This test used to assert that the star has exactly the DCS rows.
+        # Fixing the anchor at 0 may add rows or change bounds, so the row
+        # count is not part of the contract; the set is: see tests/contracts/
+        # test_set_protocol.py::test_to_star_after_a_cut_is_the_same_set.
         hex_lb, hex_ub = hexatope.get_bounds(solver='lp')
         star_lb, star_ub = star.get_ranges()
         np.testing.assert_allclose(star_lb, hex_lb, atol=1e-5)

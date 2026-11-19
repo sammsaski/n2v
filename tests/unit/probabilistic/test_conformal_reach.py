@@ -2,11 +2,18 @@
 Unit tests for the ``conformal_reach`` API (renamed from the legacy ``verify``).
 """
 
+import logging
+
 import pytest
 import numpy as np
+import torch
+import torch.nn as nn
 
-from n2v.probabilistic import conformal_reach, ProbabilisticBox
+from n2v.probabilistic import (
+    ConformalReachConfig, conformal_reach, ProbabilisticBox,
+)
 from n2v.sets import Box
+from tests.known_bugs import known_bug
 
 
 class TestConformalReachBasic:
@@ -667,3 +674,306 @@ class TestPCABoundsCorrectness:
             y = pca.inverse_transform(x.reshape(1, -1)).flatten()
             assert np.all(y >= lb - 1e-10), f"lb violation: {y} < {lb}"
             assert np.all(y <= ub + 1e-10), f"ub violation: {y} > {ub}"
+
+
+# --------------------------------------------------------------------------- #
+# Options, defaults, seeding and model kinds, each checked on the draws the   #
+# model itself records                                                         #
+# --------------------------------------------------------------------------- #
+class _Recorder:
+    """A numpy model that keeps every input batch and output batch, and fails
+    the test as soon as it is asked for more rows than ``budget`` (so a run
+    that ignores the requested sizes fails at once instead of running the
+    default 8000 calibration draws)."""
+
+    def __init__(self, fn, budget):
+        self.fn, self.budget = fn, budget
+        self.inputs, self.outputs = [], []
+
+    def __call__(self, x):
+        done = sum(len(b) for b in self.inputs)
+        if done + len(x) > self.budget:
+            pytest.fail(f"the model was asked for {done + len(x)} rows, more "
+                        f"than the {self.budget} the requested sizes need")
+        y = self.fn(np.asarray(x, dtype=np.float64))
+        self.inputs.append(np.array(x, copy=True))
+        self.outputs.append(np.array(y, copy=True))
+        return y
+
+    def rows(self):
+        return np.vstack(self.inputs), np.vstack(self.outputs)
+
+
+def _held(result, points, pad):
+    """Rows of ``points`` inside the box widened by ``pad``, and inside the box
+    narrowed by ``pad``."""
+    lb, ub = result.lb.ravel(), result.ub.ravel()
+    inside = lambda lo, hi: int(np.sum(np.all((points >= lo) & (points <= hi),
+                                              axis=1)))
+    return inside(lb - pad, ub + pad), inside(lb + pad, ub - pad)
+
+
+def _affine(x):
+    """3 inputs -> 2 outputs with different scales and signs."""
+    return x @ np.array([[1.5, -0.5], [-0.75, 2.0], [2.0, 1.25]]) + np.array(
+        [4.0, -6.0])
+
+
+_BOX3 = Box(np.array([-3.0, 0.5, -1.5]), np.array([1.0, 4.0, -0.25]))
+
+
+def _naive_box_check(result, model, t, m, ell):
+    """With the naive surrogate the box holds exactly ell of the m calibration
+    outputs (the last m model rows) up to a float64 pad, whatever tau is."""
+    x, y = model.rows()
+    assert len(x) == t + m, f"{len(x)} model rows, expected {t} + {m}"
+    pad = 1e-12 * (1.0 + np.max(np.abs(y)))
+    loose, strict = _held(result, y[t:], pad)
+    assert loose >= ell and strict <= ell, (
+        f"the naive box holds {loose} (well inside: {strict}) of {m} "
+        f"calibration outputs, expected exactly ell = {ell}")
+
+
+class TestConformalReachOptionsReachTheRun:
+    """Each option of ConformalReachConfig changes what the run does."""
+
+    def test_keyword_options_reach_the_run(self):
+        """The keyword style (config=None) must build the config from the
+        keywords: m = 30 calibration and 10 training draws, rank 27, epsilon
+        0.125, naive surrogate. The box holds exactly 27 of the 30 calibration
+        outputs and states (30, 27, 0.125). Catches keywords that are dropped
+        for an all-default config (the model fails the test at its first
+        batch of 100 rows instead of running 8000 calibration draws)."""
+        model = _Recorder(_affine, 40)
+        result = conformal_reach(model, _BOX3, m=30, ell=27, epsilon=0.125,
+                                 surrogate="naive", training_samples=10,
+                                 seed=4)
+        assert (result.m, result.ell, result.epsilon) == (30, 27, 0.125)
+        _naive_box_check(result, model, 10, 30, 27)
+
+    def test_default_rank_and_training_size(self):
+        """Left at their defaults, ell is m - 1 and the number of training
+        draws is m // 2: with m = 41 the model is asked for 20 + 41 rows, and
+        the naive box holds exactly 40 calibration outputs. An odd m
+        separates m // 2 from rounding up. Catches a default rank of m and a
+        default training size of m."""
+        model = _Recorder(_affine, 61)
+        result = conformal_reach(model, _BOX3, m=41, epsilon=0.25,
+                                 surrogate="naive", seed=4)
+        assert result.ell == 40
+        _naive_box_check(result, model, 20, 41, 40)
+
+    @pytest.mark.parametrize("route", ["keywords", "config"])
+    def test_explicit_training_size_is_used(self, route):
+        """training_samples = 7 with m = 30: the model is asked for exactly
+        7 + 30 rows, through keywords and through config=. Catches a run that
+        takes m // 2 (15) training draws whatever was asked."""
+        options = dict(m=30, ell=29, epsilon=0.25, surrogate="naive",
+                       training_samples=7, seed=4)
+        model = _Recorder(_affine, 37)
+        if route == "config":
+            result = conformal_reach(model, _BOX3, ConformalReachConfig(**options))
+        else:
+            result = conformal_reach(model, _BOX3, **options)
+        _naive_box_check(result, model, 7, 30, 29)
+
+    def test_seed_zero_fixes_the_draws(self):
+        """seed = 0 is a seed: two runs with seed 0 draw the same inputs and
+        return the same box, whatever the global generator held before.
+        Catches a seed tested for truth instead of against None, which
+        ignores seed 0."""
+        boxes, draws = [], []
+        for before in (1, 2):
+            np.random.seed(before)
+            model = _Recorder(_affine, 30)
+            boxes.append(conformal_reach(model, _BOX3, m=20, surrogate="naive",
+                                         seed=0))
+            draws.append(model.rows()[0])
+        assert np.array_equal(draws[0], draws[1])
+        assert np.array_equal(boxes[0].lb, boxes[1].lb)
+        assert np.array_equal(boxes[0].ub, boxes[1].ub)
+
+    def test_seed_none_leaves_the_draws_to_the_caller(self):
+        """seed = None leaves the seeding to the caller: the draws follow the
+        global generator, so the same outside seed gives the same draws and
+        another one other draws. Catches a run that reseeds itself when no
+        seed is given (from the clock, or with a fixed seed)."""
+        draws = []
+        for before in (5, 5, 6):
+            np.random.seed(before)
+            model = _Recorder(_affine, 30)
+            conformal_reach(model, _BOX3, m=20, surrogate="naive")
+            draws.append(model.rows()[0])
+        assert np.array_equal(draws[0], draws[1])
+        assert not np.array_equal(draws[0], draws[2])
+
+    def test_config_and_keyword_options_together_are_refused(self):
+        """config= and keyword options are two styles of one call; both at
+        once is refused with TypeError instead of silently dropping one."""
+        with pytest.raises(TypeError, match="not both"):
+            conformal_reach(_affine, _BOX3, ConformalReachConfig(m=20), m=30)
+
+    @pytest.mark.parametrize("options, field", [
+        (dict(m=20, batch_size=0), "batch_size"),
+        (dict(m=20, pca_components=0), "pca_components"),
+        (dict(m=20, training_samples=0), "training_samples"),
+        (dict(m=1), "ell"),
+    ], ids=["batch_size-0", "pca_components-0", "training_samples-0",
+            "m-1-default-rank-0"])
+    def test_sizes_below_one_are_refused(self, options, field):
+        """batch_size, pca_components and training_samples below 1 are
+        refused with ValueError naming the field, before any model call; with
+        m = 1 the default rank m - 1 = 0 is refused the same way. Catches a
+        check that lets 0 through (a zero batch size, a PCA with no component,
+        an empty training set)."""
+        with pytest.raises(ValueError, match=f"ConformalReachConfig.{field}"):
+            conformal_reach(_Recorder(_affine, 0), _BOX3, surrogate="naive",
+                            **options)
+
+    def test_verbose_run_logs_and_keeps_its_answer(self, caplog):
+        """verbose=True logs the steps (the calibration size among them) and
+        returns a box that keeps the rank property, through the clipping block
+        and PCA (whose verbose paths differ). Catches a logging path that
+        breaks or changes the run, and a run that skips the requested PCA
+        (pca_components = 2 below the 4 outputs must reduce 4 -> 2; with the
+        naive surrogate or one-sided box checks a skipped PCA is invisible,
+        since both runs return a box that holds the calibration outputs)."""
+        four = lambda x: np.hstack([_affine(x), np.sin(_affine(x))])
+        model = _Recorder(four, 40)
+        with caplog.at_level(logging.INFO,
+                             logger="n2v.probabilistic.conformal_reach"):
+            result = conformal_reach(model, _BOX3, m=30, ell=28, epsilon=0.25,
+                                     surrogate="clipping_block",
+                                     training_samples=10, pca_components=2,
+                                     seed=4, verbose=True)
+        assert any("Calibration size m: 30" in r.getMessage()
+                   for r in caplog.records)
+        assert any("Reducing dimension 4 -> 2" in r.getMessage()
+                   for r in caplog.records), "the requested PCA did not run"
+        _, y = model.rows()
+        loose, _ = _held(result, y[10:], 1e-6 * (1.0 + np.max(np.abs(y))))
+        assert loose >= 28
+
+
+class _RecordingModule(nn.Module):
+    """y = W x + b, optionally without parameters (W, b as buffers or plain
+    tensors); keeps every input and output batch."""
+
+    def __init__(self, kind, dtype=torch.float32):
+        super().__init__()
+        W = torch.tensor([[1.5, -0.75, 2.0], [-0.5, 2.0, 1.25]], dtype=dtype)
+        b = torch.tensor([4.0, -6.0], dtype=dtype)
+        if kind == "parameters":
+            self.lin = nn.Linear(3, 2).to(dtype)
+            with torch.no_grad():
+                self.lin.weight.copy_(W)
+                self.lin.bias.copy_(b)
+        elif kind == "buffers":
+            self.register_buffer("W", W)
+            self.register_buffer("b", b)
+        else:
+            self.W_plain, self.b_plain = W, b
+        self.kind = kind
+        self.inputs, self.outputs = [], []
+
+    def forward(self, x):
+        if self.kind == "parameters":
+            y = self.lin(x)
+        elif self.kind == "buffers":
+            y = x @ self.W.T + self.b
+        else:
+            y = x @ self.W_plain.T + self.b_plain
+        self.inputs.append(x.detach().clone())
+        self.outputs.append(y.detach().clone())
+        return y
+
+
+class TestModuleModels:
+    """An nn.Module is wrapped into a numpy callable and evaluated."""
+
+    @pytest.mark.parametrize("kind", ["parameters", "buffers", "neither"])
+    def test_module_is_evaluated_on_the_draws(self, kind):
+        """A module with parameters, one with buffers only and one with
+        neither are all evaluated (on the CPU) on float32 draws of the box,
+        and the naive box holds exactly ell of the m calibration outputs the
+        module returned. Catches a wrapper that needs a parameter to find the
+        device (a module without parameters then fails) or that passes the
+        draws in another dtype or layout."""
+        module = _RecordingModule(kind)
+        result = conformal_reach(module, _BOX3, m=30, ell=28, epsilon=0.25,
+                                 surrogate="naive", training_samples=10,
+                                 seed=4)
+        x = torch.cat(module.inputs).numpy()
+        y = torch.cat(module.outputs).numpy().astype(np.float64)
+        assert x.dtype == np.float32 and x.shape == (40, 3)
+        pad = 1e-12 * (1.0 + np.max(np.abs(y)))
+        loose, strict = _held(result, y[10:], pad)
+        assert loose >= 28 and strict <= 28
+
+    @known_bug(13, "conformal_reach casts the draws to float32 for every "
+                   "nn.Module, so a float64 module fails with a dtype "
+                   "mismatch instead of being evaluated", raises=RuntimeError)
+    def test_float64_module_is_evaluated(self):
+        """A float64 module is a legal model (every lane answers for the
+        network with its stored weights); its conformal box holds exactly ell
+        of the m calibration outputs like any other. Today the wrapper hands
+        it float32 draws and torch raises RuntimeError (mat1 and mat2 must
+        have the same dtype)."""
+        module = _RecordingModule("parameters", dtype=torch.float64)
+        result = conformal_reach(module, _BOX3, m=30, ell=28, epsilon=0.25,
+                                 surrogate="naive", training_samples=10,
+                                 seed=4)
+        y = torch.cat(module.outputs).numpy()
+        pad = 1e-12 * (1.0 + np.max(np.abs(y)))
+        loose, strict = _held(result, y[10:], pad)
+        assert loose >= 28 and strict <= 28
+
+
+class TestBatchedInferenceShapes:
+    """Model calls in batches, and outputs that are not one row per sample."""
+
+    def test_partial_batches_and_outputs_with_more_axes(self):
+        """batch_size = 7 with 10 training and 30 calibration draws: the model
+        sees batches of 7 and a last partial batch (7, 3, then 7, 7, 7, 7, 2),
+        and its (batch, 2, 3) outputs are flattened per sample in row-major
+        order, so box coordinate 3 i + j is output entry (i, j). Each entry
+        has its own offset and scale, so a column-major flattening or a lost
+        partial batch moves the box away from the calibration outputs: the
+        naive box must hold exactly 28 of the 30 flattened in C order."""
+        offsets = np.arange(6.0).reshape(2, 3) * 10.0 - 20.0
+        scales = np.array([[1.0, -2.0, 0.5], [3.0, -0.25, 1.5]])
+
+        def tensor_model(x):
+            return x[:, :1, None] * scales[None] + x[:, 1:2, None] + offsets[None]
+
+        model = _Recorder(tensor_model, 40)
+        result = conformal_reach(model, _BOX3, m=30, ell=28, epsilon=0.25,
+                                 surrogate="naive", training_samples=10,
+                                 batch_size=7, seed=4)
+        assert [len(b) for b in model.inputs] == [7, 3, 7, 7, 7, 7, 2]
+        y = np.vstack([o.reshape(len(o), -1) for o in model.outputs])
+        assert result.dim == 6
+        pad = 1e-12 * (1.0 + np.max(np.abs(y)))
+        loose, strict = _held(result, y[10:], pad)
+        assert loose >= 28 and strict <= 28
+
+    @known_bug(13, "a model that returns one value per sample as a 1-D array "
+                   "is stacked into one row per batch, so conformal_reach "
+                   "fails with a numpy broadcast ValueError instead of "
+                   "returning a one-output box", raises=ValueError)
+    def test_one_value_per_sample_as_a_flat_array(self):
+        """A scalar model may return shape (batch,) (``x @ w``). The docstring
+        of the batching helper promises outputs flattened to one row per
+        sample; the box has one coordinate and, with the naive surrogate,
+        holds exactly ell of the m calibration outputs. Today the batches are
+        stacked as rows, the training outputs become one row of 10 values,
+        and the run fails with a broadcast ValueError."""
+        model = _Recorder(lambda x: x @ np.array([1.5, -0.75, 2.0]), 40)
+        result = conformal_reach(model, _BOX3, m=30, ell=28, epsilon=0.25,
+                                 surrogate="naive", training_samples=10,
+                                 seed=4)
+        y = np.concatenate(model.outputs)[:, None]
+        assert result.dim == 1
+        pad = 1e-12 * (1.0 + np.max(np.abs(y)))
+        loose, strict = _held(result, y[10:], pad)
+        assert loose >= 28 and strict <= 28

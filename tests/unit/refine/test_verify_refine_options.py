@@ -182,10 +182,12 @@ def test_removed_bound_modes_rejected():
 
 
 def test_frontier_width_must_be_positive():
+    # The time budget only turns a check that lets 0 through into a returned
+    # answer (an empty wave pops nothing, forever) instead of a hang.
     net = seq_net(2, 5, 5, 2, seed=0)
     _, _, S_in = _box()
     with pytest.raises(ValueError, match="frontier_width"):
-        verify_refine(S_in, net, spec_everything,
+        verify_refine(S_in, net, spec_everything, time_budget=5.0,
                       **{**CPU_CONFIG, "frontier_width": 0})
 
 
@@ -604,3 +606,523 @@ def test_contract_inputs_on_cpu_torch_matches_oracle(seed, arm, modes,
     assert res.status == truth, \
         f"seed={seed} {arm} {modes}: {res.status} != {truth}"
     _assert_honest_ce(res, net, spec, lb, ub)
+
+
+# --------------------------------------------------------------------------- #
+# Option resolution, refusals and plumbing                                     #
+# --------------------------------------------------------------------------- #
+_KNOBS = ("bound_mode", "prune_mode", "witness_mode", "frontier_width")
+_EXPLICIT = ("lp_cpu", "exact", "dual_gpu", 5)
+
+
+def test_every_explicit_knob_wins_on_either_host():
+    """Each knob given explicitly is kept, alone or with the others, on a CUDA
+    host and on a CPU host; each knob left as None takes that host's value
+    (GPU: dual_gpu, dual_gpu, dual_gpu, 32; CPU: box, exact, exact, 1).
+    The explicit values differ from both hosts' defaults where they can.
+
+    Catches a knob whose explicit value is ignored on one host (the option
+    silently runs the other engine) and a default read from the wrong host."""
+    for cuda in (True, False):
+        host = (("dual_gpu", "dual_gpu", "dual_gpu", 32) if cuda
+                else ("box", "exact", "exact", 1))
+        assert _resolve_defaults(*_EXPLICIT, cuda=cuda) == _EXPLICIT, cuda
+        for k in range(4):
+            args = [None] * 4
+            args[k] = _EXPLICIT[k]
+            expected = tuple(_EXPLICIT[j] if j == k else host[j]
+                             for j in range(4))
+            assert _resolve_defaults(*args, cuda=cuda) == expected, \
+                (cuda, _KNOBS[k])
+
+
+@pytest.mark.parametrize("knob,value", [
+    ("bound_mode", "Box"), ("prune_mode", "Exact"), ("prune_mode", "DUAL_GPU"),
+    ("witness_mode", "Exact")])
+def test_mode_strings_are_matched_exactly(knob, value):
+    """A mode string that differs from an accepted one only in case is
+    rejected, for each of the three mode checks: the comparison sites inside
+    the search match exactly, so a value accepted by a looser check would run
+    a configuration nobody named (an 'Exact' prune or witness is read as
+    approximate by the exact-leaf backstop). The model has no ReLU, so the
+    reach never reads ``bound_mode`` and the entry check is the only place
+    that can refuse it (a model with a ReLU would also be refused later by
+    the reach with the same type).
+
+    Catches a validation that lower-cases the string while the search does
+    not."""
+    net = nn.Sequential(nn.Linear(2, 2)).double()
+    _, _, S_in = _box()
+    with pytest.raises(ValueError, match=knob):
+        verify_refine(S_in, net, spec_everything, **{**CPU_CONFIG, knob: value})
+
+
+@pytest.mark.parametrize("width", [2.0, -1])
+def test_frontier_width_must_be_a_positive_int(width):
+    """``frontier_width`` is an int >= 1: a float or a negative value is
+    refused with ``ValueError`` rather than slicing the worklist with it (the
+    refusal assertion of the option; a check that let them through would
+    crash with a TypeError on 2.0 and pop nothing on -1; the time budget
+    turns that endless loop into a returned answer, so the case fails
+    instead of hanging)."""
+    net = seq_net(2, 5, 5, 2, seed=0)
+    _, _, S_in = _box()
+    with pytest.raises(ValueError, match="frontier_width"):
+        verify_refine(S_in, net, spec_everything, time_budget=5.0,
+                      **{**CPU_CONFIG, "frontier_width": width})
+
+
+@pytest.mark.parametrize("specs", [
+    pytest.param([], id="empty-list"),
+    pytest.param([spec_everything, (np.eye(2), np.zeros(2))],
+                 id="non-linearspec-member")])
+def test_malformed_spec_lists_are_refused(specs):
+    """An empty disjunction, or one with a member that is not a
+    ``LinearSpec``, is refused at entry with ``TypeError`` (the library's
+    deliberate type here, with a message that names the expected form).
+
+    Catches an empty disjunction read as 'no unsafe region' (a vacuous UNSAT)
+    and a malformed member that crashes later inside the search."""
+    net = seq_net(2, 5, 5, 2, seed=0)
+    _, _, S_in = _box()
+    with pytest.raises(TypeError, match="LinearSpec"):
+        verify_refine(S_in, net, specs, **CPU_CONFIG)
+
+
+def test_a_tuple_of_disjuncts_is_a_disjunction():
+    """A tuple of ``LinearSpec`` is a disjunction like a list: here the first
+    disjunct is never reached and the second is reached everywhere, so the
+    answer is SAT with a witness in the second disjunct.
+
+    Catches a sequence other than a list read as one spec, or only its first
+    member read."""
+    net, lb, ub, S_in, spec, _ = _tau_instance(0, "below")
+    res = verify_refine(S_in, net, (spec, spec_everything), FaithfulSelector(),
+                        **CPU_CONFIG)
+    assert res.status is Status.SAT
+    _assert_honest_ce(res, net, spec_everything, lb, ub)
+
+
+def test_unknown_lp_solver_raises_before_the_input_box_is_finitized():
+    """An unknown solver name raises ``ValueError`` at entry, also for an
+    input star whose predicate box is infinite (documented: the check comes
+    before the finitizer, which turns every ``ValueError`` into UNKNOWN).
+
+    Catches a solver name resolved only inside the finitizer or the search
+    (the caller's typo then reads as an UNKNOWN verdict)."""
+    net = seq_net(2, 5, 5, 2, seed=0)
+    V = np.hstack([np.zeros((2, 1)), np.eye(2)])
+    C = np.array([[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]])
+    S = Star(V, C, np.ones((4, 1)), np.full((2, 1), -np.inf),
+             np.full((2, 1), np.inf))
+    with pytest.raises(ValueError):
+        verify_refine(S, net, spec_everything, lp_solver="no_such_solver",
+                      **CPU_CONFIG)
+
+
+@pytest.mark.parametrize("driver", _DRIVERS)
+def test_a_float32_buffer_is_rejected(driver):
+    """Float64 parameters with a float32 floating-point buffer (BatchNorm
+    running statistics) are refused with ``TypeError`` like a float32
+    parameter; the integer buffer ``num_batches_tracked`` alone is not a
+    reason to refuse (the same model with float64 buffers is accepted).
+
+    Catches a dtype check that reads parameters only, or that refuses every
+    BatchNorm model for its integer buffer."""
+    def model():
+        m = nn.Sequential(nn.Linear(2, 4), nn.Unflatten(1, (1, 2, 2)),
+                          nn.BatchNorm2d(1), nn.Flatten(), nn.ReLU(),
+                          nn.Linear(4, 1)).double()
+        m.eval()
+        return m
+
+    _, _, S_in = _box()
+    spec = LinearSpec([[1.0]], [1e9])
+    ok = model()
+    res = _run_driver(driver, S_in, ok, spec, layers=extract_layers(ok)) \
+        if driver == "verify_refine" else None
+    if res is not None:
+        assert res.status is Status.SAT
+    bad = model()
+    bad[2].running_mean = bad[2].running_mean.float()
+    with pytest.raises(TypeError, match="float64"):
+        _run_driver(driver, S_in, bad, spec)
+
+
+def test_the_base_selector_refuses():
+    """``Selector`` is abstract: its ``choose`` raises ``NotImplementedError``,
+    directly and when ``verify_refine`` must split with it (the near instance
+    is neither pruned nor a counterexample at the root).
+
+    Catches a base ``choose`` that returns None, which the search reads as
+    'nothing to split' and turns into a silent UNKNOWN."""
+    from n2v.refine import Selector
+
+    net, _, _, S_in, spec, _ = _tau_instance(0, "near")
+    with pytest.raises(NotImplementedError):
+        Selector().choose(S_in, spec, [], None)
+    with pytest.raises(NotImplementedError):
+        verify_refine(S_in, net, spec, Selector(), **CPU_CONFIG)
+
+
+def _selector_case():
+    """A star over 4 predicate variables (2 inputs a0, a1; the fresh variables
+    a2, a3 of two relaxed neurons A and B whose pre-activations read a0 and
+    a1), outputs y = (a0 + a2, a1 + 4 a3), and the witness
+    alpha = (-1, -1, 1/2, 1/4). By hand: eps_A = 1/2 - max(0, -1) = 1/2,
+    eps_B = 1/4. Row 0 of G (y0) gives influences (1, 0) and scores
+    (1/2, 0); row 1 (y1) gives influences (0, 4) and scores (0, 1)."""
+    from n2v.refine import NeuronKey, NeuronMeta
+
+    V = np.array([[0.0, 1.0, 0.0, 1.0, 0.0],
+                  [0.0, 0.0, 1.0, 0.0, 4.0]])
+    S = Star(V, np.zeros((1, 4)), np.zeros((1, 1)),
+             np.array([[-1.0], [-1.0], [0.0], [0.0]]),
+             np.array([[1.0], [1.0], [1.0], [1.0]]))
+    meta = [NeuronMeta(NeuronKey(0, 0), 2, 0.0, np.array([1.0, 0.0]), -1.0, 1.0),
+            NeuronMeta(NeuronKey(0, 1), 3, 0.0, np.array([0.0, 1.0]), -1.0, 1.0)]
+    spec = LinearSpec(np.eye(2), np.zeros(2))
+    alpha = np.array([-1.0, -1.0, 0.5, 0.25])
+    return S, meta, spec, alpha
+
+
+@pytest.mark.parametrize("binding_row,expected", [(0, 0), (1, 1)])
+def test_faithful_selector_takes_the_largest_score_on_the_binding_row(
+        binding_row, expected):
+    """``FaithfulSelector`` splits the relaxed neuron with the largest
+    ``eps * |G[binding_row] . V_out[:, pred_col]|`` (scores by hand in
+    ``_selector_case``): neuron A on row 0, neuron B on row 1. With no
+    relaxed neuron it returns None.
+
+    Catches the smallest score taken instead of the largest, and the
+    direction read from row 0 whatever the witness's binding row."""
+    from n2v.refine import NeuronKey, Witness
+
+    S, meta, spec, alpha = _selector_case()
+    w = Witness(alpha=alpha, t=-1.0, binding_row=binding_row, mode="faithful")
+    assert FaithfulSelector().choose(S, spec, meta, w) == NeuronKey(0, expected)
+    assert FaithfulSelector().choose(S, spec, [], w) is None
+
+
+def test_layer_order_selector_takes_the_shallowest_layer_first():
+    """``LayerOrderSelector`` splits the relaxed neuron of the shallowest
+    layer, ties broken by the lowest neuron index, whatever the order of the
+    metadata: (0, 1) out of (1, 0), (0, 2), (2, 0), (0, 1). With no relaxed
+    neuron it returns None.
+
+    Catches a sort key read as (neuron, layer), which picks (1, 0)."""
+    from n2v.refine import NeuronKey, NeuronMeta
+
+    keys = [(1, 0), (0, 2), (2, 0), (0, 1)]
+    meta = [NeuronMeta(NeuronKey(l, n), i, 0.0, np.zeros(1), -1.0, 1.0)
+            for i, (l, n) in enumerate(keys)]
+    sel = LayerOrderSelector()
+    assert sel.choose(None, None, meta, None) == NeuronKey(0, 1)
+    assert sel.choose(None, None, [], None) is None
+
+
+def test_linear_spec_margins_and_closed_unsafe_region():
+    """``LinearSpec`` with G = [[1, -2, 0], [0, 1, 1]], g = (1, 4), against
+    margins worked out by hand (all values are exact in float64):
+
+    * y = (3, 1, 5/2): margins (0, -1/2), in the closed region (a row exactly
+      on its boundary); the same as a column (3, 1) and a row (1, 3) array;
+    * y = (0, 0, 5): margins (-1, 1), outside (one row holds, not both);
+    * y = (13/4, 1, 5/2): margins (1/4, -1/2), outside at tol = 0, inside
+      for tol = 1/4 and tol = 1/2 (``tol`` widens the region);
+    * a one-dimensional G is one row, a column g is flattened, and a row
+      count mismatch raises ``ValueError``.
+
+    Catches the sign of the margins reversed, a strict comparison at the
+    boundary, ``any`` in place of ``all`` over the rows, an ignored ``tol``,
+    and a column ``y`` or ``g`` broadcast into a matrix of cross-row
+    differences."""
+    G, g = [[1.0, -2.0, 0.0], [0.0, 1.0, 1.0]], [1.0, 4.0]
+    for spec in (LinearSpec(G, g), LinearSpec(np.array(G), np.array([[1.0], [4.0]]))):
+        y = np.array([3.0, 1.0, 2.5])
+        for shaped in (y, y.reshape(3, 1), y.reshape(1, 3)):
+            m = spec.margins(shaped)
+            assert m.shape == (2,)
+            assert m.tolist() == [0.0, -0.5]
+            assert spec.is_unsafe(shaped) is True
+        assert spec.margins(np.array([0.0, 0.0, 5.0])).tolist() == [-1.0, 1.0]
+        assert spec.is_unsafe(np.array([0.0, 0.0, 5.0])) is False
+        y3 = np.array([3.25, 1.0, 2.5])
+        assert spec.margins(y3).tolist() == [0.25, -0.5]
+        assert spec.is_unsafe(y3) is False
+        assert spec.is_unsafe(y3, tol=0.25) is True
+        assert spec.is_unsafe(y3, tol=0.5) is True
+        assert spec.is_unsafe(y3.reshape(3, 1), tol=0.5) is True
+    one = LinearSpec([1.0, -2.0, 0.0], 1.0)
+    assert one.G.shape == (1, 3) and one.g.shape == (1,)
+    assert one.margins([3.0, 1.0, 2.5]).tolist() == [0.0]
+    with pytest.raises(ValueError):
+        LinearSpec(G, [1.0, 2.0, 3.0])
+
+
+def test_eval_mode_model_copies_a_partly_training_model():
+    """A model in eval mode whose Dropout alone was left in training mode is
+    still copied and switched to eval mode (the counterexample checks must
+    never run a training-mode submodule), and the caller's modules keep their
+    modes.
+
+    Catches a training test that fires only when every module is in training
+    mode, and a switch applied to the caller's model."""
+    m = nn.Sequential(nn.Linear(2, 4), nn.ReLU(), nn.Dropout(0.5),
+                      nn.Linear(4, 1)).double()
+    m.eval()
+    m[2].train()
+    e = _eval_mode_model(m)
+    assert e is not m
+    assert not any(mod.training for mod in e.modules())
+    assert [mod.training for mod in m] == [False, False, True, False]
+
+
+@pytest.mark.parametrize("incremental,warm_starts,gpu_iters,resume", [
+    (False, False, 7, 3), (True, True, 1, 1), (True, False, None, None)])
+def test_reach_options_reach_the_root_and_the_split(incremental, warm_starts,
+                                                    gpu_iters, resume,
+                                                    monkeypatch):
+    """``gpu_iters`` goes to the root reach as given and to every split as
+    ``max(1, gpu_iters // 2)`` (None stays None); ``incremental`` and
+    ``warm_starts`` go to every split as given. The near instance needs
+    splits.
+
+    Catches an option dropped on its way (the split then runs its own
+    default: a from-scratch or warm-started child the caller turned off, a
+    root budget the caller did not ask for)."""
+    import n2v.refine.bab as bab
+
+    roots, splits = [], []
+    real_reach, real_split = bab.relaxed_reach, bab.split
+
+    def reach(*args, **kwargs):
+        roots.append(kwargs.get("gpu_iters", "missing"))
+        return real_reach(*args, **kwargs)
+
+    def split(*args, **kwargs):
+        splits.append((kwargs.get("incremental", "missing"),
+                       kwargs.get("warm_starts", "missing"),
+                       kwargs.get("gpu_iters", "missing")))
+        return real_split(*args, **kwargs)
+
+    monkeypatch.setattr(bab, "relaxed_reach", reach)
+    monkeypatch.setattr(bab, "split", split)
+    net, _, _, S_in, spec, _ = _tau_instance(0, "near")
+    res = verify_refine(S_in, net, spec, FaithfulSelector(), **CPU_CONFIG,
+                        incremental=incremental, warm_starts=warm_starts,
+                        gpu_iters=gpu_iters)
+    assert res.status is Status.UNSAT
+    assert roots == [gpu_iters]
+    assert splits and set(splits) == {(incremental, warm_starts, resume)}
+
+
+def _exact_root_net():
+    """y = relu(x + 2) on [-1, 1]^2: both pre-activations lie in [1, 3], so
+    the root star is exact (no relaxed neuron)."""
+    net = nn.Sequential(nn.Linear(2, 2), nn.ReLU(), nn.Linear(2, 2)).double()
+    with torch.no_grad():
+        net[0].weight.copy_(torch.eye(2, dtype=torch.float64))
+        net[0].bias.fill_(2.0)
+        net[2].weight.copy_(torch.eye(2, dtype=torch.float64))
+        net[2].bias.zero_()
+    return net
+
+
+_LEAF_MODES = [("exact", "exact"), ("dual_gpu", "exact"),
+               ("exact", "dual_gpu"), ("dual_gpu", "dual_gpu")]
+
+
+@pytest.mark.parametrize("prune_mode,witness_mode", _LEAF_MODES,
+                         ids=["-".join(m) for m in _LEAF_MODES])
+def test_a_feasible_exact_leaf_without_a_real_counterexample_is_unknown(
+        prune_mode, witness_mode, monkeypatch):
+    """An exact root star that reaches the unsafe region, with the
+    counterexample check patched to always fail (as when the LP point rounds
+    to an output just outside the region): the leaf is feasible but not
+    decided, and the answer must be UNKNOWN, in every mode family (the exact
+    path, and the backstop of the approximate ones).
+
+    Catches a feasible exact leaf dropped as if it were proved safe (false
+    UNSAT)."""
+    _gpu_engine_on_cpu_torch(monkeypatch)
+    monkeypatch.setattr("n2v.refine.bab.is_true_counterexample",
+                        lambda *a, **k: (False, None, None))
+    net = _exact_root_net()
+    _, _, S_in = _box()
+    res = verify_refine(S_in, net, LinearSpec([[1.0, 0.0]], [2.0]),
+                        FaithfulSelector(), bound_mode="box",
+                        prune_mode=prune_mode, witness_mode=witness_mode,
+                        frontier_width=1, gpu_iters=50)
+    assert res.status is Status.UNKNOWN
+
+
+def test_exact_leaf_backstop_witness_lp_failure_is_unknown(monkeypatch):
+    """Under the GPU prune and witness the exact-leaf backstop solves the
+    exact witness LP; when that LP fails (``LPFailure``) on an exact root that
+    reaches the unsafe region, the leaf stays undecided: UNKNOWN, not UNSAT.
+
+    Catches a failed backstop LP read as an empty leaf (false UNSAT)."""
+    _gpu_engine_on_cpu_torch(monkeypatch)
+    calls = []
+
+    def _fail(*args, **kwargs):
+        calls.append(1)
+        raise LPFailure("simulated")
+
+    monkeypatch.setattr("n2v.refine.bab.violation_lp", _fail)
+    monkeypatch.setattr("n2v.refine.bab.certified_prune_wave",
+                        lambda stars, *a, **k: [False] * len(stars))
+    monkeypatch.setattr("n2v.refine.bab.is_true_counterexample",
+                        lambda *a, **k: (False, None, None))
+    net = _exact_root_net()
+    _, _, S_in = _box()
+    res = verify_refine(S_in, net, LinearSpec([[1.0, 0.0]], [2.0]),
+                        FaithfulSelector(), **GPU_CONFIG, gpu_iters=50)
+    assert calls, "the backstop's witness LP was not reached"
+    assert res.status is Status.UNKNOWN
+
+
+@pytest.mark.parametrize("prune_mode,witness_mode",
+                         [("dual_gpu", "exact"), ("dual_gpu", "dual_gpu")],
+                         ids=["dual_gpu-exact", "dual_gpu-dual_gpu"])
+def test_exact_leaf_backstop_decides_a_jointly_disjoint_conjunction(
+        prune_mode, witness_mode, monkeypatch):
+    """y = (x, 1 - x) on [0, 1] (no ReLU, so the root is an exact star) and
+    the unsafe region y0 <= 2/5 and y1 <= 2/5: each row is reached, both
+    together never (y0 + y1 = 1). The row-wise GPU prune cannot prove this;
+    the exact-leaf backstop must, so the answer is UNSAT under the GPU prune
+    with either witness (the verdict does not depend on the modes; an exact
+    prune decides it at once and never reaches the backstop).
+
+    Catches a backstop that runs only when both prune and witness are
+    approximate, and a backstop that skips its exact disjointness check (the
+    leaf is then left inconclusive: UNKNOWN)."""
+    _gpu_engine_on_cpu_torch(monkeypatch)
+    net = nn.Sequential(nn.Linear(1, 2)).double()
+    with torch.no_grad():
+        net[0].weight.copy_(torch.tensor([[1.0], [-1.0]], dtype=torch.float64))
+        net[0].bias.copy_(torch.tensor([0.0, 1.0], dtype=torch.float64))
+    S = Star.from_bounds(np.array([0.0]), np.array([1.0]))
+    spec = LinearSpec(np.eye(2), np.array([0.4, 0.4]))
+    res = verify_refine(S, net, spec, FaithfulSelector(), bound_mode="box",
+                        prune_mode=prune_mode, witness_mode=witness_mode,
+                        frontier_width=1, gpu_iters=50)
+    assert res.status is Status.UNSAT
+
+
+def test_exact_leaf_backstop_rewitnesses_with_the_exact_lp(monkeypatch):
+    """The identity model on the box [-1, 1]^2 cut by x0 + x1 <= 1/2 (an
+    exact star with a binding row), and an unsafe sliver next to the cut:
+    y0 + y1 >= 2/5 and |y0 - y1| <= 1/5 (x = (0.22, 0.22) is in it). The
+    approximate wave witness lands outside the cut by its solver residual,
+    so it is not an input member; the backstop's exact LP point is, and the
+    documented answer is SAT with a witness in the cut box.
+
+    Catches a backstop that re-checks the stale approximate witness instead
+    of the exact LP's point (UNKNOWN)."""
+    _gpu_engine_on_cpu_torch(monkeypatch)
+    net = nn.Sequential(nn.Linear(2, 2)).double()
+    with torch.no_grad():
+        net[0].weight.copy_(torch.eye(2, dtype=torch.float64))
+        net[0].bias.zero_()
+    V = np.hstack([np.zeros((2, 1)), np.eye(2)])
+    S = Star(V, np.array([[1.0, 1.0]]), np.array([[0.5]]),
+             np.full((2, 1), -1.0), np.full((2, 1), 1.0))
+    spec = LinearSpec(np.array([[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0]]),
+                      np.array([-0.4, 0.2, 0.2]))
+    x_ce = np.array([0.22, 0.22])
+    assert x_ce.sum() <= 0.5 and np.all(spec.G @ x_ce - spec.g <= 0), \
+        "test setup"
+    res = verify_refine(S, net, spec, FaithfulSelector(), bound_mode="box",
+                        prune_mode="exact", witness_mode="dual_gpu",
+                        frontier_width=1)
+    assert res.status is Status.SAT
+    x = np.asarray(res.counterexample_x, dtype=np.float64).flatten()
+    assert x[0] + x[1] <= 0.5 and np.all(np.abs(x) <= 1.0), x
+    assert np.all(spec.G @ x - spec.g <= 0.0), x
+
+
+# --------------------------------------------------------------------------- #
+# The plain-callable route, the default                                       #
+# selector and the hand-off of lp_solver                                       #
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("arm", ["inside", "below"])
+def test_a_plain_callable_model_is_answered(arm):
+    """A model that is a plain callable (not an ``nn.Module``) with
+    ``layers=`` given is the documented route for a custom model: it is not
+    inspected for its dtype nor switched to eval mode, and it is answered
+    like the module it wraps (truth from the exact-reach oracle: SAT with an
+    honest witness inside the range, UNSAT below it).
+
+    Catches a dtype check or an eval-mode switch that reads module attributes
+    of every model (an ``AttributeError`` where an answer is due)."""
+    net, lb, ub, S_in, spec, truth = _tau_instance(0, arm)
+    res = verify_refine(S_in, lambda x: net(x), spec, FaithfulSelector(),
+                        layers=extract_layers(net), **CPU_CONFIG)
+    assert res.status is truth, res
+    _assert_honest_ce(res, net, spec, lb, ub)
+
+
+def test_the_default_selector_is_faithful(monkeypatch):
+    """With ``selector`` left out every split is guided by a
+    ``FaithfulSelector`` (the documented default); the near instance needs
+    splits. Verdicts are the same under every selector, so only the selector
+    handed to the split shows the default.
+
+    Catches another strategy taken as the default."""
+    import n2v.refine.bab as bab
+
+    seen = []
+    real_split = bab.split
+
+    def split(star, input_star, layers, spec, selector, *args, **kwargs):
+        seen.append(type(selector))
+        return real_split(star, input_star, layers, spec, selector, *args,
+                          **kwargs)
+
+    monkeypatch.setattr(bab, "split", split)
+    net, _, _, S_in, spec, truth = _tau_instance(0, "near")
+    res = verify_refine(S_in, net, spec, **CPU_CONFIG)
+    assert res.status is truth, res
+    assert seen and set(seen) == {FaithfulSelector}, seen
+
+
+def test_lp_solver_reaches_every_lp_of_the_search(monkeypatch):
+    """An explicit ``lp_solver`` (here the name 'linprog', not the default)
+    reaches every place that solves an LP with it: the finitizer of the input
+    box, the exact witness LP and the plain split under the CPU
+    configuration; the wave witness and the contracted split under the GPU
+    configuration with ``contract_inputs`` (engine on CPU torch). Both runs
+    still match the oracle.
+
+    Catches the solver dropped on its way to one of them (that LP then runs
+    the global default the caller did not ask for)."""
+    import n2v.refine.bab as bab
+
+    _gpu_engine_on_cpu_torch(monkeypatch)
+    seen = {}
+
+    def spy(name):
+        real = getattr(bab, name)
+
+        def wrapped(*args, **kwargs):
+            seen.setdefault(name, []).append(kwargs.get("lp_solver", "missing"))
+            return real(*args, **kwargs)
+        monkeypatch.setattr(bab, name, wrapped)
+
+    for name in ("ensure_finite_predicate_box", "violation_lp", "split",
+                 "violation_witness_wave", "split_wave"):
+        spy(name)
+    net, lb, ub, S_in, spec, truth = _tau_instance(0, "near")
+    res = verify_refine(S_in, net, spec, FaithfulSelector(), lp_solver="linprog",
+                        **CPU_CONFIG)
+    assert res.status is truth, res
+    res = verify_refine(S_in, net, spec, LayerOrderSelector(),
+                        lp_solver="linprog", contract_inputs=True,
+                        gpu_iters=50, **GPU_CONFIG)
+    assert res.status is truth, res
+    for name in ("ensure_finite_predicate_box", "violation_lp", "split",
+                 "violation_witness_wave", "split_wave"):
+        assert seen.get(name), f"test setup: {name} was not reached"
+        assert set(seen[name]) == {LPSolver.LINPROG}, (name, seen[name])

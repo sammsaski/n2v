@@ -628,4 +628,20 @@ class TestZono:
         with pytest.raises(ValueError, match="Unknown precision"):
             zono.change_vars_precision('float16')
 
+    def test_repr_reports_dimension_and_generator_count(self):
+        """``repr`` of a Zono with more generators than entries, of one with
+        no generator, and of a non-square ImageZono with two channels and
+        fewer generators than entries names the number of entries, the
+        number of generators and the image's height, width and channels.
+        Catches the generator count read from the wrong axis and height and
+        width exchanged."""
+        from n2v.sets.image_zono import ImageZono
+        text = repr(Zono(np.zeros((2, 1)), np.ones((2, 5))))
+        assert "dim=2" in text and "n_generators=5" in text, text
+        text = repr(Zono(np.zeros((3, 1)), np.zeros((3, 0))))
+        assert "dim=3" in text and "n_generators=0" in text, text
+        text = repr(ImageZono(np.zeros((30, 1)), np.eye(30)[:, :7], 3, 5, 2))
+        for part in ("height=3", "width=5", "channels=2", "n_generators=7"):
+            assert part in text, text
+
 
