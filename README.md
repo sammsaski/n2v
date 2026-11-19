@@ -170,8 +170,6 @@ The methods implemented in n2v are based upon or used in the following papers:
 
 ### Cite
 
-TBD.
-
 <!-- ```bibtex
 @inproceedings{nnv2_cav2023,
     author = {Lopez, Diego Manzanas and Choi, Sung Woo
