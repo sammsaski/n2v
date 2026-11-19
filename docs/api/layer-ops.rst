@@ -70,3 +70,25 @@ Pooling Layers
 .. automodule:: n2v.nn.layer_ops.global_avgpool_reach
    :members:
    :undoc-members: False
+
+Graph Layers
+------------
+
+Used by :class:`~n2v.nn.GraphNeuralNetwork`; operate on
+:class:`~n2v.sets.GraphStar` sets.
+
+.. automodule:: n2v.nn.layer_ops.gcn_reach
+   :members:
+   :undoc-members: False
+
+.. automodule:: n2v.nn.layer_ops.sage_reach
+   :members:
+   :undoc-members: False
+
+.. automodule:: n2v.nn.layer_ops.gine_reach
+   :members:
+   :undoc-members: False
+
+.. automodule:: n2v.nn.layer_ops.graph_pool_reach
+   :members:
+   :undoc-members: False

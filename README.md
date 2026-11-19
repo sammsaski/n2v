@@ -96,12 +96,14 @@ for star in output_stars:
 - **ImageStar / ImageZono**: Image-aware variants for CNNs
 - **Hexatope / Octatope**: DCS/UTVPI-constrained zonotopes with strongly polynomial optimization
 - **ProbabilisticBox**: Box with conformal inference coverage guarantees
+- **GraphStar**: Star over a graph's node-feature matrix, for GNN verification
 
 ### Layer Support (20+ types)
 
 - **Linear**: Linear, Conv1D, Conv2D, BatchNorm, AvgPool2D, GlobalAvgPool, Flatten, Pad, Upsample, Transpose, Reshape, Reduce, Concat, Slice, Split
 - **Nonlinear**: ReLU (exact/approx), LeakyReLU (exact/approx), Sigmoid (approx), Tanh (approx), Sign (exact/approx), MaxPool2D (exact/approx)
 - **ONNX**: Add, Sub, Mul, Div, MatMul, Neg, Cast, and more via graph execution
+- **Graph (GNN)**: GCNConv and SAGEConv (exact/approx), GINEConv (approx), sum/mean graph pooling; PyTorch Geometric models via `GraphNeuralNetwork.from_pyg` (see [examples/GNN](examples/GNN/))
 
 See [docs/development_status.md](docs/development_status.md) for the full layer support matrix.
 

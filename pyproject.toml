@@ -46,6 +46,10 @@ dev = [
 highs = [
     "highspy>=1.5.0",
 ]
+gnn = [
+    # GraphNeuralNetwork.from_pyg (n2v/utils/gnn_pyg.py); lazy-imported
+    "torch_geometric>=2.3.0",
+]
 docs = [
     "sphinx>=7.0",
     "furo>=2024.0",

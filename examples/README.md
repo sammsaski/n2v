@@ -26,6 +26,7 @@ python verify_fc.py
 | [VNN-COMP/](VNN-COMP/) | VNN-COMP 2025 infrastructure (28 benchmarks) |
 | [ProbVer/](ProbVer/) | Probabilistic verification via conformal inference |
 | [FlowConformal/](FlowConformal/) | Flow-matching probabilistic reachability (paper experiments, benchmarks, baselines) |
+| [GNN/](GNN/) | Graph neural network verification (GCN, SAGE, GINE; PyG and .mat models) |
 | [Octatope/](Octatope/) | Hexatope/Octatope set comparisons |
 | [CompareNNV/](CompareNNV/) | Comparison with MATLAB NNV |
 | [CompareReachability/](CompareReachability/) | Reachability method comparisons |
